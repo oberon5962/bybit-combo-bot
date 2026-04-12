@@ -1,0 +1,256 @@
+// ============================================================
+// Bybit Combo Bot — Exchange Module (Bybit via ccxt)
+// ============================================================
+
+import ccxt, { Exchange, Order } from 'ccxt';
+import {
+  BotConfig, OHLCV, Ticker, Balance, BotOrder, Logger
+} from './types';
+
+export class BybitExchange {
+  private exchange: Exchange;
+  private log: Logger;
+
+  constructor(config: BotConfig, log: Logger) {
+    this.log = log;
+
+    this.exchange = new ccxt.bybit({
+      apiKey: config.apiKey,
+      secret: config.apiSecret,
+      enableRateLimit: true,
+      options: {
+        defaultType: 'spot',
+        adjustForTimeDifference: true,
+      },
+    });
+
+    if (config.testnet) {
+      this.exchange.setSandboxMode(true);
+      this.log.info('Exchange initialized in TESTNET mode');
+    } else {
+      this.log.info('Exchange initialized in LIVE mode — be careful!');
+    }
+  }
+
+  // ----------------------------------------------------------
+  // Market Data
+  // ----------------------------------------------------------
+
+  async fetchTicker(symbol: string): Promise<Ticker> {
+    const t = await this.exchange.fetchTicker(symbol);
+    return {
+      symbol,
+      last: t.last ?? 0,
+      bid: t.bid ?? 0,
+      ask: t.ask ?? 0,
+      volume24h: t.quoteVolume ?? 0,
+    };
+  }
+
+  async fetchOHLCV(
+    symbol: string,
+    timeframe: string = '5m',
+    limit: number = 100,
+  ): Promise<OHLCV[]> {
+    const raw = await this.exchange.fetchOHLCV(symbol, timeframe, undefined, limit);
+    return raw.map(([timestamp, open, high, low, close, volume]) => ({
+      timestamp: timestamp as number,
+      open: open as number,
+      high: high as number,
+      low: low as number,
+      close: close as number,
+      volume: volume as number,
+    }));
+  }
+
+  // ----------------------------------------------------------
+  // Account
+  // ----------------------------------------------------------
+
+  async fetchBalance(currency: string = 'USDT'): Promise<Balance> {
+    const bal = await this.exchange.fetchBalance();
+    const entry = bal[currency] ?? { free: 0, used: 0, total: 0 };
+    return {
+      free: entry.free ?? 0,
+      used: entry.used ?? 0,
+      total: entry.total ?? 0,
+    };
+  }
+
+  async fetchAllBalances(): Promise<Record<string, Balance>> {
+    const bal = await this.exchange.fetchBalance();
+    return this.parseBalances(bal);
+  }
+
+  // Fetch both USDT balance and all balances in a single API call
+  async fetchBalanceAndAll(currency: string = 'USDT'): Promise<{ single: Balance; all: Record<string, Balance> }> {
+    const bal = await this.exchange.fetchBalance();
+    const entry = bal[currency] ?? { free: 0, used: 0, total: 0 };
+    return {
+      single: {
+        free: entry.free ?? 0,
+        used: entry.used ?? 0,
+        total: entry.total ?? 0,
+      },
+      all: this.parseBalances(bal),
+    };
+  }
+
+  private parseBalances(bal: Record<string, any>): Record<string, Balance> {
+    const result: Record<string, Balance> = {};
+    for (const [currency, entry] of Object.entries(bal)) {
+      if (typeof entry === 'object' && entry !== null && 'free' in entry) {
+        const b = entry as { free?: number; used?: number; total?: number };
+        if ((b.total ?? 0) > 0) {
+          result[currency] = {
+            free: b.free ?? 0,
+            used: b.used ?? 0,
+            total: b.total ?? 0,
+          };
+        }
+      }
+    }
+    return result;
+  }
+
+  // ----------------------------------------------------------
+  // Orders
+  // ----------------------------------------------------------
+
+  async createLimitBuy(
+    symbol: string,
+    amount: number,
+    price: number,
+    strategy: BotOrder['strategy'],
+  ): Promise<BotOrder> {
+    this.log.info(`LIMIT BUY ${symbol}: ${amount} @ ${price}`, { strategy });
+    const order = await this.exchange.createLimitBuyOrder(symbol, amount, price);
+    return this.mapOrder(order, strategy);
+  }
+
+  async createLimitSell(
+    symbol: string,
+    amount: number,
+    price: number,
+    strategy: BotOrder['strategy'],
+  ): Promise<BotOrder> {
+    this.log.info(`LIMIT SELL ${symbol}: ${amount} @ ${price}`, { strategy });
+    const order = await this.exchange.createLimitSellOrder(symbol, amount, price);
+    return this.mapOrder(order, strategy);
+  }
+
+  async createMarketBuy(
+    symbol: string,
+    amount: number,
+    strategy: BotOrder['strategy'],
+  ): Promise<BotOrder> {
+    this.log.info(`MARKET BUY ${symbol}: ${amount}`, { strategy });
+    const order = await this.exchange.createMarketBuyOrder(symbol, amount);
+    return this.mapOrder(order, strategy);
+  }
+
+  async createMarketSell(
+    symbol: string,
+    amount: number,
+    strategy: BotOrder['strategy'],
+  ): Promise<BotOrder> {
+    this.log.info(`MARKET SELL ${symbol}: ${amount}`, { strategy });
+    const order = await this.exchange.createMarketSellOrder(symbol, amount);
+    return this.mapOrder(order, strategy);
+  }
+
+  async cancelOrder(orderId: string, symbol: string): Promise<void> {
+    this.log.info(`CANCEL order ${orderId} on ${symbol}`);
+    await this.exchange.cancelOrder(orderId, symbol);
+  }
+
+  async fetchOpenOrders(symbol: string): Promise<BotOrder[]> {
+    const orders = await this.exchange.fetchOpenOrders(symbol);
+    return orders.map((o) => this.mapOrder(o, 'grid'));
+  }
+
+  // BUG #14: fetch a specific order to check fill status (partial fills)
+  async fetchOrder(orderId: string, symbol: string): Promise<{ filled: number; remaining: number; status: string; price: number }> {
+    try {
+      const order = await this.exchange.fetchOrder(orderId, symbol);
+      return {
+        filled: order.filled ?? 0,
+        remaining: order.remaining ?? 0,
+        status: order.status ?? 'unknown',
+        price: order.average ?? order.price ?? 0,
+      };
+    } catch (err) {
+      // Order may no longer exist (fully filled and purged from exchange history)
+      this.log.debug(`fetchOrder ${orderId} failed (may be purged): ${err}`);
+      return { filled: 0, remaining: 0, status: 'unknown', price: 0 };
+    }
+  }
+
+  async cancelAllOrders(symbol: string): Promise<void> {
+    const open = await this.exchange.fetchOpenOrders(symbol);
+    for (const o of open) {
+      await this.exchange.cancelOrder(o.id, symbol);
+    }
+    this.log.info(`Cancelled all ${open.length} open orders on ${symbol}`);
+  }
+
+  // ----------------------------------------------------------
+  // Helpers
+  // ----------------------------------------------------------
+
+  private mapOrder(order: Order, strategy: BotOrder['strategy']): BotOrder {
+    return {
+      id: order.id,
+      symbol: order.symbol ?? '',
+      side: order.side as 'buy' | 'sell',
+      type: order.type as 'limit' | 'market',
+      price: order.price ?? 0,
+      amount: order.amount ?? 0,
+      status: order.status === 'closed' ? 'filled'
+        : order.status === 'canceled' ? 'cancelled'
+        : 'open',
+      strategy,
+      timestamp: order.timestamp ?? Date.now(),
+    };
+  }
+
+  // ----------------------------------------------------------
+  // Market info — precision for price/amount rounding
+  // ----------------------------------------------------------
+
+  async getMarketPrecision(symbol: string): Promise<{ pricePrecision: number; amountPrecision: number; minAmount: number; minCost: number }> {
+    await this.exchange.loadMarkets();
+    const market = this.exchange.markets[symbol];
+    if (!market) {
+      throw new Error(`Market ${symbol} not found`);
+    }
+
+    // ccxt for Bybit uses TICK_SIZE precision mode:
+    //   market.precision.price  = 0.01   (tick size, NOT decimal places)
+    //   market.precision.amount = 0.000001 (tick size, NOT decimal places)
+    // Our rounding code expects decimal places (e.g. 2, 6), so we convert here.
+    const rawPrice = market.precision?.price ?? 0.01;
+    const rawAmount = market.precision?.amount ?? 0.00001;
+
+    return {
+      pricePrecision: this.tickSizeToDecimalPlaces(rawPrice),
+      amountPrecision: this.tickSizeToDecimalPlaces(rawAmount),
+      minAmount: market.limits?.amount?.min ?? 0,
+      minCost: market.limits?.cost?.min ?? 0,
+    };
+  }
+
+  /**
+   * Convert a tick-size value to the number of decimal places.
+   * E.g. 0.000001 → 6, 0.01 → 2, 0.1 → 1, 1 → 0, 10 → 0.
+   * If the value is already an integer >= 1, it's likely already decimal places — return as-is.
+   */
+  private tickSizeToDecimalPlaces(tickSize: number): number {
+    if (tickSize >= 1) return Math.round(tickSize);  // already decimal places (or step=1 → 0 places)
+    return Math.max(0, Math.round(-Math.log10(tickSize)));
+  }
+
+  getExchange(): Exchange {
+    return this.exchange;
+  }
+}

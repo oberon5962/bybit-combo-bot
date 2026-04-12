@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.env
+.env.*
+bot.log
+errors.log
+bot-state.json
+bot-state.json.tmp

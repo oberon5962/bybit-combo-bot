@@ -1,0 +1,21 @@
+{
+  "name": "bybit-combo-bot",
+  "version": "1.0.0",
+  "description": "Combo trading bot for Bybit: Grid + DCA + Indicators",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts"
+  },
+  "dependencies": {
+    "ccxt": "^4.4.0",
+    "dotenv": "^16.4.0",
+    "winston": "^3.14.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0",
+    "ts-node": "^10.9.0",
+    "@types/node": "^22.0.0"
+  }
+}
