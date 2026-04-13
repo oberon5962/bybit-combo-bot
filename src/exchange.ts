@@ -284,11 +284,20 @@ export class BybitExchange {
       try {
         return await fn();
       } catch (err: any) {
-        const isTransient = err?.constructor?.name === 'RequestTimeout'
+        const isTimeout = err?.constructor?.name === 'RequestTimeout'
+          || (err?.message && /timeout|ETIMEDOUT/i.test(err.message));
+        const isTransient = isTimeout
           || err?.constructor?.name === 'NetworkError'
           || err?.constructor?.name === 'ExchangeNotAvailable'
           || err?.constructor?.name === 'RateLimitExceeded'
-          || (err?.message && /timeout|ETIMEDOUT|ECONNRESET|rate.?limit/i.test(err.message));
+          || (err?.message && /ECONNRESET|rate.?limit/i.test(err.message));
+
+        // NEVER retry order placement on timeout — order may already exist on exchange
+        const isOrderPlacement = /\b(buy|sell)\b/i.test(label);
+        if (isTimeout && isOrderPlacement) {
+          this.log.error(`${label}: TIMEOUT on order placement — NOT retrying (order may exist on exchange). Manual check required.`);
+          throw err;
+        }
 
         if (isTransient && attempt < maxRetries) {
           const delay = 1000 * Math.pow(2, attempt); // 1s, 2s, 4s (exponential)

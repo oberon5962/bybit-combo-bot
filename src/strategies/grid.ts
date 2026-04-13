@@ -21,8 +21,11 @@ export class GridStrategy {
   private lastSkipSummary: Map<string, string> = new Map(); // suppress repeated skip logs
   private lastRebalanceTime: Map<string, number> = new Map(); // cooldown between rebalances
 
+  private maxOpenOrdersPerPair: number;
+
   constructor(config: BotConfig, exchange: BybitExchange, log: Logger, state: StateManager) {
     this.config = config.grid;
+    this.maxOpenOrdersPerPair = config.risk.maxOpenOrdersPerPair;
     this.exchange = exchange;
     this.log = log;
     this.state = state;
@@ -258,12 +261,18 @@ export class GridStrategy {
       this.log.warn(`Failed to fetch balances for grid checks: ${sanitizeError(err)}`);
     }
 
+    // Enforce maxOpenOrdersPerPair
+    const currentOpenOrders = levels.filter(l => l.orderId).length;
+    const maxNewOrders = Math.max(0, this.maxOpenOrdersPerPair - currentOpenOrders);
+    let ordersPlaced = 0;
+
     // Track skip reasons for summary log (generic keys — no volatile values like RSI or balance)
     const skipReasons: Set<string> = new Set();
     const addSkip = (reason: string) => { skipReasons.add(reason); };
 
     for (const level of levels) {
       if (level.orderId || level.filled) continue;
+      if (ordersPlaced >= maxNewOrders) { addSkip('max orders'); break; }
 
       try {
         // Bollinger adaptive: apply multiplier per side
@@ -306,6 +315,7 @@ export class GridStrategy {
           );
           level.orderId = order.id;
           freeUSDT -= orderCost;
+          ordersPlaced++;
         } else if (level.side === 'sell' && level.price > currentPrice) {
           // Check if we have enough free crypto to place this sell
           if (freeCrypto < amount) {
@@ -319,6 +329,7 @@ export class GridStrategy {
           level.orderId = order.id;
           // Subtract placed amount from tracked free balance (for subsequent sell levels)
           freeCrypto -= amount;
+          ordersPlaced++;
         }
       } catch (err) {
         const errStr = String(err);
@@ -544,7 +555,9 @@ export class GridStrategy {
             });
           } catch (err) {
             this.log.error(`Failed to place grid counter-order: ${err}`, { symbol, counterSide, counterPrice });
-            // Reset level to unfilled so it will be retried next tick
+            // Flip level to counter-side so next tick retries counter-order, NOT original side
+            level.side = counterSide;
+            level.price = counterPrice;
             level.orderId = undefined;
             level.filled = false;
           }
@@ -571,6 +584,7 @@ export class GridStrategy {
     // Orphan position check: free crypto not locked in sell orders = uncovered position
     // Use actual free balance instead of estimating sell order amounts (which can be wrong
     // due to Bollinger multiplier, fee adjustments, minAmount bumps, etc.)
+    // Cap: don't exceed maxOpenOrdersPerPair total
     const position = this.state.getPosition(symbol);
     if (position.amount > 0) {
       const precision = await this.getPrecision(symbol);
@@ -581,16 +595,19 @@ export class GridStrategy {
         // Free balance = crypto not in any sell order = uncovered
         this.log.debug(`Orphan check ${symbol}: pos=${position.amount.toFixed(4)}, free ${base}=${freeBal.toFixed(4)}`);
 
-        if (freeBal > 0 && freeBal * ticker.last >= precision.minCost) {
+        const currentOrderCount = levels.filter(l => l.orderId).length;
+        if (freeBal > 0 && freeBal * ticker.last >= precision.minCost && currentOrderCount < this.maxOpenOrdersPerPair) {
           // Place sells in chunks of orderSize at increasing price levels
+          const orphanOrderBudget = this.maxOpenOrdersPerPair - currentOrderCount;
           const orderAmount = allocationUSDT * this.config.orderSizePercent / 100 / ticker.last;
           if (orderAmount <= 0) {
             this.log.warn(`Orphan-sell skipped for ${symbol}: orderAmount <= 0`);
           } else {
           let remaining = freeBal;
           let priceStep = 1;
+          let orphanPlaced = 0;
 
-          while (remaining > 0) {
+          while (remaining > 0 && orphanPlaced < orphanOrderBudget) {
             const entryBased = position.avgEntryPrice * (1 + this.config.gridSpacingPercent * priceStep / 100);
             const priceBased = ticker.last * (1 + this.config.gridSpacingPercent * priceStep / 100);
             const sellPrice = this.roundPriceForMarket(
@@ -617,6 +634,7 @@ export class GridStrategy {
               `Grid orphan-sell ${symbol} @ ${sellPrice}`,
             );
             levels.push({ price: sellPrice, side: 'sell', orderId: order.id, filled: false });
+            orphanPlaced++;
             this.log.info(`Grid orphan-sell placed for ${symbol}: ${sellAmount} @ ${sellPrice} (uncovered position)`);
             remaining -= sellAmount;
             priceStep++;

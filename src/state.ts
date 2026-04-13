@@ -131,6 +131,12 @@ export class StateManager {
 
   private load(): BotState {
     try {
+      // Windows crash recovery: if main file is missing but .tmp exists, use it
+      const tmpFile = STATE_FILE + '.tmp';
+      if (!fs.existsSync(STATE_FILE) && fs.existsSync(tmpFile)) {
+        this.log.warn(`State file missing but .tmp found — recovering from ${tmpFile}`);
+        fs.renameSync(tmpFile, STATE_FILE);
+      }
       if (fs.existsSync(STATE_FILE)) {
         const raw = fs.readFileSync(STATE_FILE, 'utf-8');
         const parsed = JSON.parse(raw);

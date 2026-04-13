@@ -152,8 +152,8 @@ export class ComboManager {
             this.state.peakCapital = Math.max(this.state.peakCapital, totalPortfolioUSDT);
             this.log.info(`DEPOSIT DETECTED: +${change.toFixed(2)} USDT → new startingCapital: ${this.state.startingCapital.toFixed(2)}`);
           } else {
-            // Withdrawal — adjust startingCapital and peakCapital down
-            this.state.startingCapital += change; // change is negative
+            // Withdrawal — adjust startingCapital and peakCapital down, clamp to minimum 1
+            this.state.startingCapital = Math.max(1, this.state.startingCapital + change); // change is negative
             this.state.peakCapital = Math.max(totalPortfolioUSDT, this.state.startingCapital);
             this.log.info(`WITHDRAWAL DETECTED: ${change.toFixed(2)} USDT → new startingCapital: ${this.state.startingCapital.toFixed(2)}`);
           }
@@ -832,7 +832,7 @@ export class ComboManager {
 
     for (const pair of this.config.pairs) {
       const ind = this.lastIndicatorsPerPair.get(pair.symbol);
-      if (ind && ind.emaCrossover === 'bearish') {
+      if (ind && ind.emaFast < ind.emaSlow) {
         bearishCount++;
       }
     }
@@ -910,6 +910,11 @@ export class ComboManager {
       }
     } catch (err) {
       this.log.error(`BTC WATCHDOG: failed to fetch BTC candles: ${sanitizeError(err)}`);
+      // Reset to safe state — don't keep stale btcPaused indefinitely on API errors
+      if (this.btcPaused) {
+        this.btcPaused = false;
+        this.log.warn('BTC WATCHDOG: API error — releasing pause to avoid indefinite block');
+      }
     }
   }
 
