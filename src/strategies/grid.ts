@@ -36,6 +36,64 @@ export class GridStrategy {
     return this.precisionCache.get(symbol)!;
   }
 
+  // Bollinger Bands adaptive: determine buy/sell level shift and order size multipliers
+  private getBollingerAdaptive(symbol: string): {
+    buyLevelShift: number;    // positive = more buy levels (e.g. +3 means 13 buy / 7 sell)
+    buyMultiplier: number;    // orderSize multiplier for buys
+    sellMultiplier: number;   // orderSize multiplier for sells
+    reason: string;
+  } {
+    const neutral = { buyLevelShift: 0, buyMultiplier: 1, sellMultiplier: 1, reason: 'neutral' };
+    if (!this.config.useBollingerAdaptive) return neutral;
+
+    const ind = this.lastIndicators.get(symbol);
+    if (!ind) return neutral;
+
+    const shift = this.config.bollingerShiftLevels;
+
+    // Price near lower Bollinger band → aggressive buy
+    if (ind.pricePosition === 'below_lower') {
+      return {
+        buyLevelShift: shift,
+        buyMultiplier: this.config.bollingerBuyMultiplier,
+        sellMultiplier: 1,
+        reason: 'BB lower → aggressive buy',
+      };
+    }
+
+    // Price near upper Bollinger band → check EMA before aggressive sell
+    if (ind.pricePosition === 'above_upper') {
+      if (ind.emaCrossover === 'bullish' || (ind.emaFast > ind.emaSlow)) {
+        // EMA bullish — strong uptrend, don't sell aggressively
+        return {
+          buyLevelShift: 0,
+          buyMultiplier: 1,
+          sellMultiplier: 1,
+          reason: 'BB upper + EMA bullish → hold (no aggressive sell)',
+        };
+      }
+      // EMA bearish or neutral — sell aggressively
+      return {
+        buyLevelShift: -shift,
+        buyMultiplier: 1,
+        sellMultiplier: this.config.bollingerSellMultiplier,
+        reason: 'BB upper + EMA not bullish → aggressive sell',
+      };
+    }
+
+    // Price below middle — slightly more buy-biased
+    if (ind.pricePosition === 'below_middle') {
+      return {
+        buyLevelShift: Math.floor(shift / 2),
+        buyMultiplier: 1,
+        sellMultiplier: 1,
+        reason: 'BB below middle → slight buy bias',
+      };
+    }
+
+    return neutral;
+  }
+
   // RSI + EMA filter: should we allow grid buy orders?
   isBuyAllowed(symbol: string): { allowed: boolean; reason: string } {
     const ind = this.lastIndicators.get(symbol);
@@ -47,8 +105,9 @@ export class GridStrategy {
       return { allowed: false, reason: 'overbought' };
     }
 
-    // Skip buy if bearish EMA crossover
-    if (this.config.useEmaFilter && ind.emaCrossover === 'bearish') {
+    // Skip buy if EMA is bearish (fast < slow = downtrend)
+    // Note: emaCrossover only fires on the crossing candle; we check persistent state instead
+    if (this.config.useEmaFilter && ind.emaFast < ind.emaSlow) {
       return { allowed: false, reason: 'EMA bearish' };
     }
 
@@ -110,8 +169,18 @@ export class GridStrategy {
 
     const precision = await this.getPrecision(symbol);
     const { gridLevels, gridSpacingPercent } = this.config;
-    const buyLevels = Math.floor(gridLevels / 2);
-    const sellLevels = Math.ceil(gridLevels / 2);
+
+    // Bollinger adaptive: shift buy/sell ratio
+    const bbAdaptive = this.getBollingerAdaptive(symbol);
+    const baseBuy = Math.floor(gridLevels / 2);
+    const baseSell = Math.ceil(gridLevels / 2);
+    const buyLevels = Math.max(1, Math.min(gridLevels - 1, baseBuy + bbAdaptive.buyLevelShift));
+    const sellLevels = gridLevels - buyLevels;
+
+    if (bbAdaptive.buyLevelShift !== 0) {
+      this.log.info(`Grid Bollinger adaptive for ${symbol}: ${buyLevels}B/${sellLevels}S (${bbAdaptive.reason})`);
+    }
+
     const spacing = currentPrice * (gridSpacingPercent / 100);
     const levels: GridLevelState[] = [];
     const usedPrices = new Set<number>();
@@ -161,7 +230,10 @@ export class GridStrategy {
   ): Promise<void> {
     const precision = await this.getPrecision(symbol);
     const levels = this.state.getGridLevels(symbol);
-    const orderBudget = allocationUSDT * (this.config.orderSizePercent / 100);
+    const baseOrderBudget = allocationUSDT * (this.config.orderSizePercent / 100);
+
+    // Bollinger adaptive: adjust order sizes
+    const bbAdaptive = this.getBollingerAdaptive(symbol);
 
     // Pre-fetch balances for buy/sell-side checks
     const base = symbol.split('/')[0]; // "BTC" from "BTC/USDT"
@@ -183,6 +255,9 @@ export class GridStrategy {
       if (level.orderId || level.filled) continue;
 
       try {
+        // Bollinger adaptive: apply multiplier per side
+        const sideMultiplier = level.side === 'buy' ? bbAdaptive.buyMultiplier : bbAdaptive.sellMultiplier;
+        const orderBudget = baseOrderBudget * sideMultiplier;
         let amount = this.roundAmountForMarket(orderBudget / level.price, precision.amountPrecision);
 
         // Bump up to exchange minimum if too small, but don't exceed budget
@@ -299,15 +374,18 @@ export class GridStrategy {
 
           // BUG #14 fix: check actual fill status — could be partial fill + cancel
           const orderInfo = await this.exchange.fetchOrder(level.orderId, symbol);
-          const expectedAmount = this.roundAmountForMarket(
-            (allocationUSDT * this.config.orderSizePercent / 100) / filledPrice,
-            precision.amountPrecision,
-          );
 
-          // Determine actual filled amount (only fallback to expected if order is confirmed closed)
-          const filledAmount = orderInfo.filled > 0
-            ? orderInfo.filled
-            : (orderInfo.status === 'closed' ? expectedAmount : 0);
+          // Check cancel/purge with no fill FIRST (most common disappearance reason)
+          if ((orderInfo.status === 'canceled' || orderInfo.status === 'cancelled' || orderInfo.status === 'purged') && orderInfo.filled === 0) {
+            this.log.warn(`Grid ${filledSide} at ${filledPrice} was ${orderInfo.status} (no fill), resetting level`, { symbol });
+            level.orderId = undefined;
+            level.filled = false;
+            levelsChanged = true;
+            continue;
+          }
+
+          // Use actual filled amount from exchange — no guessing
+          const filledAmount = orderInfo.filled;
           if (filledAmount <= 0) {
             this.log.warn(`Grid ${filledSide} at ${filledPrice}: filled=0, status=${orderInfo.status} — skipping`, { symbol });
             level.orderId = undefined;
@@ -325,17 +403,8 @@ export class GridStrategy {
             continue;
           }
 
-          if ((orderInfo.status === 'canceled' || orderInfo.status === 'cancelled' || orderInfo.status === 'purged') && orderInfo.filled === 0) {
-            // Order was cancelled/purged without any fill — just clear it
-            this.log.warn(`Grid ${filledSide} at ${filledPrice} was ${orderInfo.status} (no fill), resetting level`, { symbol });
-            level.orderId = undefined;
-            level.filled = false;
-            levelsChanged = true;
-            continue;
-          }
-
-          if (orderInfo.filled > 0 && orderInfo.filled < expectedAmount * 0.95) {
-            this.log.warn(`Grid ${filledSide} at ${filledPrice} PARTIALLY filled: ${orderInfo.filled}/${expectedAmount}`, { symbol });
+          if (orderInfo.filled > 0 && orderInfo.remaining > 0) {
+            this.log.warn(`Grid ${filledSide} at ${filledPrice} PARTIALLY filled: ${orderInfo.filled} (remaining: ${orderInfo.remaining})`, { symbol });
           }
 
           levelsChanged = true;
@@ -370,10 +439,10 @@ export class GridStrategy {
             continue;
           }
 
-          // Calculate counter-order with proper precision
+          // Calculate counter-order from actual fill price (may be better than limit)
           const rawCounterPrice = filledSide === 'buy'
-            ? filledPrice * (1 + this.config.gridSpacingPercent / 100)
-            : filledPrice * (1 - this.config.gridSpacingPercent / 100);
+            ? actualPrice * (1 + this.config.gridSpacingPercent / 100)
+            : actualPrice * (1 - this.config.gridSpacingPercent / 100);
           const counterPrice = this.roundPriceForMarket(rawCounterPrice, precision.pricePrecision);
           const counterSide: 'buy' | 'sell' = filledSide === 'buy' ? 'sell' : 'buy';
 
@@ -485,30 +554,24 @@ export class GridStrategy {
       }
     }
 
-    // Orphan position check: if position exceeds sell orders coverage, place additional sells
+    // Orphan position check: free crypto not locked in sell orders = uncovered position
+    // Use actual free balance instead of estimating sell order amounts (which can be wrong
+    // due to Bollinger multiplier, fee adjustments, minAmount bumps, etc.)
     const position = this.state.getPosition(symbol);
     if (position.amount > 0) {
-      const sellOrdersAmount = levels
-        .filter((l) => l.side === 'sell' && l.orderId && !l.filled)
-        .reduce((sum, l) => {
-          // Estimate amount from order cost / price (we don't store amount in level)
-          // Use orderSizePercent as approximation
-          return sum + (allocationUSDT * this.config.orderSizePercent / 100) / l.price;
-        }, 0);
-      const uncoveredAmount = position.amount - sellOrdersAmount;
-      this.log.debug(`Orphan check ${symbol}: pos=${position.amount.toFixed(4)}, sellCoverage=${sellOrdersAmount.toFixed(4)}, uncovered=${uncoveredAmount.toFixed(4)}`);
+      const precision = await this.getPrecision(symbol);
+      try {
+        const balances = await this.exchange.fetchAllBalances();
+        const base = symbol.split('/')[0];
+        const freeBal = balances[base]?.free ?? 0;
+        // Free balance = crypto not in any sell order = uncovered
+        this.log.debug(`Orphan check ${symbol}: pos=${position.amount.toFixed(4)}, free ${base}=${freeBal.toFixed(4)}`);
 
-      if (uncoveredAmount > 0) {
-        const precision = await this.getPrecision(symbol);
-        try {
-          const balances = await this.exchange.fetchAllBalances();
-          const base = symbol.split('/')[0];
-          const freeBal = balances[base]?.free ?? 0;
-          if (freeBal <= 0) return decisions;
-
+        if (freeBal > 0 && freeBal * ticker.last >= precision.minCost) {
           // Place sells in chunks of orderSize at increasing price levels
           const orderAmount = allocationUSDT * this.config.orderSizePercent / 100 / ticker.last;
-          let remaining = Math.min(uncoveredAmount, freeBal);
+          if (orderAmount <= 0) return decisions;
+          let remaining = freeBal;
           let priceStep = 1;
 
           while (remaining > 0) {
@@ -547,9 +610,9 @@ export class GridStrategy {
           }
           levels.sort((a, b) => a.price - b.price);
           this.state.setGridLevels(symbol, levels);
-        } catch (err) {
-          this.log.warn(`Failed to place orphan-sell for ${symbol}: ${sanitizeError(err)}`);
         }
+      } catch (err) {
+        this.log.warn(`Failed to place orphan-sell for ${symbol}: ${sanitizeError(err)}`);
       }
     }
 

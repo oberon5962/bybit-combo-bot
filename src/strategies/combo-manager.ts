@@ -457,7 +457,13 @@ export class ComboManager {
           this.log.warn(`${symbol} trailing SL: closePosition failed — keeping position in state`);
           return false;
         }
-        this.state.resetPosition(symbol);
+        // closePosition already called reducePosition — only reset if fully sold
+        const trailRemaining = this.state.getPosition(symbol);
+        if (trailRemaining.amount < 1e-12) {
+          this.state.resetPosition(symbol);
+        } else {
+          this.log.warn(`${symbol} trailing SL: partial sell, ${trailRemaining.amount} still held — position kept`);
+        }
         this.state.resetTrailingPeak(symbol);
         this.state.setGridInitialized(symbol, false);
 
@@ -484,11 +490,17 @@ export class ComboManager {
         this.log.warn(`${symbol} TP: closePosition failed — keeping position in state`);
         return false;
       }
-      this.state.resetPosition(symbol);
+      // closePosition already called reducePosition — only reset if fully sold
+      const tpRemaining = this.state.getPosition(symbol);
+      if (tpRemaining.amount < 1e-12) {
+        this.state.resetPosition(symbol);
+      } else {
+        this.log.warn(`${symbol} TP: partial sell, ${tpRemaining.amount} still held — position kept`);
+      }
       this.state.resetTrailingPeak(symbol);
       this.state.resetConsecutiveSL(symbol);
       this.state.setGridInitialized(symbol, false);
-      this.log.info(`${symbol} take-profit done. Position reset, grid will rebuild on next tick.`);
+      this.log.info(`${symbol} take-profit done. Grid will rebuild on next tick.`);
       return true;
     }
 
@@ -504,7 +516,13 @@ export class ComboManager {
     maxConsecutive: number,
   ): Promise<void> {
     const count = this.state.incrementConsecutiveSL(symbol);
-    this.state.resetPosition(symbol);
+    // closePosition already called reducePosition — only reset if fully sold
+    const remaining = this.state.getPosition(symbol);
+    if (remaining.amount < 1e-12) {
+      this.state.resetPosition(symbol);
+    } else {
+      this.log.warn(`${symbol} SL: partial sell, ${remaining.amount} still held — position kept in state`);
+    }
     this.state.resetTrailingPeak(symbol);
     this.state.setGridInitialized(symbol, false);
 

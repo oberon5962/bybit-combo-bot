@@ -76,6 +76,15 @@ export function loadConfig(): BotConfig {
       rebalancePercent: 2,           // Перестроить сетку если цена ушла >2% от центра (вверх или вниз)
       rsiOverboughtThreshold: 70,    // Пропускаем grid-buy при RSI > 70 (100 = отключить)
       useEmaFilter: true,            // Пропускаем grid-buy при медвежьем EMA кроссовере (false = отключить)
+
+      // Bollinger Bands адаптивный grid (false = отключить)
+      // Когда цена у нижней полосы — больше buy уровней + увеличенный orderSize
+      // Когда цена у верхней полосы + EMA bearish — больше sell уровней + увеличенный orderSize
+      // Когда цена у верхней полосы + EMA bullish — не усиливаем sell (тренд сильный)
+      useBollingerAdaptive: true,
+      bollingerBuyMultiplier: 1.5,   // orderSize * 1.5 при покупке у нижней полосы
+      bollingerSellMultiplier: 1.5,  // orderSize * 1.5 при продаже у верхней полосы (только EMA bearish)
+      bollingerShiftLevels: 3,       // перекинуть 3 уровня: напр. 10/10 → 13/7 buy/sell (или 7/13)
     },
 
     // -------------------------------------------------------
@@ -186,6 +195,17 @@ function validateConfig(config: BotConfig): void {
     if (config.grid.rebalancePercent <= 0 || config.grid.rebalancePercent > 50) errors.push('grid.rebalancePercent must be between 0 and 50');
     if (config.grid.rsiOverboughtThreshold < 50 || config.grid.rsiOverboughtThreshold > 100) {
       errors.push('grid.rsiOverboughtThreshold must be between 50 and 100');
+    }
+    if (config.grid.useBollingerAdaptive) {
+      if (config.grid.bollingerBuyMultiplier < 1 || config.grid.bollingerBuyMultiplier > 3) {
+        errors.push('bollingerBuyMultiplier must be between 1 and 3');
+      }
+      if (config.grid.bollingerSellMultiplier < 1 || config.grid.bollingerSellMultiplier > 3) {
+        errors.push('bollingerSellMultiplier must be between 1 and 3');
+      }
+      if (config.grid.bollingerShiftLevels < 0 || config.grid.bollingerShiftLevels > Math.floor(config.grid.gridLevels / 2)) {
+        errors.push(`bollingerShiftLevels must be between 0 and ${Math.floor(config.grid.gridLevels / 2)}`);
+      }
     }
   }
 

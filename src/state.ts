@@ -293,7 +293,7 @@ export class StateManager {
   }
   reducePosition(symbol: string, amount: number): void {
     const ps = this.getPairState(symbol);
-    if (ps.positionAmount < 1e-10) {
+    if (ps.positionAmount < 1e-12) {
       // Position is essentially zero — reset to avoid division by near-zero
       ps.positionAmount = 0;
       ps.positionCostBasis = 0;

@@ -58,6 +58,12 @@ export interface GridConfig {
   rebalancePercent: number;         // rebalance grid when price drifts > X% from center
   rsiOverboughtThreshold: number; // skip grid buy when RSI > this (e.g. 70)
   useEmaFilter: boolean;          // skip grid buy on bearish EMA crossover
+
+  // Bollinger Bands adaptive grid
+  useBollingerAdaptive: boolean;    // включить адаптивный grid на основе Bollinger Bands
+  bollingerBuyMultiplier: number;   // множитель orderSize при цене у нижней полосы (напр. 1.5)
+  bollingerSellMultiplier: number;  // множитель orderSize при цене у верхней полосы (напр. 1.5)
+  bollingerShiftLevels: number;     // сколько уровней перекинуть в пользу buy/sell (напр. 3)
 }
 
 export interface DCAConfig {

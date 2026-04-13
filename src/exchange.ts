@@ -267,7 +267,7 @@ export class BybitExchange {
    * If the value is already an integer >= 1, it's likely already decimal places — return as-is.
    */
   private tickSizeToDecimalPlaces(tickSize: number): number {
-    if (tickSize >= 1) return Math.round(tickSize);  // already decimal places (or step=1 → 0 places)
+    if (tickSize >= 1) return 0;  // step=1 or larger → 0 decimal places
     return Math.max(0, Math.round(-Math.log10(tickSize)));
   }
 

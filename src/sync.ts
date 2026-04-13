@@ -127,7 +127,8 @@ export class ExchangeSync {
             // Order NOT in open orders — check if it was filled or cancelled
             try {
               const orderInfo = await this.exchange.fetchOrder(level.orderId, symbol);
-              if (orderInfo.status === 'closed' && orderInfo.filled > 0) {
+              if (orderInfo.filled > 0) {
+                // Order was filled (fully or partially before cancel) — update position
                 // Order was FILLED — update position
                 const fillPrice = orderInfo.price > 0 ? orderInfo.price : level.price;
                 const fillAmount = orderInfo.filled;
