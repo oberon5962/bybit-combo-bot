@@ -4,7 +4,7 @@
 
 import {
   BotConfig, GridConfig, Ticker, IndicatorSnapshot,
-  StrategyDecision, Logger,
+  StrategyDecision, Logger, sanitizeError,
 } from '../types';
 import { BybitExchange } from '../exchange';
 import { StateManager, GridLevelState } from '../state';
@@ -88,8 +88,8 @@ export class GridStrategy {
         const gridCenter = (lowestPrice + highestPrice) / 2;
         const driftPercent = Math.abs(currentPrice - gridCenter) / gridCenter * 100;
 
-        if (driftPercent > 5) {
-          // Price moved >5% from grid center — cancel all and reinitialize
+        if (driftPercent > this.config.rebalancePercent) {
+          // Price moved beyond rebalance threshold from grid center — cancel all and reinitialize
           this.log.warn(`Grid rebalance for ${symbol}: price drifted ${driftPercent.toFixed(1)}% from center (${gridCenter.toFixed(2)} → ${currentPrice.toFixed(2)})`);
           await this.cancelAll(symbol);
           // Fall through to reinitialize below
@@ -171,7 +171,7 @@ export class GridStrategy {
       freeCrypto = allBalances[base]?.free ?? 0;
       freeUSDT = allBalances['USDT']?.free ?? 0;
     } catch (err) {
-      this.log.warn(`Failed to fetch balances for grid checks: ${err}`);
+      this.log.warn(`Failed to fetch balances for grid checks: ${sanitizeError(err)}`);
     }
 
     for (const level of levels) {
@@ -299,9 +299,9 @@ export class GridStrategy {
             continue;
           }
 
-          if (orderInfo.status === 'canceled' && orderInfo.filled === 0) {
-            // Order was cancelled without any fill — just clear it
-            this.log.warn(`Grid ${filledSide} at ${filledPrice} was cancelled (no fill), resetting level`, { symbol });
+          if ((orderInfo.status === 'canceled' || orderInfo.status === 'purged') && orderInfo.filled === 0) {
+            // Order was cancelled/purged without any fill — just clear it
+            this.log.warn(`Grid ${filledSide} at ${filledPrice} was ${orderInfo.status} (no fill), resetting level`, { symbol });
             level.orderId = undefined;
             level.filled = false;
             levelsChanged = true;
@@ -316,13 +316,15 @@ export class GridStrategy {
           this.log.info(`Grid ${filledSide} filled at ${actualPrice}`, { symbol, amount: filledAmount });
 
           // Record filled trade with actual amounts
+          const tradeCost = filledAmount * actualPrice;
           this.state.addTrade({
             timestamp: Date.now(),
             symbol,
             side: filledSide,
             amount: filledAmount,
             price: actualPrice,
-            cost: filledAmount * actualPrice,
+            cost: tradeCost,
+            fee: tradeCost * 0.001,  // Bybit spot fee ~0.1%
             strategy: 'grid',
           });
 

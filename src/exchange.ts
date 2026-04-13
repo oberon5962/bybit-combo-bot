@@ -4,7 +4,7 @@
 
 import ccxt, { Exchange, Order } from 'ccxt';
 import {
-  BotConfig, OHLCV, Ticker, Balance, BotOrder, Logger
+  BotConfig, OHLCV, Ticker, Balance, BotOrder, Logger, sanitizeError
 } from './types';
 
 export class BybitExchange {
@@ -171,6 +171,7 @@ export class BybitExchange {
   }
 
   // BUG #14: fetch a specific order to check fill status (partial fills)
+  // BUG #audit-3: fallback to closedOrders when order is purged from active history
   async fetchOrder(orderId: string, symbol: string): Promise<{ filled: number; remaining: number; status: string; price: number }> {
     try {
       const order = await this.exchange.fetchOrder(orderId, symbol);
@@ -181,9 +182,24 @@ export class BybitExchange {
         price: order.average ?? order.price ?? 0,
       };
     } catch (err) {
-      // Order may no longer exist (fully filled and purged from exchange history)
-      this.log.debug(`fetchOrder ${orderId} failed (may be purged): ${err}`);
-      return { filled: 0, remaining: 0, status: 'unknown', price: 0 };
+      // Order not found — try closed orders as fallback (Bybit purges old orders from active query)
+      this.log.debug(`fetchOrder ${orderId} failed, trying closed orders: ${sanitizeError(err)}`);
+      try {
+        const closed = await this.exchange.fetchClosedOrders(symbol, undefined, 50);
+        const match = closed.find((o) => o.id === orderId);
+        if (match) {
+          return {
+            filled: match.filled ?? 0,
+            remaining: match.remaining ?? 0,
+            status: match.status ?? 'closed',
+            price: match.average ?? match.price ?? 0,
+          };
+        }
+      } catch (err2) {
+        this.log.debug(`fetchClosedOrders fallback also failed: ${sanitizeError(err2)}`);
+      }
+      // Neither found — return purged status so caller can handle safely
+      return { filled: 0, remaining: 0, status: 'purged', price: 0 };
     }
   }
 
@@ -275,7 +291,7 @@ export class BybitExchange {
 
         if (isTransient && attempt < maxRetries) {
           const delay = 1000 * (attempt + 1); // 1s, 2s
-          this.log.warn(`${label}: transient error (attempt ${attempt + 1}/${maxRetries + 1}), retrying in ${delay}ms: ${err.message || err}`);
+          this.log.warn(`${label}: transient error (attempt ${attempt + 1}/${maxRetries + 1}), retrying in ${delay}ms: ${sanitizeError(err.message || err)}`);
           await new Promise(r => setTimeout(r, delay));
           continue;
         }

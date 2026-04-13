@@ -74,6 +74,7 @@ export interface TradeEntry {
   amount: number;
   price: number;
   cost: number;
+  fee: number;       // estimated trading fee in USDT (0.1% of cost for Bybit spot)
   strategy: string;
 }
 

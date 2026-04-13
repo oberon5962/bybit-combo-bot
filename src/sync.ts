@@ -10,7 +10,7 @@
 //   5. Логирует полную картину портфеля
 // ============================================================
 
-import { BotConfig, Logger } from './types';
+import { BotConfig, Logger, sanitizeError } from './types';
 import { BybitExchange } from './exchange';
 import { StateManager } from './state';
 
@@ -86,7 +86,7 @@ export class ExchangeSync {
       try {
         exchangeOrders = await this.exchange.fetchOpenOrders(symbol);
       } catch (err) {
-        this.log.error(`Failed to fetch open orders for ${symbol}: ${err}`);
+        this.log.error(`Failed to fetch open orders for ${symbol}: ${sanitizeError(err)}`);
         continue;
       }
 
@@ -195,7 +195,7 @@ export class ExchangeSync {
             currentPrice: ticker.last,
           });
         } catch (err) {
-          this.log.error(`Failed to get price for ${base}: ${err}`);
+          this.log.error(`Failed to get price for ${base}: ${sanitizeError(err)}`);
           holdings.push({
             currency: base,
             amount: held.total,
@@ -222,7 +222,7 @@ export class ExchangeSync {
           });
         }
       } catch (err) {
-        this.log.error(`[sync] Failed to fetch open orders for ${pair.symbol} during portfolio build: ${err}`);
+        this.log.error(`[sync] Failed to fetch open orders for ${pair.symbol} during portfolio build: ${sanitizeError(err)}`);
       }
     }
 

@@ -27,7 +27,7 @@ async function main(): Promise<void> {
 
   // Load config
   const config = loadConfig();
-  log.info(`Mode: ${config.testnet ? 'TESTNET' : '🔴 LIVE'}`);
+  log.info(`Mode: ${config.testnet ? 'TESTNET' : '🟢 LIVE'}`);
   log.info(`Pairs: ${config.pairs.map((p) => `${p.symbol} (${p.allocationPercent}%)`).join(', ')}`);
   log.info(`Tick interval: ${config.tickIntervalSec}s`);
   log.info(`Sync interval: ${config.syncIntervalSec > 0 ? config.syncIntervalSec + 's' : 'disabled'}`);

@@ -70,9 +70,10 @@ export function loadConfig(): BotConfig {
     // -------------------------------------------------------
     grid: {
       enabled: true,
-      gridLevels,                    // 6 buy + 6 sell (сетка под малый капитал)
-      gridSpacingPercent: 0.3,       // 0.3% между уровнями (покрытие 2.5% в каждую сторону)
-      orderSizePercent: 14,          // Каждый ордер = 14% от аллокации пары
+      gridLevels,                    // 10 buy + 10 sell (покрытие ±5% от центра)
+      gridSpacingPercent: 0.5,       // 0.5% между уровнями (покрытие 5% в каждую сторону)
+      orderSizePercent: 18,          // Каждый ордер = 18% от аллокации пары
+      rebalancePercent: 3,           // Перестроить сетку если цена ушла >3% от центра
       rsiOverboughtThreshold: 70,    // Пропускаем grid-buy при RSI > 70 (100 = отключить)
       useEmaFilter: true,            // Пропускаем grid-buy при медвежьем EMA кроссовере (false = отключить)
     },
@@ -172,6 +173,7 @@ function validateConfig(config: BotConfig): void {
     if (config.grid.gridSpacingPercent <= 0) errors.push('gridSpacingPercent must be > 0');
     if (config.grid.gridLevels < 2) errors.push('gridLevels must be >= 2');
     if (config.grid.orderSizePercent <= 0) errors.push('grid.orderSizePercent must be > 0');
+    if (config.grid.rebalancePercent <= 0 || config.grid.rebalancePercent > 50) errors.push('grid.rebalancePercent must be between 0 and 50');
     if (config.grid.rsiOverboughtThreshold < 50 || config.grid.rsiOverboughtThreshold > 100) {
       errors.push('grid.rsiOverboughtThreshold must be between 50 and 100');
     }

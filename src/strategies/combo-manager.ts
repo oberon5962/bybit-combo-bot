@@ -4,7 +4,7 @@
 
 import {
   BotConfig, PairConfig, Ticker, IndicatorSnapshot,
-  StrategyDecision, Logger,
+  StrategyDecision, Logger, sanitizeError,
 } from '../types';
 import { BybitExchange } from '../exchange';
 import { computeIndicators } from '../indicators';
@@ -53,7 +53,7 @@ export class ComboManager {
           const ticker = await this.exchange.fetchTicker(pair.symbol);
           totalPortfolioValue += held.total * ticker.last;
         } catch (err) {
-          this.log.error(`Failed to fetch ${pair.symbol} price during init: ${err}`);
+          this.log.error(`Failed to fetch ${pair.symbol} price during init: ${sanitizeError(err)}`);
         }
       }
     }
@@ -128,7 +128,7 @@ export class ComboManager {
           const ticker = await this.exchange.fetchTicker(pair.symbol);
           totalPortfolioUSDT += held.total * ticker.last;
         } catch (err) {
-          this.log.error(`Failed to fetch ticker for ${pair.symbol} during portfolio calc: ${err}`);
+          this.log.error(`Failed to fetch ticker for ${pair.symbol} during portfolio calc: ${sanitizeError(err)}`);
         }
       }
     }
@@ -189,7 +189,7 @@ export class ComboManager {
       try {
         await this.processPair(pair, currentBalance.total);
       } catch (err) {
-        this.log.error(`Error processing ${pair.symbol}: ${err}`);
+        this.log.error(`Error processing ${pair.symbol}: ${sanitizeError(err)}`);
       }
     }
 
@@ -234,13 +234,19 @@ export class ComboManager {
       this.exchange.fetchOHLCV(symbol, '5m', 100),
     ]);
 
+    // Guard: skip pair if ticker price is zero or invalid
+    if (!ticker.last || ticker.last <= 0 || !isFinite(ticker.last)) {
+      this.log.error(`${symbol}: ticker.last is invalid (${ticker.last}), skipping pair this tick`);
+      return;
+    }
+
     // Pre-cache amount precision for this symbol (used by evaluateMetaSignal)
     if (!this.marketPrecisionCache.has(symbol)) {
       try {
         const mp = await this.exchange.getMarketPrecision(symbol);
         this.marketPrecisionCache.set(symbol, { amountPrecision: mp.amountPrecision, minAmount: mp.minAmount, minCost: mp.minCost });
       } catch (err) {
-        this.log.warn(`Failed to get precision for ${symbol}: ${err}`);
+        this.log.warn(`Failed to get precision for ${symbol}: ${sanitizeError(err)}`);
       }
     }
 
@@ -515,17 +521,20 @@ export class ComboManager {
       await this.grid.cancelAll(symbol);
       this.log.info(`Cancelled grid orders for ${symbol} before ${reason} sell`);
 
-      // Wait briefly for cancellations to settle
-      await new Promise(resolve => setTimeout(resolve, 1000));
-
-      // Check actual free balance (some may have been in orders)
-      const allBalances = await this.exchange.fetchAllBalances();
+      // Poll for free balance to appear (cancellations may take time to settle)
       const base = symbol.split('/')[0];
-      const held = allBalances[base];
-      let sellAmount = held && held.free > 0 ? Math.min(held.free, amount) : 0;
+      let sellAmount = 0;
+      for (let attempt = 0; attempt < 5; attempt++) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        const allBalances = await this.exchange.fetchAllBalances();
+        const held = allBalances[base];
+        sellAmount = held && held.free > 0 ? Math.min(held.free, amount) : 0;
+        if (sellAmount > 0) break;
+        this.log.debug(`${reason}: waiting for ${base} balance to free up (attempt ${attempt + 1}/5)`);
+      }
 
       if (sellAmount <= 0) {
-        this.log.warn(`${reason}: No free ${base} balance to sell (may be locked)`);
+        this.log.warn(`${reason}: No free ${base} balance to sell after 5 attempts`);
         return;
       }
 
@@ -549,13 +558,15 @@ export class ComboManager {
       const order = await this.exchange.createMarketSell(symbol, sellAmount, 'risk');
       const fillPrice = order.price || currentPrice;
 
+      const slCost = sellAmount * fillPrice;
       this.state.addTrade({
         timestamp: Date.now(),
         symbol,
         side: 'sell',
         amount: sellAmount,
         price: fillPrice,
-        cost: sellAmount * fillPrice,
+        cost: slCost,
+        fee: slCost * 0.001,
         strategy: reason,
       });
 
@@ -569,7 +580,7 @@ export class ComboManager {
         remainingPosition: position.amount,
       });
     } catch (err) {
-      this.log.error(`${reason} execution failed for ${symbol}: ${err}`);
+      this.log.error(`${reason} execution failed for ${symbol}: ${sanitizeError(err)}`);
     }
   }
 
@@ -615,10 +626,11 @@ export class ComboManager {
       if (signal === 'buy' || signal === 'strong_buy') {
         const order = await this.exchange.createMarketBuy(symbol, suggestedAmount, strategy as any);
         const buyPrice = order.price || fallbackPrice;
+        const buyCost = suggestedAmount * buyPrice;
         this.state.addTrade({
           timestamp: Date.now(), symbol, side: 'buy',
           amount: suggestedAmount, price: buyPrice,
-          cost: suggestedAmount * buyPrice, strategy,
+          cost: buyCost, fee: buyCost * 0.001, strategy,
         });
         // Track position for stop-loss / take-profit
         this.state.addToPosition(symbol, suggestedAmount, suggestedAmount * buyPrice);
@@ -630,10 +642,11 @@ export class ComboManager {
       } else if (signal === 'sell' || signal === 'strong_sell') {
         const order = await this.exchange.createMarketSell(symbol, suggestedAmount, strategy as any);
         const sellPrice = order.price || fallbackPrice;
+        const sellCost = suggestedAmount * sellPrice;
         this.state.addTrade({
           timestamp: Date.now(), symbol, side: 'sell',
           amount: suggestedAmount, price: sellPrice,
-          cost: suggestedAmount * sellPrice, strategy,
+          cost: sellCost, fee: sellCost * 0.001, strategy,
         });
         // Track position for stop-loss / take-profit
         this.state.reducePosition(symbol, suggestedAmount);
@@ -654,7 +667,7 @@ export class ComboManager {
         await this.grid.cancelAll(pair.symbol);
         this.log.info(`Cancelled all orders for ${pair.symbol}`);
       } catch (err) {
-        this.log.error(`Failed to cancel orders for ${pair.symbol}: ${err}`);
+        this.log.error(`Failed to cancel orders for ${pair.symbol}: ${sanitizeError(err)}`);
       }
     }
 
@@ -701,13 +714,16 @@ export class ComboManager {
           this.log.info(`Selling ${roundedSellAmount} ${base} (~${valueUSDT.toFixed(2)} USDT)`);
 
           const order = await this.exchange.createMarketSell(pair.symbol, roundedSellAmount, 'risk');
+          const tpPrice = order.price || ticker.last;
+          const tpCost = roundedSellAmount * tpPrice;
           this.state.addTrade({
             timestamp: Date.now(),
             symbol: pair.symbol,
             side: 'sell',
             amount: roundedSellAmount,
-            price: order.price || ticker.last,
-            cost: roundedSellAmount * (order.price || ticker.last),
+            price: tpPrice,
+            cost: tpCost,
+            fee: tpCost * 0.001,
             strategy: 'portfolio-take-profit',
           });
 
@@ -716,7 +732,7 @@ export class ComboManager {
           // Reset position tracking after full sell
           this.state.resetPosition(pair.symbol);
         } catch (err) {
-          this.log.error(`Failed to sell ${base}: ${err}`);
+          this.log.error(`Failed to sell ${base}: ${sanitizeError(err)}`);
         }
       }
     }
@@ -773,7 +789,7 @@ export class ComboManager {
           this.log.info(`Market panic: cancelled ${buyOrders.length} buy orders for ${pair.symbol}`);
         }
       } catch (err) {
-        this.log.error(`Market panic: failed to cancel buy orders for ${pair.symbol}: ${err}`);
+        this.log.error(`Market panic: failed to cancel buy orders for ${pair.symbol}: ${sanitizeError(err)}`);
       }
     }
   }
@@ -809,7 +825,7 @@ export class ComboManager {
         this.btcPaused = false;
       }
     } catch (err) {
-      this.log.error(`BTC WATCHDOG: failed to fetch BTC candles: ${err}`);
+      this.log.error(`BTC WATCHDOG: failed to fetch BTC candles: ${sanitizeError(err)}`);
     }
   }
 
@@ -828,6 +844,7 @@ export class ComboManager {
     const sells = trades.filter((t) => t.side === 'sell');
     const totalSpent = buys.reduce((s, t) => s + t.cost, 0);
     const totalEarned = sells.reduce((s, t) => s + t.cost, 0);
+    const totalFees = trades.reduce((s, t) => s + (t.fee || 0), 0);
 
     // PnL
     const pnl = currentCapital - this.state.startingCapital;
@@ -848,6 +865,7 @@ export class ComboManager {
       sells: sells.length,
       totalSpent: totalSpent.toFixed(2),
       totalEarned: totalEarned.toFixed(2),
+      totalFees: totalFees.toFixed(4),
       marketPanic: this.marketPanic ? 'YES — buys blocked' : 'no',
       btcWatchdog: this.btcPaused ? 'PAUSED — BTC drop detected' : 'ok',
     });

@@ -55,6 +55,7 @@ export interface GridConfig {
   gridLevels: number;           // number of grid lines
   gridSpacingPercent: number;   // distance between levels as % of price
   orderSizePercent: number;     // % of pair allocation per grid order
+  rebalancePercent: number;         // rebalance grid when price drifts > X% from center
   rsiOverboughtThreshold: number; // skip grid buy when RSI > this (e.g. 70)
   useEmaFilter: boolean;          // skip grid buy on bearish EMA crossover
 }
@@ -181,4 +182,15 @@ export interface Logger {
   warn(msg: string, meta?: Record<string, unknown>): void;
   error(msg: string, meta?: Record<string, unknown>): void;
   debug(msg: string, meta?: Record<string, unknown>): void;
+}
+
+// ============================================================
+// Error Sanitizer — strip API keys/secrets from error messages
+// ============================================================
+
+export function sanitizeError(err: unknown): string {
+  const msg = String(err);
+  return msg
+    .replace(/(key|secret|token|auth|password|credential|apiKey|apiSecret)[=:"'\s]+\S+/gi, '$1=***')
+    .replace(/(Bearer|Basic)\s+\S+/gi, '$1 ***');
 }

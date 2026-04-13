@@ -4,7 +4,7 @@
 
 import {
   BotConfig, DCAConfig, Ticker, IndicatorSnapshot,
-  StrategyDecision, Logger,
+  StrategyDecision, Logger, sanitizeError,
 } from '../types';
 import { BybitExchange } from '../exchange';
 import { StateManager } from '../state';
@@ -87,7 +87,7 @@ export class DCAStrategy {
         cached = { amountPrecision: mp.amountPrecision, minAmount: mp.minAmount, minCost: mp.minCost };
         this.precisionCache.set(symbol, cached);
       } catch (err) {
-        this.log.warn(`Failed to get precision for ${symbol}, using fallback: ${err}`);
+        this.log.warn(`Failed to get precision for ${symbol}, using fallback: ${sanitizeError(err)}`);
         cached = { amountPrecision: 5, minAmount: 0, minCost: 0 };
       }
     }
