@@ -10,6 +10,7 @@ import {
 export class BybitExchange {
   private exchange: Exchange;
   private log: Logger;
+  private marketsLoaded: boolean = false;
 
   constructor(config: BotConfig, log: Logger) {
     this.log = log;
@@ -219,7 +220,11 @@ export class BybitExchange {
   // ----------------------------------------------------------
 
   async getMarketPrecision(symbol: string): Promise<{ pricePrecision: number; amountPrecision: number; minAmount: number; minCost: number }> {
-    await this.exchange.loadMarkets();
+    // Only load markets once — ccxt caches internally but still makes HTTP calls periodically
+    if (!this.marketsLoaded) {
+      await this.exchange.loadMarkets();
+      this.marketsLoaded = true;
+    }
     const market = this.exchange.markets[symbol];
     if (!market) {
       throw new Error(`Market ${symbol} not found`);
@@ -252,5 +257,31 @@ export class BybitExchange {
 
   getExchange(): Exchange {
     return this.exchange;
+  }
+
+  // ----------------------------------------------------------
+  // Retry wrapper for transient API errors (timeout, network)
+  // ----------------------------------------------------------
+
+  async withRetry<T>(fn: () => Promise<T>, label: string, maxRetries: number = 2): Promise<T> {
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        return await fn();
+      } catch (err: any) {
+        const isTransient = err?.constructor?.name === 'RequestTimeout'
+          || err?.constructor?.name === 'NetworkError'
+          || err?.constructor?.name === 'ExchangeNotAvailable'
+          || (err?.message && /timeout|ETIMEDOUT|ECONNRESET/i.test(err.message));
+
+        if (isTransient && attempt < maxRetries) {
+          const delay = 1000 * (attempt + 1); // 1s, 2s
+          this.log.warn(`${label}: transient error (attempt ${attempt + 1}/${maxRetries + 1}), retrying in ${delay}ms: ${err.message || err}`);
+          await new Promise(r => setTimeout(r, delay));
+          continue;
+        }
+        throw err;
+      }
+    }
+    throw new Error(`${label}: unreachable`);
   }
 }

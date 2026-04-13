@@ -19,7 +19,7 @@ export class ComboManager {
   private grid: GridStrategy;
   private dca: DCAStrategy;
   private state: StateManager;
-  private amountPrecisionCache: Map<string, number> = new Map();
+  private marketPrecisionCache: Map<string, { amountPrecision: number; minAmount: number; minCost: number }> = new Map();
 
   constructor(config: BotConfig, exchange: BybitExchange, log: Logger, state: StateManager) {
     this.config = config;
@@ -59,6 +59,14 @@ export class ComboManager {
       this.state.peakCapital = totalPortfolioValue;
     }
 
+    // Auto-reset per-pair halts on restart — restart IS the manual intervention
+    for (const pair of this.config.pairs) {
+      if (this.state.isPairHalted(pair.symbol)) {
+        this.log.info(`Auto-resuming halted pair ${pair.symbol} (bot restart = manual review)`);
+        this.state.resetPairHalt(pair.symbol);
+      }
+    }
+
     const trades = this.state.getRecentTrades();
     this.log.info('ComboManager initialized', {
       usdtBalance: balance.total,
@@ -76,7 +84,16 @@ export class ComboManager {
 
   async tick(): Promise<void> {
     if (this.state.halted) {
-      this.log.warn('Bot is HALTED due to drawdown limit. Manual intervention required.');
+      const haltedPairs = this.config.pairs
+        .filter(p => this.state.isPairHalted(p.symbol))
+        .map(p => {
+          const reason = this.state.getHaltReason(p.symbol) ?? 'unknown';
+          return `${p.symbol} (${reason})`;
+        });
+      const pairInfo = haltedPairs.length > 0
+        ? ` Halted pairs: ${haltedPairs.join(', ')}`
+        : '';
+      this.log.warn(`Bot is HALTED due to drawdown limit.${pairInfo} Manual intervention required.`);
       return;
     }
 
@@ -104,7 +121,9 @@ export class ComboManager {
     }
 
     // Check MAX DRAWDOWN — halt if portfolio drops too much
-    const drawdown = ((this.state.peakCapital - totalPortfolioUSDT) / this.state.peakCapital) * 100;
+    const drawdown = this.state.peakCapital > 0
+      ? ((this.state.peakCapital - totalPortfolioUSDT) / this.state.peakCapital) * 100
+      : 0;
     if (drawdown > this.config.risk.maxDrawdownPercent) {
       this.log.error(`MAX DRAWDOWN EXCEEDED: ${drawdown.toFixed(1)}% > ${this.config.risk.maxDrawdownPercent}%`);
       this.log.error('HALTING ALL TRADING.');
@@ -137,7 +156,8 @@ export class ComboManager {
     // Record tick
     this.state.recordTick();
 
-    // Process each trading pair (pass free USDT to avoid redundant API calls)
+    // Process each trading pair
+    // Use TOTAL USDT (not free) for allocation calculation — free fluctuates as grid locks funds
     for (const pair of this.config.pairs) {
       // Re-check global halted state (drawdown / portfolio TP)
       if (this.state.halted) {
@@ -145,7 +165,7 @@ export class ComboManager {
         break;
       }
       try {
-        await this.processPair(pair, currentBalance.free);
+        await this.processPair(pair, currentBalance.total);
       } catch (err) {
         this.log.error(`Error processing ${pair.symbol}: ${err}`);
       }
@@ -161,7 +181,7 @@ export class ComboManager {
   // Process a single pair
   // ----------------------------------------------------------
 
-  private async processPair(pair: PairConfig, freeUSDT: number): Promise<void> {
+  private async processPair(pair: PairConfig, totalUSDT: number): Promise<void> {
     const { symbol } = pair;
 
     // Skip halted pairs (SL/TP triggered on this pair)
@@ -170,8 +190,9 @@ export class ComboManager {
       return;
     }
 
-    // Use FREE capital only (passed from tick() to avoid extra API call per pair)
-    const allocationUSDT = freeUSDT * (pair.allocationPercent / 100);
+    // Use TOTAL USDT for allocation — free balance fluctuates as grid locks funds in orders.
+    // Grid internally checks free balance before placing sells, so over-allocation is safe.
+    const allocationUSDT = totalUSDT * (pair.allocationPercent / 100);
 
     const [ticker, candles] = await Promise.all([
       this.exchange.fetchTicker(symbol),
@@ -179,10 +200,10 @@ export class ComboManager {
     ]);
 
     // Pre-cache amount precision for this symbol (used by evaluateMetaSignal)
-    if (!this.amountPrecisionCache.has(symbol)) {
+    if (!this.marketPrecisionCache.has(symbol)) {
       try {
         const mp = await this.exchange.getMarketPrecision(symbol);
-        this.amountPrecisionCache.set(symbol, mp.amountPrecision);
+        this.marketPrecisionCache.set(symbol, { amountPrecision: mp.amountPrecision, minAmount: mp.minAmount, minCost: mp.minCost });
       } catch (err) {
         this.log.warn(`Failed to get precision for ${symbol}: ${err}`);
       }
@@ -224,7 +245,8 @@ export class ComboManager {
   // ----------------------------------------------------------
 
   private roundAmountForSymbol(amount: number, symbol: string): number {
-    const precision = this.amountPrecisionCache.get(symbol) ?? 5;
+    const cached = this.marketPrecisionCache.get(symbol);
+    const precision = cached?.amountPrecision ?? 5;
     const factor = Math.pow(10, precision);
     return Math.floor(amount * factor) / factor;
   }
@@ -241,12 +263,31 @@ export class ComboManager {
     const regularAmount = (allocationUSDT * 0.05) / ticker.last;
     const strongAmount = (allocationUSDT * 0.08) / ticker.last;
 
+    const cached = this.marketPrecisionCache.get(sym);
+    const minAmount = cached?.minAmount ?? 0;
+    const minCost = cached?.minCost ?? 0;
+
+    // Helper: check if amount meets exchange minimums
+    const isViableOrder = (amount: number): boolean => {
+      if (amount < minAmount) {
+        this.log.debug(`[combo-meta] ${sym}: amount ${amount} < minAmount ${minAmount}, skipping`);
+        return false;
+      }
+      if (amount * ticker.last < minCost) {
+        this.log.debug(`[combo-meta] ${sym}: cost ${(amount * ticker.last).toFixed(2)} < minCost ${minCost}, skipping`);
+        return false;
+      }
+      return true;
+    };
+
     if (rsi < 25 && emaCrossover === 'bullish' && pricePosition === 'below_lower') {
+      const amount = this.roundAmountForSymbol(strongAmount, sym);
+      if (!isViableOrder(amount)) return null;
       return {
         strategy: 'combo-meta',
         signal: 'strong_buy',
         symbol: sym,
-        suggestedAmount: this.roundAmountForSymbol(strongAmount, sym),
+        suggestedAmount: amount,
         reason: `STRONG BUY signal: RSI=${rsi.toFixed(0)}, bullish EMA cross, below Bollinger lower`,
       };
     }
@@ -254,7 +295,7 @@ export class ComboManager {
     if (rsi > 75 && emaCrossover === 'bearish' && pricePosition === 'above_upper') {
       const pos = this.state.getPosition(sym);
       const sellAmount = pos.amount > 0 ? Math.min(this.roundAmountForSymbol(strongAmount, sym), pos.amount) : 0;
-      if (sellAmount <= 0) return null;
+      if (sellAmount <= 0 || !isViableOrder(sellAmount)) return null;
       return {
         strategy: 'combo-meta',
         signal: 'strong_sell',
@@ -265,11 +306,13 @@ export class ComboManager {
     }
 
     if (rsi < 35 && pricePosition === 'below_middle') {
+      const amount = this.roundAmountForSymbol(regularAmount, sym);
+      if (!isViableOrder(amount)) return null;
       return {
         strategy: 'combo-meta',
         signal: 'buy',
         symbol: sym,
-        suggestedAmount: this.roundAmountForSymbol(regularAmount, sym),
+        suggestedAmount: amount,
         reason: `BUY signal: RSI=${rsi.toFixed(0)}, price below Bollinger middle`,
       };
     }
@@ -277,7 +320,7 @@ export class ComboManager {
     if (rsi > 65 && pricePosition === 'above_upper') {
       const pos2 = this.state.getPosition(sym);
       const sellAmt = pos2.amount > 0 ? Math.min(this.roundAmountForSymbol(regularAmount, sym), pos2.amount) : 0;
-      if (sellAmt <= 0) return null;
+      if (sellAmt <= 0 || !isViableOrder(sellAmt)) return null;
       return {
         strategy: 'combo-meta',
         signal: 'sell',
@@ -299,7 +342,14 @@ export class ComboManager {
     currentPrice: number,
   ): Promise<boolean> {
     const position = this.state.getPosition(symbol);
-    if (position.amount <= 0 || position.avgEntryPrice <= 0) return false;
+    if (position.amount <= 0) return false;
+
+    // Guard: if avgEntryPrice is 0 or negative (state corruption), reset position to prevent division by zero
+    if (position.avgEntryPrice <= 0) {
+      this.log.error(`Invalid avgEntryPrice for ${symbol}: ${position.avgEntryPrice} with amount ${position.amount}. Resetting position.`);
+      this.state.resetPosition(symbol);
+      return false;
+    }
 
     const { stopLossPercent, takeProfitPercent } = this.config.risk;
     const pnlPercent = ((currentPrice - position.avgEntryPrice) / position.avgEntryPrice) * 100;
@@ -314,7 +364,7 @@ export class ComboManager {
 
       await this.closePosition(symbol, position.amount, currentPrice, 'stop-loss');
       // HALT only THIS PAIR — other pairs continue trading
-      this.state.haltPair(symbol);
+      this.state.haltPair(symbol, `stop-loss: entry ${position.avgEntryPrice.toFixed(2)}, exit ${currentPrice.toFixed(2)}, PnL ${pnlPercent.toFixed(1)}%`);
       this.log.warn(`Pair ${symbol} HALTED after stop-loss. Other pairs continue. Restart bot to resume this pair.`);
       return true;
     }
@@ -329,7 +379,7 @@ export class ComboManager {
 
       await this.closePosition(symbol, position.amount, currentPrice, 'take-profit');
       // HALT only THIS PAIR — other pairs continue trading
-      this.state.haltPair(symbol);
+      this.state.haltPair(symbol, `take-profit: entry ${position.avgEntryPrice.toFixed(2)}, exit ${currentPrice.toFixed(2)}, PnL +${pnlPercent.toFixed(1)}%`);
       this.log.info(`Pair ${symbol} HALTED after take-profit. Other pairs continue. Restart bot to resume this pair.`);
       return true;
     }
@@ -369,6 +419,10 @@ export class ComboManager {
         sellAmount = Math.floor(sellAmount * factor) / factor;
         if (sellAmount <= 0 || sellAmount < mp.minAmount) {
           this.log.warn(`${reason}: Sell amount ${sellAmount} below minimum ${mp.minAmount} for ${symbol}`);
+          return;
+        }
+        if (sellAmount * currentPrice < mp.minCost) {
+          this.log.warn(`${reason}: Sell cost ${(sellAmount * currentPrice).toFixed(2)} below minCost ${mp.minCost} for ${symbol}`);
           return;
         }
       } catch (precErr) {
@@ -418,16 +472,14 @@ export class ComboManager {
     if (signal === 'hold') return;
 
     if (
-      (signal === 'buy') &&
+      (signal === 'buy' || signal === 'strong_buy') &&
       indicators.emaCrossover === 'bearish' &&
       strategy !== 'combo-meta'
     ) {
-      this.log.warn(`Skipping ${strategy} buy — bearish EMA crossover active`);
-      // For DCA: set the timer so it doesn't retry every tick during bearish crossover.
-      // It will try again after the full DCA interval when conditions may have changed.
-      if (strategy === 'dca') {
-        this.state.setLastDcaBuyTime(symbol, Date.now());
-      }
+      this.log.debug(`Skipping ${strategy} buy for ${symbol} — bearish EMA crossover active`);
+      // DO NOT reset DCA timer — DCA should retry when EMA turns bullish.
+      // Setting the timer here would block DCA for the entire interval during downtrends,
+      // which is the worst time to skip buying (DCA is designed to accumulate on dips).
       return;
     }
 
@@ -497,9 +549,9 @@ export class ComboManager {
     for (const pair of this.config.pairs) {
       const base = pair.symbol.split('/')[0]; // "BTC" from "BTC/USDT"
       const held = allBalances[base];
-      if (held && held.total > 0) {
-        // Use total (free + used), since orders are now cancelled
-        const sellAmount = held.free > 0 ? held.free : 0;
+      if (held && held.free > 0) {
+        // After cancelling all orders, free should be close to total
+        const sellAmount = held.free;
         if (sellAmount <= 0) {
           this.log.warn(`${base}: total=${held.total} but free=0 — some may still be locked`);
           continue;
@@ -521,6 +573,14 @@ export class ComboManager {
 
           const ticker = await this.exchange.fetchTicker(pair.symbol);
           const valueUSDT = roundedSellAmount * ticker.last;
+          // Check minCost before selling
+          try {
+            const mp = await this.exchange.getMarketPrecision(pair.symbol);
+            if (valueUSDT < mp.minCost) {
+              this.log.warn(`${base}: sell value ${valueUSDT.toFixed(2)} USDT below minCost ${mp.minCost} — skipping`);
+              continue;
+            }
+          } catch { /* precision already checked above */ }
           this.log.info(`Selling ${roundedSellAmount} ${base} (~${valueUSDT.toFixed(2)} USDT)`);
 
           const order = await this.exchange.createMarketSell(pair.symbol, roundedSellAmount, 'risk');
@@ -577,10 +637,13 @@ export class ComboManager {
       totalEarned: totalEarned.toFixed(2),
     });
 
-    // Show halted pairs
+    // Show halted pairs with reasons
     const haltedPairs = this.config.pairs.filter(p => this.state.isPairHalted(p.symbol));
     if (haltedPairs.length > 0) {
-      this.log.warn(`Halted pairs: ${haltedPairs.map(p => p.symbol).join(', ')}`);
+      for (const p of haltedPairs) {
+        const reason = this.state.getHaltReason(p.symbol) ?? 'unknown';
+        this.log.warn(`Halted: ${p.symbol} (${reason})`);
+      }
     }
 
     // Per-pair position & DCA stats
@@ -608,13 +671,18 @@ export class ComboManager {
   // Shutdown
   // ----------------------------------------------------------
 
-  async shutdown(): Promise<void> {
+  async shutdown(cancelOrders: boolean = false): Promise<void> {
     this.log.info('Shutting down ComboManager...');
-    for (const pair of this.config.pairs) {
-      await this.grid.cancelAll(pair.symbol);
+    if (cancelOrders) {
+      for (const pair of this.config.pairs) {
+        await this.grid.cancelAll(pair.symbol);
+      }
+      this.log.info('All grid orders cancelled.');
+    } else {
+      this.log.info('Soft shutdown — grid orders LEFT OPEN on exchange (will be synced on next start).');
     }
     this.state.shutdown();
-    this.log.info('All grid orders cancelled. State saved. Bot stopped.');
+    this.log.info('State saved. Bot stopped.');
   }
 
   isHalted(): boolean {

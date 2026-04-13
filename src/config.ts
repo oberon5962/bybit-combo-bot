@@ -22,6 +22,8 @@ export function loadConfig(): BotConfig {
     );
   }
 
+  const gridLevels = 10;
+
   const config: BotConfig = {
     // API
     apiKey,
@@ -36,9 +38,9 @@ export function loadConfig(): BotConfig {
     // BTC — надёжная база, ETH — потенциал роста.
     // Если капитал > 500 USDT, можно добавить SOL.
     pairs: [
-      { symbol: 'BTC/USDT', allocationPercent: 40 },
+      { symbol: 'BTC/USDT', allocationPercent: 35 },
       { symbol: 'ETH/USDT', allocationPercent: 35 },
-      { symbol: 'XRP/USDT', allocationPercent: 25 },
+      { symbol: 'XRP/USDT', allocationPercent: 30 },
     ],
 
     // -------------------------------------------------------
@@ -46,10 +48,10 @@ export function loadConfig(): BotConfig {
     // -------------------------------------------------------
     risk: {
       maxDrawdownPercent: 15,        // HALT если портфель упал на 15% от пика
-      maxOpenOrdersPerPair: 12,      // Запас под 10 grid-уровней + контр-ордера
-      stopLossPercent: 8,            // Стоп-лосс на позицию (шире для высокой волатильности)
-      takeProfitPercent: 10,          // Тейк-профит (поменьше, чтобы чаще фиксировать)
-      portfolioTakeProfitPercent: 30, // Продать ВСЁ когда портфель вырос на 30% от старта
+      maxOpenOrdersPerPair: gridLevels + 2, // Запас под grid-уровни + контр-ордера
+      stopLossPercent: 14,            // Стоп-лосс на позицию (шире для высокой волатильности)
+      takeProfitPercent: 12,          // Тейк-профит (поменьше, чтобы чаще фиксировать)
+      portfolioTakeProfitPercent: 100, // Продать ВСЁ когда портфель вырос на 30% от старта
                                       // Было 300 USDT → стало 450 USDT → продаём все монеты
     },
 
@@ -58,9 +60,9 @@ export function loadConfig(): BotConfig {
     // -------------------------------------------------------
     grid: {
       enabled: true,
-      gridLevels: 10,                // 5 buy + 5 sell (плотная сетка, чаще ловит колебания)
-      gridSpacingPercent: 0.5,       // 0.5% между уровнями (реагирует на мелкие движения)
-      orderSizePercent: 15,          // Каждый ордер = 15% от аллокации пары
+      gridLevels,                    // 6 buy + 6 sell (сетка под малый капитал)
+      gridSpacingPercent: 0.3,       // 0.3% между уровнями (покрытие 2.5% в каждую сторону)
+      orderSizePercent: 14,          // Каждый ордер = 18% от аллокации пары
     },
 
     // -------------------------------------------------------
@@ -68,7 +70,7 @@ export function loadConfig(): BotConfig {
     // -------------------------------------------------------
     dca: {
       enabled: false,
-      intervalMs: 3 * 60 * 60 * 1000,  // Каждые 3 часа
+      intervalSec: 3 * 60 * 60,         // Каждые 3 часа (10800 сек)
       baseOrderPercent: 5,              // 5% от аллокации пары за одну DCA-покупку
       rsiBoostThreshold: 28,            // Покупаем 1.5x когда RSI < 28
       rsiBoostMultiplier: 1.7,          // 1.7x при перепроданности
@@ -87,9 +89,10 @@ export function loadConfig(): BotConfig {
     },
 
     // -------------------------------------------------------
-    // Bot Tick Interval
+    // Bot Intervals
     // -------------------------------------------------------
-    tickIntervalMs: 60 * 1000,       // Проверка каждые 60 секунд (реже = меньше нагрузка на API)
+    tickIntervalSec: 10,             // Проверка каждые 10 секунд
+    syncIntervalSec: 6 * 60 * 60,   // Полный sync с Bybit каждые 6 часов (4 раза в сутки)
   };
 
   validateConfig(config);
@@ -136,15 +139,16 @@ function validateConfig(config: BotConfig): void {
 
   // DCA
   if (config.dca.enabled) {
-    if (config.dca.intervalMs < 60000) errors.push('DCA interval must be >= 1 minute');
+    if (config.dca.intervalSec < 60) errors.push('DCA intervalSec must be >= 60 seconds');
     if (config.dca.rsiBoostMultiplier <= 0) errors.push('rsiBoostMultiplier must be > 0');
     if (config.dca.rsiSkipThreshold <= config.dca.rsiBoostThreshold) {
       errors.push('rsiSkipThreshold must be > rsiBoostThreshold');
     }
   }
 
-  // Tick
-  if (config.tickIntervalMs < 10000) errors.push('tickIntervalMs must be >= 10 seconds');
+  // Tick & Sync
+  if (config.tickIntervalSec < 10) errors.push('tickIntervalSec must be >= 10 seconds');
+  if (config.syncIntervalSec < 0) errors.push('syncIntervalSec must be >= 0 (0 = disabled)');
 
   if (errors.length > 0) {
     throw new Error('Config validation failed:\n  - ' + errors.join('\n  - '));

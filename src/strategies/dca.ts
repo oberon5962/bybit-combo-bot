@@ -39,7 +39,7 @@ export class DCAStrategy {
     const lastBuy = this.state.getLastDcaBuyTime(symbol);
     const timeSinceLastBuy = now - lastBuy;
 
-    if (timeSinceLastBuy < this.config.intervalMs) {
+    if (timeSinceLastBuy < this.config.intervalSec * 1000) {
       return [];
     }
 

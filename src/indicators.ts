@@ -129,7 +129,16 @@ export function computeIndicators(
     };
   }
 
-  const closes = candles.map((c) => c.close);
+  // Filter out NaN/Infinity values that can come from exchange API errors
+  const closes = candles.map((c) => c.close).filter((c) => !isNaN(c) && isFinite(c));
+  if (closes.length < Math.max(config.rsiPeriod, config.emaSlowPeriod, config.bollingerPeriod) + 1) {
+    const price = closes.length > 0 ? closes[closes.length - 1] : 0;
+    return {
+      rsi: 50, emaFast: price, emaSlow: price, emaCrossover: 'neutral',
+      bollingerUpper: price, bollingerMiddle: price, bollingerLower: price,
+      pricePosition: 'above_middle',
+    };
+  }
 
   // RSI
   const rsi = calcRSI(closes, config.rsiPeriod);

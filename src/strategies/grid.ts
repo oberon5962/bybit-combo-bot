@@ -62,40 +62,53 @@ export class GridStrategy {
     if (this.state.isGridInitialized(symbol)) {
       const savedLevels = this.state.getGridLevels(symbol);
       if (savedLevels.length > 0) {
-        // Log only once per session, not every tick
-        if (!this.restoredLogged.has(symbol)) {
-          this.log.info(`Grid restored from saved state for ${symbol}`, {
-            levels: savedLevels.length,
-            ordersWithIds: savedLevels.filter((l) => l.orderId).length,
-          });
-          this.restoredLogged.add(symbol);
+        // Check if price has drifted far from grid center — rebalance if needed
+        const lowestPrice = savedLevels[0].price;
+        const highestPrice = savedLevels[savedLevels.length - 1].price;
+        const gridCenter = (lowestPrice + highestPrice) / 2;
+        const driftPercent = Math.abs(currentPrice - gridCenter) / gridCenter * 100;
+
+        if (driftPercent > 5) {
+          // Price moved >5% from grid center — cancel all and reinitialize
+          this.log.warn(`Grid rebalance for ${symbol}: price drifted ${driftPercent.toFixed(1)}% from center (${gridCenter.toFixed(2)} → ${currentPrice.toFixed(2)})`);
+          await this.cancelAll(symbol);
+          // Fall through to reinitialize below
+        } else {
+          // Log only once per session, not every tick
+          if (!this.restoredLogged.has(symbol)) {
+            this.log.info(`Grid restored from saved state for ${symbol}`, {
+              levels: savedLevels.length,
+              ordersWithIds: savedLevels.filter((l) => l.orderId).length,
+            });
+            this.restoredLogged.add(symbol);
+          }
+          return false;
         }
-        return false;
       }
     }
 
     const precision = await this.getPrecision(symbol);
     const { gridLevels, gridSpacingPercent } = this.config;
-    const halfLevels = Math.floor(gridLevels / 2);
+    const buyLevels = Math.floor(gridLevels / 2);
+    const sellLevels = Math.ceil(gridLevels / 2);
     const spacing = currentPrice * (gridSpacingPercent / 100);
     const levels: GridLevelState[] = [];
+    const usedPrices = new Set<number>();
 
     // Buy levels below price
-    for (let i = 1; i <= halfLevels; i++) {
-      levels.push({
-        price: this.roundPriceForMarket(currentPrice - spacing * i, precision.pricePrecision),
-        side: 'buy',
-        filled: false,
-      });
+    for (let i = 1; i <= buyLevels; i++) {
+      const price = this.roundPriceForMarket(currentPrice - spacing * i, precision.pricePrecision);
+      if (usedPrices.has(price)) continue; // skip duplicate after rounding
+      usedPrices.add(price);
+      levels.push({ price, side: 'buy', filled: false });
     }
 
     // Sell levels above price
-    for (let i = 1; i <= halfLevels; i++) {
-      levels.push({
-        price: this.roundPriceForMarket(currentPrice + spacing * i, precision.pricePrecision),
-        side: 'sell',
-        filled: false,
-      });
+    for (let i = 1; i <= sellLevels; i++) {
+      const price = this.roundPriceForMarket(currentPrice + spacing * i, precision.pricePrecision);
+      if (usedPrices.has(price)) continue; // skip duplicate after rounding
+      usedPrices.add(price);
+      levels.push({ price, side: 'sell', filled: false });
     }
 
     levels.sort((a, b) => a.price - b.price);
@@ -129,45 +142,64 @@ export class GridStrategy {
     const levels = this.state.getGridLevels(symbol);
     const orderBudget = allocationUSDT * (this.config.orderSizePercent / 100);
 
-    // Pre-fetch free crypto balance for sell-side checks
+    // Pre-fetch balances for buy/sell-side checks
     const base = symbol.split('/')[0]; // "BTC" from "BTC/USDT"
     let freeCrypto = 0;
+    let freeUSDT = 0;
     try {
       const allBalances = await this.exchange.fetchAllBalances();
       freeCrypto = allBalances[base]?.free ?? 0;
+      freeUSDT = allBalances['USDT']?.free ?? 0;
     } catch (err) {
-      this.log.warn(`Failed to fetch ${base} balance for grid sell check: ${err}`);
+      this.log.warn(`Failed to fetch balances for grid checks: ${err}`);
     }
 
     for (const level of levels) {
       if (level.orderId || level.filled) continue;
 
       try {
-        const amount = this.roundAmountForMarket(orderBudget / level.price, precision.amountPrecision);
+        let amount = this.roundAmountForMarket(orderBudget / level.price, precision.amountPrecision);
 
-        // Skip if amount is below exchange minimum
+        // Bump up to exchange minimum if too small, but don't exceed budget
         if (amount < precision.minAmount) {
-          this.log.warn(`Grid order too small for ${symbol}: ${amount} < min ${precision.minAmount}`);
-          continue;
+          if (precision.minAmount * level.price > orderBudget * 1.5) {
+            this.log.debug(`Grid order for ${symbol} at ${level.price}: min amount costs ${(precision.minAmount * level.price).toFixed(2)} but budget is ${orderBudget.toFixed(2)}. Skipping.`);
+            continue;
+          }
+          amount = precision.minAmount;
+          this.log.debug(`Grid order bumped to minAmount for ${symbol}: ${amount}`);
         }
         if (amount * level.price < precision.minCost) {
-          this.log.warn(`Grid order value too small for ${symbol}: ${(amount * level.price).toFixed(2)} USDT < min ${precision.minCost}`);
-          continue;
+          const minAmountForCost = Math.ceil((precision.minCost / level.price) * Math.pow(10, precision.amountPrecision)) / Math.pow(10, precision.amountPrecision);
+          if (minAmountForCost * level.price > orderBudget * 1.5) {
+            this.log.debug(`Grid order for ${symbol} at ${level.price}: minCost requires ${(minAmountForCost * level.price).toFixed(2)} but budget is ${orderBudget.toFixed(2)}. Skipping.`);
+            continue;
+          }
+          amount = Math.max(amount, minAmountForCost);
+          this.log.debug(`Grid order bumped to minCost for ${symbol}: ${amount} (~${(amount * level.price).toFixed(2)} USDT)`);
         }
 
         if (level.side === 'buy' && level.price < currentPrice) {
-          const order = await this.exchange.createLimitBuy(
-            symbol, amount, level.price, 'grid',
+          const orderCost = amount * level.price;
+          if (freeUSDT < orderCost) {
+            this.log.debug(`Grid buy skipped for ${symbol}: free USDT=${freeUSDT.toFixed(2)} < needed ${orderCost.toFixed(2)}`);
+            continue;
+          }
+          const order = await this.exchange.withRetry(
+            () => this.exchange.createLimitBuy(symbol, amount, level.price, 'grid'),
+            `Grid buy ${symbol} @ ${level.price}`,
           );
           level.orderId = order.id;
+          freeUSDT -= orderCost;
         } else if (level.side === 'sell' && level.price > currentPrice) {
           // Check if we have enough free crypto to place this sell
           if (freeCrypto < amount) {
             this.log.debug(`Grid sell skipped for ${symbol}: free ${base}=${freeCrypto.toFixed(8)} < needed ${amount}`);
             continue;
           }
-          const order = await this.exchange.createLimitSell(
-            symbol, amount, level.price, 'grid',
+          const order = await this.exchange.withRetry(
+            () => this.exchange.createLimitSell(symbol, amount, level.price, 'grid'),
+            `Grid sell ${symbol} @ ${level.price}`,
           );
           level.orderId = order.id;
           // Subtract placed amount from tracked free balance (for subsequent sell levels)
@@ -221,7 +253,15 @@ export class GridStrategy {
 
           // Determine actual filled amount
           const filledAmount = orderInfo.filled > 0 ? orderInfo.filled : expectedAmount;
+          // CRITICAL: never use price=0 — fallback to the level's limit price
           const actualPrice = orderInfo.price > 0 ? orderInfo.price : filledPrice;
+          if (actualPrice <= 0) {
+            this.log.error(`Grid fill for ${symbol} has price=0! Skipping to avoid position corruption.`);
+            level.orderId = undefined;
+            level.filled = false;
+            levelsChanged = true;
+            continue;
+          }
 
           if (orderInfo.status === 'canceled' && orderInfo.filled === 0) {
             // Order was cancelled without any fill — just clear it
@@ -257,6 +297,15 @@ export class GridStrategy {
             this.state.reducePosition(symbol, filledAmount);
           }
 
+          // Check if pair was halted by SL/TP — fill is already recorded above, skip counter-order only
+          if (this.state.isPairHalted(symbol)) {
+            this.log.warn(`Grid: fill recorded for ${symbol}, but skipping counter-order — pair halted by SL/TP`);
+            level.orderId = undefined;
+            level.filled = false;
+            levelsChanged = true;
+            continue;
+          }
+
           // Calculate counter-order with proper precision
           const rawCounterPrice = filledSide === 'buy'
             ? filledPrice * (1 + this.config.gridSpacingPercent / 100)
@@ -264,20 +313,51 @@ export class GridStrategy {
           const counterPrice = this.roundPriceForMarket(rawCounterPrice, precision.pricePrecision);
           const counterSide: 'buy' | 'sell' = filledSide === 'buy' ? 'sell' : 'buy';
 
-          // BUG #3 fix: use the SAME amount from the filled order, not recalculated
-          const counterAmount = filledAmount;
+          // BUG #3 fix: use the SAME amount from the filled order, rounded to market precision
+          const counterAmount = this.roundAmountForMarket(filledAmount, precision.amountPrecision);
 
           // BUG #7 fix: execute counter-order HERE, and only update state AFTER success
           try {
             let counterOrderId: string | undefined;
             if (counterSide === 'sell') {
-              const order = await this.exchange.createLimitSell(
-                symbol, counterAmount, counterPrice, 'grid',
+              // Check free crypto balance before placing sell counter-order
+              try {
+                const balances = await this.exchange.fetchAllBalances();
+                const base = symbol.split('/')[0];
+                const freeBal = balances[base]?.free ?? 0;
+                if (freeBal < counterAmount) {
+                  this.log.warn(`Grid counter-sell skipped for ${symbol}: free ${base}=${freeBal.toFixed(8)} < needed ${counterAmount}`);
+                  level.orderId = undefined;
+                  level.filled = false;
+                  levelsChanged = true;
+                  continue;
+                }
+              } catch (balErr) {
+                this.log.warn(`Failed to check balance for counter-sell, proceeding anyway: ${balErr}`);
+              }
+              const order = await this.exchange.withRetry(
+                () => this.exchange.createLimitSell(symbol, counterAmount, counterPrice, 'grid'),
+                `Grid counter-sell ${symbol} @ ${counterPrice}`,
               );
               counterOrderId = order.id;
             } else {
-              const order = await this.exchange.createLimitBuy(
-                symbol, counterAmount, counterPrice, 'grid',
+              // Check free USDT before placing buy counter-order
+              const counterCost = counterAmount * counterPrice;
+              try {
+                const usdtBal = await this.exchange.fetchBalance('USDT');
+                if (usdtBal.free < counterCost) {
+                  this.log.warn(`Grid counter-buy skipped for ${symbol}: free USDT=${usdtBal.free.toFixed(2)} < needed ${counterCost.toFixed(2)}`);
+                  level.orderId = undefined;
+                  level.filled = false;
+                  levelsChanged = true;
+                  continue;
+                }
+              } catch (balErr) {
+                this.log.warn(`Failed to check USDT balance for counter-buy, proceeding anyway: ${balErr}`);
+              }
+              const order = await this.exchange.withRetry(
+                () => this.exchange.createLimitBuy(symbol, counterAmount, counterPrice, 'grid'),
+                `Grid counter-buy ${symbol} @ ${counterPrice}`,
               );
               counterOrderId = order.id;
             }

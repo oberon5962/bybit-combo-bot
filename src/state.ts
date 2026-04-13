@@ -40,6 +40,7 @@ export interface PairState {
 
   // Per-pair halt (SL/TP triggered — pair paused, other pairs continue)
   halted: boolean;
+  haltReason?: string;
 }
 
 export interface BotState {
@@ -145,6 +146,7 @@ export class StateManager {
               positionAmount: typeof pd.positionAmount === 'number' ? pd.positionAmount : 0,
               positionCostBasis: typeof pd.positionCostBasis === 'number' ? pd.positionCostBasis : 0,
               halted: typeof pd.halted === 'boolean' ? pd.halted : false,
+              haltReason: typeof pd.haltReason === 'string' ? pd.haltReason : undefined,
             };
           }
         }
@@ -277,11 +279,17 @@ export class StateManager {
   }
   reducePosition(symbol: string, amount: number): void {
     const ps = this.getPairState(symbol);
-    if (ps.positionAmount <= 0) return;
+    if (ps.positionAmount < 1e-10) {
+      // Position is essentially zero — reset to avoid division by near-zero
+      ps.positionAmount = 0;
+      ps.positionCostBasis = 0;
+      this.save();
+      return;
+    }
     // Reduce cost basis proportionally
     const fraction = Math.min(amount / ps.positionAmount, 1);
-    ps.positionCostBasis -= ps.positionCostBasis * fraction;
-    ps.positionAmount -= amount;
+    ps.positionCostBasis = Math.max(0, ps.positionCostBasis * (1 - fraction));
+    ps.positionAmount = Math.max(0, ps.positionAmount - amount);
     // Clamp to zero to avoid floating point drift
     if (ps.positionAmount < 1e-12) {
       ps.positionAmount = 0;
@@ -300,12 +308,19 @@ export class StateManager {
   isPairHalted(symbol: string): boolean {
     return this.getPairState(symbol).halted;
   }
-  haltPair(symbol: string): void {
-    this.getPairState(symbol).halted = true;
+  haltPair(symbol: string, reason?: string): void {
+    const ps = this.getPairState(symbol);
+    ps.halted = true;
+    ps.haltReason = reason;
     this.save();
   }
+  getHaltReason(symbol: string): string | undefined {
+    return this.getPairState(symbol).haltReason;
+  }
   resetPairHalt(symbol: string): void {
-    this.getPairState(symbol).halted = false;
+    const ps = this.getPairState(symbol);
+    ps.halted = false;
+    ps.haltReason = undefined;
     this.save();
   }
   // Check if ALL pairs are halted (used for global halt message)
@@ -317,9 +332,9 @@ export class StateManager {
   // Trade history
   addTrade(trade: TradeEntry): void {
     this.state.recentTrades.push(trade);
-    // Keep only last 100 trades
-    if (this.state.recentTrades.length > 100) {
-      this.state.recentTrades = this.state.recentTrades.slice(-100);
+    // Keep only last 500 trades (~2 days of active grid trading)
+    if (this.state.recentTrades.length > 500) {
+      this.state.recentTrades = this.state.recentTrades.slice(-500);
     }
     this.save();
   }

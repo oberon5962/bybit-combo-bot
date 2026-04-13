@@ -127,9 +127,12 @@ export class ExchangeSync {
         for (const o of unknownOrders) {
           this.log.warn(`  → cancelling ${o.side} ${o.amount} @ ${o.price} (id: ${o.id})`);
           try {
-            await this.exchange.cancelOrder(o.id, symbol);
+            await this.exchange.withRetry(
+              () => this.exchange.cancelOrder(o.id, symbol),
+              `Cancel zombie ${o.id} on ${symbol}`,
+            );
           } catch (cancelErr) {
-            this.log.error(`  → failed to cancel zombie order ${o.id}: ${cancelErr}`);
+            this.log.error(`  → FAILED to cancel zombie order ${o.id} after retries: ${cancelErr}. Manual cancellation required on Bybit.`);
           }
         }
       }

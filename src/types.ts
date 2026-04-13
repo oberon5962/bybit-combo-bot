@@ -19,8 +19,11 @@ export interface BotConfig {
   dca: DCAConfig;
   indicators: IndicatorConfig;
 
-  // Polling interval in ms
-  tickIntervalMs: number;
+  // Polling interval in seconds
+  tickIntervalSec: number;
+
+  // Sync with exchange interval in seconds (0 = only on startup)
+  syncIntervalSec: number;
 }
 
 export interface PairConfig {
@@ -45,7 +48,7 @@ export interface GridConfig {
 
 export interface DCAConfig {
   enabled: boolean;
-  intervalMs: number;           // how often to DCA (e.g. every 4 hours)
+  intervalSec: number;          // how often to DCA in seconds (e.g. every 4 hours = 14400)
   baseOrderPercent: number;     // base order as % of pair allocation
   rsiBoostThreshold: number;    // buy more when RSI below this (e.g. 25)
   rsiBoostMultiplier: number;   // multiply order size by this when RSI is low

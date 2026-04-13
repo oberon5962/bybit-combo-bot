@@ -29,7 +29,8 @@ async function main(): Promise<void> {
   const config = loadConfig();
   log.info(`Mode: ${config.testnet ? 'TESTNET' : '🔴 LIVE'}`);
   log.info(`Pairs: ${config.pairs.map((p) => `${p.symbol} (${p.allocationPercent}%)`).join(', ')}`);
-  log.info(`Tick interval: ${config.tickIntervalMs / 1000}s`);
+  log.info(`Tick interval: ${config.tickIntervalSec}s`);
+  log.info(`Sync interval: ${config.syncIntervalSec > 0 ? config.syncIntervalSec + 's' : 'disabled'}`);
 
   // Initialize exchange
   const exchange = new BybitExchange(config, log);
@@ -58,6 +59,7 @@ async function main(): Promise<void> {
 
   let tickCount = 0;
   let tickInProgress = false; // Guard against overlapping ticks
+  let lastSyncTime = Date.now();
 
   const runTick = async () => {
     // Prevent concurrent ticks if previous tick is still running (slow API, etc.)
@@ -71,6 +73,16 @@ async function main(): Promise<void> {
     const tickStart = Date.now();
 
     try {
+      // Periodic sync with exchange
+      if (config.syncIntervalSec > 0) {
+        const timeSinceSync = (Date.now() - lastSyncTime) / 1000;
+        if (timeSinceSync >= config.syncIntervalSec) {
+          log.info('Periodic sync with Bybit...');
+          await sync.syncOnStartup();
+          lastSyncTime = Date.now();
+        }
+      }
+
       log.debug(`--- Tick #${tickCount} ---`);
       await manager.tick();
     } catch (err) {
@@ -87,18 +99,28 @@ async function main(): Promise<void> {
   await runTick();
 
   // Schedule recurring ticks
-  const interval = setInterval(runTick, config.tickIntervalMs);
+  const interval = setInterval(runTick, config.tickIntervalSec * 1000);
 
   // ----------------------------------------------------------
   // Graceful shutdown
   // ----------------------------------------------------------
 
+  let shutdownCount = 0;
   const shutdown = async (signal: string) => {
-    log.info(`Received ${signal}. Shutting down gracefully...`);
-    clearInterval(interval);
-    await manager.shutdown();
-    log.info('Bot stopped. Goodbye!');
-    process.exit(0);
+    shutdownCount++;
+    if (shutdownCount === 1) {
+      log.info(`Received ${signal}. Soft shutdown — keeping grid orders on exchange...`);
+      clearInterval(interval);
+      await manager.shutdown(false); // soft: keep orders alive
+      log.info('Bot stopped. Goodbye!');
+      process.exit(0);
+    } else {
+      // Second Ctrl+C = hard shutdown: cancel all orders
+      log.info(`Received ${signal} again. Hard shutdown — cancelling all orders...`);
+      await manager.shutdown(true);
+      log.info('All orders cancelled. Bot stopped.');
+      process.exit(0);
+    }
   };
 
   process.on('SIGINT', () => shutdown('SIGINT'));
