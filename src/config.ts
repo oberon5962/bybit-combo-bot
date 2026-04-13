@@ -22,7 +22,7 @@ export function loadConfig(): BotConfig {
     );
   }
 
-  const gridLevels = 10;
+  const gridLevels = 20;
 
   const config: BotConfig = {
     // API
@@ -40,9 +40,9 @@ export function loadConfig(): BotConfig {
     pairs: [
       // { symbol: 'BTC/USDT', allocationPercent: 35 },
       // { symbol: 'ETH/USDT', allocationPercent: 35 },
-      { symbol: 'SUI/USDT', allocationPercent: 35 },
+      { symbol: 'SUI/USDT', allocationPercent: 25 },
       { symbol: 'SOL/USDT', allocationPercent: 35 },
-      { symbol: 'XRP/USDT', allocationPercent: 30 },
+      { symbol: 'XRP/USDT', allocationPercent: 40 },
     ],
 
     // -------------------------------------------------------

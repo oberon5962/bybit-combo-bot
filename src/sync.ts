@@ -94,8 +94,24 @@ export class ExchangeSync {
 
       // Get saved grid levels
       const savedLevels = this.state.getGridLevels(symbol);
+
       if (savedLevels.length === 0) {
-        this.log.info(`[sync] ${symbol}: no saved grid levels`);
+        // No saved grid levels — adopt exchange orders as grid levels
+        if (exchangeOrders.length > 0) {
+          this.log.info(`[sync] ${symbol}: no saved grid levels, adopting ${exchangeOrders.length} orders from Bybit`);
+          const adoptedLevels = exchangeOrders.map((o) => ({
+            price: o.price,
+            side: o.side as 'buy' | 'sell',
+            orderId: o.id,
+            filled: false,
+          }));
+          adoptedLevels.sort((a, b) => a.price - b.price);
+          this.state.setGridLevels(symbol, adoptedLevels);
+          this.state.setGridInitialized(symbol, true);
+          this.log.info(`[sync] ${symbol}: adopted ${adoptedLevels.length} orders as grid levels`);
+        } else {
+          this.log.info(`[sync] ${symbol}: no saved grid levels, no orders on exchange`);
+        }
         continue;
       }
 
@@ -121,26 +137,35 @@ export class ExchangeSync {
       const knownIds = new Set(savedLevels.map((l) => l.orderId).filter(Boolean));
       const unknownOrders = exchangeOrders.filter((o) => !knownIds.has(o.id));
 
-      // BUG #9 fix: cancel zombie orders (on exchange but not in bot state)
+      // Adopt unknown orders into grid levels instead of cancelling
       if (unknownOrders.length > 0) {
-        this.log.warn(`[sync] ${symbol}: found ${unknownOrders.length} unknown orders on Bybit — cancelling zombies:`);
+        this.log.info(`[sync] ${symbol}: found ${unknownOrders.length} untracked orders on Bybit — adopting into grid:`);
         for (const o of unknownOrders) {
-          this.log.warn(`  → cancelling ${o.side} ${o.amount} @ ${o.price} (id: ${o.id})`);
-          try {
-            await this.exchange.withRetry(
-              () => this.exchange.cancelOrder(o.id, symbol),
-              `Cancel zombie ${o.id} on ${symbol}`,
-            );
-          } catch (cancelErr) {
-            this.log.error(`  → FAILED to cancel zombie order ${o.id} after retries: ${cancelErr}. Manual cancellation required on Bybit.`);
+          // Try to match to an existing unplaced level at the same price and side
+          const match = savedLevels.find(
+            (l) => !l.orderId && l.side === o.side && Math.abs(l.price - o.price) / o.price < 0.001,
+          );
+          if (match) {
+            match.orderId = o.id;
+            this.log.info(`  → matched ${o.side} @ ${o.price} to existing level (id: ${o.id})`);
+          } else {
+            // No matching level — add as new level
+            savedLevels.push({
+              price: o.price,
+              side: o.side as 'buy' | 'sell',
+              orderId: o.id,
+              filled: false,
+            });
+            this.log.info(`  → adopted ${o.side} @ ${o.price} as new level (id: ${o.id})`);
           }
         }
+        savedLevels.sort((a, b) => a.price - b.price);
       }
 
       // Save cleaned state
       this.state.setGridLevels(symbol, savedLevels);
 
-      this.log.info(`[sync] ${symbol}: ${validCount} orders confirmed, ${removedCount} stale removed, ${unknownOrders.length} unknown on exchange`);
+      this.log.info(`[sync] ${symbol}: ${validCount} orders confirmed, ${removedCount} stale removed, ${unknownOrders.length} adopted from exchange`);
     }
   }
 
