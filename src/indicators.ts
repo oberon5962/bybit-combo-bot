@@ -36,6 +36,7 @@ export function calcRSI(closes: number[], period: number = 14): number {
     }
   }
 
+  if (avgLoss === 0 && avgGain === 0) return 50; // flat prices → neutral
   if (avgLoss === 0) return 100;
   const rs = avgGain / avgLoss;
   return 100 - 100 / (1 + rs);

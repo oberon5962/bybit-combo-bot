@@ -150,10 +150,14 @@ export class ExchangeSync {
                 // Flip level to counter-side so grid places counter-order on next tick
                 const gridSpacingPercent = this.config.grid.gridSpacingPercent;
                 const counterSide: 'buy' | 'sell' = level.side === 'buy' ? 'sell' : 'buy';
-                const counterPrice = level.side === 'buy'
+                const rawCounterPrice = level.side === 'buy'
                   ? fillPrice * (1 + gridSpacingPercent / 100)
                   : fillPrice * (1 - gridSpacingPercent / 100);
-                this.log.info(`[sync] ${symbol}: order ${level.orderId} at ${level.price} (${level.side}) was FILLED — position updated (${fillAmount} @ ${fillPrice}), level flipped to ${counterSide} @ ${counterPrice.toFixed(4)}`);
+                // Round to market precision (same as grid.ts) to avoid Bybit rejection
+                const pricePrecision = (await this.exchange.getMarketPrecision(symbol)).pricePrecision;
+                const factor = Math.pow(10, pricePrecision);
+                const counterPrice = Math.round(rawCounterPrice * factor) / factor;
+                this.log.info(`[sync] ${symbol}: order ${level.orderId} at ${level.price} (${level.side}) was FILLED — position updated (${fillAmount} @ ${fillPrice}), level flipped to ${counterSide} @ ${counterPrice}`);
                 level.side = counterSide;
                 level.price = counterPrice;
                 level.orderId = undefined;

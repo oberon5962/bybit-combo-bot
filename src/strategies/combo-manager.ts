@@ -138,22 +138,29 @@ export class ComboManager {
     let skipGlobalChecks = false;
     if (this.lastTickPortfolioValue > 0) {
       const jumpPercent = ((totalPortfolioUSDT - this.lastTickPortfolioValue) / this.lastTickPortfolioValue) * 100;
-      if (jumpPercent > 20) {
+      if (Math.abs(jumpPercent) > 20) {
         // Check if any trades happened recently (within last 2 tick intervals)
         const trades = this.state.getRecentTrades();
         const cutoff = Date.now() - this.config.tickIntervalSec * 2000;
         const hasRecentTrades = trades.length > 0 && trades[trades.length - 1].timestamp > cutoff;
 
         if (!hasRecentTrades) {
-          // No recent trades → deposit
-          const deposit = totalPortfolioUSDT - this.lastTickPortfolioValue;
-          this.state.startingCapital += deposit;
-          this.state.peakCapital = Math.max(this.state.peakCapital, totalPortfolioUSDT);
-          this.log.info(`DEPOSIT DETECTED: +${deposit.toFixed(2)} USDT → new startingCapital: ${this.state.startingCapital.toFixed(2)}`);
+          const change = totalPortfolioUSDT - this.lastTickPortfolioValue;
+          if (change > 0) {
+            // Deposit
+            this.state.startingCapital += change;
+            this.state.peakCapital = Math.max(this.state.peakCapital, totalPortfolioUSDT);
+            this.log.info(`DEPOSIT DETECTED: +${change.toFixed(2)} USDT → new startingCapital: ${this.state.startingCapital.toFixed(2)}`);
+          } else {
+            // Withdrawal — adjust startingCapital and peakCapital down
+            this.state.startingCapital += change; // change is negative
+            this.state.peakCapital = Math.max(totalPortfolioUSDT, this.state.startingCapital);
+            this.log.info(`WITHDRAWAL DETECTED: ${change.toFixed(2)} USDT → new startingCapital: ${this.state.startingCapital.toFixed(2)}`);
+          }
         } else {
           // Trades + huge jump → suspicious, freeze global checks this tick
           skipGlobalChecks = true;
-          this.log.warn(`Portfolio spike +${jumpPercent.toFixed(0)}% with recent trades — freezing peak/drawdown/TP this tick`);
+          this.log.warn(`Portfolio spike ${jumpPercent > 0 ? '+' : ''}${jumpPercent.toFixed(0)}% with recent trades — freezing peak/drawdown/TP this tick`);
         }
       }
     }

@@ -19,6 +19,7 @@ export class GridStrategy {
   // BUG #12 fix: cache market precision per symbol
   private precisionCache: Map<string, { pricePrecision: number; amountPrecision: number; minAmount: number; minCost: number }> = new Map();
   private lastSkipSummary: Map<string, string> = new Map(); // suppress repeated skip logs
+  private lastRebalanceTime: Map<string, number> = new Map(); // cooldown between rebalances
 
   constructor(config: BotConfig, exchange: BybitExchange, log: Logger, state: StateManager) {
     this.config = config.grid;
@@ -149,8 +150,18 @@ export class GridStrategy {
         const driftPercent = Math.abs(currentPrice - gridCenter) / gridCenter * 100;
 
         if (driftPercent > this.config.rebalancePercent) {
+          // Cooldown: minimum 5 minutes between rebalances to avoid thrashing
+          const lastRebalance = this.lastRebalanceTime.get(symbol) ?? 0;
+          const rebalanceCooldownMs = 5 * 60 * 1000;
+          if (Date.now() - lastRebalance < rebalanceCooldownMs) {
+            if (!this.restoredLogged.has(symbol)) {
+              this.log.info(`Grid rebalance deferred for ${symbol}: cooldown active (${Math.round((rebalanceCooldownMs - (Date.now() - lastRebalance)) / 1000)}s left)`);
+            }
+            return false;
+          }
           // Price moved beyond rebalance threshold from grid center — cancel all and reinitialize
           this.log.warn(`Grid rebalance for ${symbol}: price drifted ${driftPercent.toFixed(1)}% from center (${gridCenter.toFixed(2)} → ${currentPrice.toFixed(2)})`);
+          this.lastRebalanceTime.set(symbol, Date.now());
           await this.cancelAll(symbol);
           // Fall through to reinitialize below
         } else {
