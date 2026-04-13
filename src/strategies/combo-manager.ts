@@ -26,6 +26,7 @@ export class ComboManager {
   private btcPaused: boolean = false;
   private lastBtcCheck: number = 0;
   private lastIndicatorsPerPair: Map<string, IndicatorSnapshot> = new Map();
+  private lastTickPortfolioValue: number = 0;
 
   constructor(config: BotConfig, exchange: BybitExchange, log: Logger, state: StateManager) {
     this.config = config;
@@ -133,20 +134,49 @@ export class ComboManager {
       }
     }
 
-    // Update peak capital
-    if (totalPortfolioUSDT > this.state.peakCapital) {
-      this.state.peakCapital = totalPortfolioUSDT;
+    // Deposit/withdrawal detection: compare with previous tick value
+    let skipGlobalChecks = false;
+    if (this.lastTickPortfolioValue > 0) {
+      const jumpPercent = ((totalPortfolioUSDT - this.lastTickPortfolioValue) / this.lastTickPortfolioValue) * 100;
+      if (jumpPercent > 20) {
+        // Check if any trades happened recently (within last 2 tick intervals)
+        const trades = this.state.getRecentTrades();
+        const cutoff = Date.now() - this.config.tickIntervalSec * 2000;
+        const hasRecentTrades = trades.length > 0 && trades[trades.length - 1].timestamp > cutoff;
+
+        if (!hasRecentTrades) {
+          // No recent trades → deposit
+          const deposit = totalPortfolioUSDT - this.lastTickPortfolioValue;
+          this.state.startingCapital += deposit;
+          this.state.peakCapital = Math.max(this.state.peakCapital, totalPortfolioUSDT);
+          this.log.info(`DEPOSIT DETECTED: +${deposit.toFixed(2)} USDT → new startingCapital: ${this.state.startingCapital.toFixed(2)}`);
+        } else {
+          // Trades + huge jump → suspicious, freeze global checks this tick
+          skipGlobalChecks = true;
+          this.log.warn(`Portfolio spike +${jumpPercent.toFixed(0)}% with recent trades — freezing peak/drawdown/TP this tick`);
+        }
+      }
+    }
+    this.lastTickPortfolioValue = totalPortfolioUSDT;
+
+    if (!skipGlobalChecks) {
+      // Update peak capital
+      if (totalPortfolioUSDT > this.state.peakCapital) {
+        this.state.peakCapital = totalPortfolioUSDT;
+      }
     }
 
     // Check MAX DRAWDOWN — halt if portfolio drops too much
-    const drawdown = this.state.peakCapital > 0
-      ? ((this.state.peakCapital - totalPortfolioUSDT) / this.state.peakCapital) * 100
-      : 0;
-    if (drawdown > this.config.risk.maxDrawdownPercent) {
-      this.log.error(`MAX DRAWDOWN EXCEEDED: ${drawdown.toFixed(1)}% > ${this.config.risk.maxDrawdownPercent}%`);
-      this.log.error('HALTING ALL TRADING.');
-      this.state.halted = true;
-      return;
+    if (!skipGlobalChecks) {
+      const drawdown = this.state.peakCapital > 0
+        ? ((this.state.peakCapital - totalPortfolioUSDT) / this.state.peakCapital) * 100
+        : 0;
+      if (drawdown > this.config.risk.maxDrawdownPercent) {
+        this.log.error(`MAX DRAWDOWN EXCEEDED: ${drawdown.toFixed(1)}% > ${this.config.risk.maxDrawdownPercent}%`);
+        this.log.error('HALTING ALL TRADING.');
+        this.state.halted = true;
+        return;
+      }
     }
 
     // Check PORTFOLIO TAKE PROFIT — sell everything if target reached
@@ -156,7 +186,7 @@ export class ComboManager {
     const profitPercent = this.state.startingCapital > 0
       ? ((totalPortfolioUSDT - this.state.startingCapital) / this.state.startingCapital) * 100
       : 0;
-    if (this.state.startingCapital > 0 && profitPercent >= this.config.risk.portfolioTakeProfitPercent) {
+    if (!skipGlobalChecks && this.state.startingCapital > 0 && profitPercent >= this.config.risk.portfolioTakeProfitPercent) {
       this.log.info('='.repeat(60));
       this.log.info(`PORTFOLIO TAKE PROFIT TRIGGERED!`);
       this.log.info(`Started with: ${this.state.startingCapital.toFixed(2)} USDT`);

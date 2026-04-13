@@ -146,16 +146,18 @@ export function computeIndicators(
   // Forward-fill NaN/Infinity values to preserve temporal alignment
   // (filtering shifts indices and breaks EMA crossover detection)
   const rawCloses = candles.map((c) => c.close);
+  // Find first valid value for leading NaN fill (avoids injecting 0 into calculations)
+  const firstValid = rawCloses.find(v => !isNaN(v) && isFinite(v) && v > 0) ?? 0;
   const closes: number[] = [];
   for (let i = 0; i < rawCloses.length; i++) {
     if (!isNaN(rawCloses[i]) && isFinite(rawCloses[i])) {
       closes.push(rawCloses[i]);
     } else {
-      closes.push(i > 0 ? closes[i - 1] : 0);
+      closes.push(i > 0 ? closes[i - 1] : firstValid);
     }
   }
-  // Check if we still have enough valid data
-  const validCount = closes.filter(c => c > 0).length;
+  // Check if we still have enough valid data (count from raw, not forward-filled)
+  const validCount = rawCloses.filter(c => !isNaN(c) && isFinite(c) && c > 0).length;
   if (validCount < Math.max(config.rsiPeriod, config.emaSlowPeriod, config.bollingerPeriod) + 1) {
     const price = closes.length > 0 ? closes[closes.length - 1] : 0;
     return {

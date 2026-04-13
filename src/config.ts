@@ -22,7 +22,7 @@ export function loadConfig(): BotConfig {
     );
   }
 
-  const gridLevels = 20;
+  const gridLevels = 14;
 
   const config: BotConfig = {
     // API
@@ -50,7 +50,7 @@ export function loadConfig(): BotConfig {
     // -------------------------------------------------------
     risk: {
       maxDrawdownPercent: 15,        // HALT если портфель упал на 15% от пика
-      maxOpenOrdersPerPair: gridLevels + 2, // Запас под grid-уровни + контр-ордера
+      maxOpenOrdersPerPair: gridLevels + 4, // Запас под grid-уровни + контр-ордера + orphan sells
       stopLossPercent: 14,            // Стоп-лосс на позицию (шире для высокой волатильности)
       takeProfitPercent: 12,          // Тейк-профит (поменьше, чтобы чаще фиксировать)
       portfolioTakeProfitPercent: 100, // Продать ВСЁ когда портфель вырос на 100% от старта
@@ -72,7 +72,7 @@ export function loadConfig(): BotConfig {
       enabled: true,
       gridLevels,                    // 10 buy + 10 sell (покрытие ±5% от центра)
       gridSpacingPercent: 0.5,       // 0.5% между уровнями (покрытие 5% в каждую сторону)
-      orderSizePercent: 20,          // Каждый ордер = 18% от аллокации пары
+      orderSizePercent: 14,          // Каждый ордер = 14% от аллокации пары
       rebalancePercent: 2,           // Перестроить сетку если цена ушла >2% от центра (вверх или вниз)
       rsiOverboughtThreshold: 70,    // Пропускаем grid-buy при RSI > 70 (100 = отключить)
       useEmaFilter: true,            // Пропускаем grid-buy при медвежьем EMA кроссовере (false = отключить)
@@ -84,7 +84,7 @@ export function loadConfig(): BotConfig {
       useBollingerAdaptive: true,
       bollingerBuyMultiplier: 1.5,   // orderSize * 1.5 при покупке у нижней полосы
       bollingerSellMultiplier: 1.5,  // orderSize * 1.5 при продаже у верхней полосы (только EMA bearish)
-      bollingerShiftLevels: 3,       // перекинуть 3 уровня: напр. 10/10 → 13/7 buy/sell (или 7/13)
+      bollingerShiftLevels: 2,       // перекинуть 2 уровня: напр. 7/7 → 9/5 buy/sell (или 5/9)
     },
 
     // -------------------------------------------------------

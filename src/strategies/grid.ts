@@ -439,20 +439,23 @@ export class GridStrategy {
             continue;
           }
 
-          // Calculate counter-order from actual fill price (may be better than limit)
+          // Calculate counter-order from grid level price (maintains consistent spacing)
           const rawCounterPrice = filledSide === 'buy'
-            ? actualPrice * (1 + this.config.gridSpacingPercent / 100)
-            : actualPrice * (1 - this.config.gridSpacingPercent / 100);
+            ? filledPrice * (1 + this.config.gridSpacingPercent / 100)
+            : filledPrice * (1 - this.config.gridSpacingPercent / 100);
           const counterPrice = this.roundPriceForMarket(rawCounterPrice, precision.pricePrecision);
           const counterSide: 'buy' | 'sell' = filledSide === 'buy' ? 'sell' : 'buy';
 
           // BUG #3 fix: use the SAME amount from the filled order, rounded to market precision
           let counterAmount = this.roundAmountForMarket(filledAmount, precision.amountPrecision);
 
-          // Skip counter-order if below exchange minimums
+          // Skip counter-order if below exchange minimums — flip level to counter-side
+          // so it doesn't re-buy at the original price indefinitely
           const counterValue = counterAmount * counterPrice;
           if (counterAmount < precision.minAmount || counterValue < precision.minCost) {
-            this.log.debug(`Grid counter-order too small for ${symbol}: ${counterAmount} @ ${counterPrice} = ${counterValue.toFixed(2)} USDT (min: ${precision.minAmount} / ${precision.minCost} USDT)`);
+            this.log.debug(`Grid counter-order too small for ${symbol}: ${counterAmount} @ ${counterPrice} = ${counterValue.toFixed(2)} USDT (min: ${precision.minAmount} / ${precision.minCost} USDT) — retiring level`);
+            level.side = counterSide;
+            level.price = counterPrice;
             level.orderId = undefined;
             level.filled = false;
             levelsChanged = true;
@@ -570,7 +573,9 @@ export class GridStrategy {
         if (freeBal > 0 && freeBal * ticker.last >= precision.minCost) {
           // Place sells in chunks of orderSize at increasing price levels
           const orderAmount = allocationUSDT * this.config.orderSizePercent / 100 / ticker.last;
-          if (orderAmount <= 0) return decisions;
+          if (orderAmount <= 0) {
+            this.log.warn(`Orphan-sell skipped for ${symbol}: orderAmount <= 0`);
+          } else {
           let remaining = freeBal;
           let priceStep = 1;
 
@@ -610,6 +615,7 @@ export class GridStrategy {
           }
           levels.sort((a, b) => a.price - b.price);
           this.state.setGridLevels(symbol, levels);
+          }
         }
       } catch (err) {
         this.log.warn(`Failed to place orphan-sell for ${symbol}: ${sanitizeError(err)}`);

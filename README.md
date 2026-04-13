@@ -313,6 +313,44 @@ Summary каждые 10 тиков: капитал, PnL, drawdown, trades, posit
 - gridLevels: 20 (10 buy + 10 sell)
 - Подробные комментарии для indicators (RSI, EMA, Bollinger)
 
+### v0.8.0 — `8e5b3fa` (2026-04-14)
+
+Два раунда аудита (12 багов), новый механизм Bollinger Bands Adaptive Grid.
+
+**Новый механизм: Bollinger Bands Adaptive Grid (включаемый/отключаемый)**
+
+Адаптирует grid на основе позиции цены относительно полос Боллинджера + EMA фильтр для sell:
+
+| Ситуация | Уровни (при shift=3) | Buy size | Sell size |
+|---|---|---|---|
+| Цена у нижней BB | 13B/7S | x1.5 | x1.0 |
+| Цена ниже середины BB | 11B/9S | x1.0 | x1.0 |
+| Цена нейтрально | 10B/10S | x1.0 | x1.0 |
+| Цена у верхней BB + EMA bearish | 7B/13S | x1.0 | x1.5 |
+| Цена у верхней BB + EMA bullish | 10B/10S | x1.0 | x1.0 |
+
+Конфиг: `useBollingerAdaptive`, `bollingerBuyMultiplier`, `bollingerSellMultiplier`, `bollingerShiftLevels`.
+
+**EMA фильтр — persistent вместо event:**
+- Было: `emaCrossover === 'bearish'` (срабатывает на 1 свечу в момент пересечения)
+- Стало: `emaFast < emaSlow` (постоянно пока fast ниже slow = нисходящий тренд)
+
+**Аудит раунд 1 — 7 багов (коммит `a13b9c4`):**
+- grid.ts: cancelled-check был unreachable (dead branch) — переставлен вверх
+- grid.ts: counter-price использует actualPrice (реальный fill), а не filledPrice (лимитный)
+- grid.ts: orphan-sell использует freeBal напрямую + guard для orderAmount<=0
+- sync.ts: partial-fill-then-cancel detection (filled>0 независимо от статуса)
+- exchange.ts: `tickSizeToDecimalPlaces(1)` возвращает 0 вместо 1
+- combo-manager.ts: не обнуляет позицию после partial closePosition (SL/TP/trailing)
+- state.ts: порог reducePosition унифицирован до 1e-12
+
+**Аудит раунд 2 — 5 багов (коммит `8e5b3fa`):**
+- combo-manager.ts: market panic чистит orderId в grid state после отмены buy-ордеров
+- sync.ts: filled ордера при sync флипают level на counter-side (counter-order на следующем тике)
+- indicators.ts: EMA seed = SMA(period) вместо одного значения (точные сигналы при малом количестве свечей)
+- indicators.ts: NaN forward-fill вместо filter (сохраняет индексы массива для crossover detection)
+- index.ts: shutdown race fix — `shuttingDown` flag блокирует тики при shutdown
+
 ## Важные замечания
 
 - Обязательно начинайте с `USE_TESTNET=true` и небольших сумм
