@@ -21,6 +21,12 @@ export class ComboManager {
   private state: StateManager;
   private marketPrecisionCache: Map<string, { amountPrecision: number; minAmount: number; minCost: number }> = new Map();
 
+  // Market protection state
+  private marketPanic: boolean = false;
+  private btcPaused: boolean = false;
+  private lastBtcCheck: number = 0;
+  private lastIndicatorsPerPair: Map<string, IndicatorSnapshot> = new Map();
+
   constructor(config: BotConfig, exchange: BybitExchange, log: Logger, state: StateManager) {
     this.config = config;
     this.exchange = exchange;
@@ -165,6 +171,10 @@ export class ComboManager {
       return;
     }
 
+    // Market protection checks (uses indicators from previous tick — panic state carries over)
+    await this.checkMarketPanic();
+    await this.checkBtcWatchdog();
+
     // Record tick
     this.state.recordTick();
 
@@ -236,6 +246,9 @@ export class ComboManager {
 
     const indicators = computeIndicators(candles, this.config.indicators);
 
+    // Store latest indicators for market panic detection
+    this.lastIndicatorsPerPair.set(symbol, indicators);
+
     this.log.debug(`${symbol} | Price: ${ticker.last} | RSI: ${indicators.rsi.toFixed(1)} | EMA: ${indicators.emaCrossover} | BB: ${indicators.pricePosition}`, {
       symbol,
     });
@@ -248,19 +261,39 @@ export class ComboManager {
     }
 
     const allDecisions: StrategyDecision[] = [];
+    const protectionActive = this.isMarketProtectionActive();
 
-    const gridDecisions = await this.grid.evaluate(symbol, ticker, indicators, allocationUSDT);
-    allDecisions.push(...gridDecisions);
+    if (protectionActive) {
+      // Market protection active — only check grid fills (to process existing orders,
+      // counter-sells, etc.) but don't place new buy orders.
+      // Grid.evaluate still runs to detect fills and place counter-SELL orders.
+      // We pass indicators so grid can track state, but grid.isBuyAllowed() plus
+      // the EMA filter will naturally block new buys when bearish.
+      // However, to be safe, we skip DCA and meta-signal entirely.
+      const gridDecisions = await this.grid.evaluate(symbol, ticker, indicators, allocationUSDT);
+      // Only keep non-buy decisions from grid (sells, holds)
+      allDecisions.push(...gridDecisions);
 
-    const dcaDecisions = await this.dca.evaluate(symbol, ticker, indicators, allocationUSDT);
-    allDecisions.push(...dcaDecisions);
+      this.log.debug(`${symbol}: market protection active (panic=${this.marketPanic}, btcPaused=${this.btcPaused}) — skipping DCA/meta buys`);
+    } else {
+      const gridDecisions = await this.grid.evaluate(symbol, ticker, indicators, allocationUSDT);
+      allDecisions.push(...gridDecisions);
 
-    const metaSignal = this.evaluateMetaSignal(indicators, ticker, allocationUSDT);
-    if (metaSignal) {
-      allDecisions.push(metaSignal);
+      const dcaDecisions = await this.dca.evaluate(symbol, ticker, indicators, allocationUSDT);
+      allDecisions.push(...dcaDecisions);
+
+      const metaSignal = this.evaluateMetaSignal(indicators, ticker, allocationUSDT);
+      if (metaSignal) {
+        allDecisions.push(metaSignal);
+      }
     }
 
     for (const decision of allDecisions) {
+      // When market protection is active, block buy executions but allow sells
+      if (protectionActive && (decision.signal === 'buy' || decision.signal === 'strong_buy')) {
+        this.log.debug(`${symbol}: blocking ${decision.signal} from ${decision.strategy} — market protection active`);
+        continue;
+      }
       await this.executeDecision(decision, indicators);
     }
   }
@@ -699,6 +732,93 @@ export class ComboManager {
   }
 
   // ----------------------------------------------------------
+  // Market Protection — panic detector & BTC watchdog
+  // ----------------------------------------------------------
+
+  private async checkMarketPanic(): Promise<void> {
+    const threshold = this.config.marketProtection.panicBearishPairsThreshold;
+    const total = this.config.pairs.length;
+    let bearishCount = 0;
+
+    for (const pair of this.config.pairs) {
+      const ind = this.lastIndicatorsPerPair.get(pair.symbol);
+      if (ind && ind.emaCrossover === 'bearish') {
+        bearishCount++;
+      }
+    }
+
+    if (bearishCount >= threshold) {
+      if (!this.marketPanic) {
+        this.marketPanic = true;
+        this.log.warn(`MARKET PANIC: ${bearishCount}/${total} pairs bearish — all grid buys cancelled`);
+        await this.cancelAllBuyOrders();
+      }
+    } else {
+      if (this.marketPanic) {
+        this.marketPanic = false;
+        this.log.info(`Market panic cleared — ${bearishCount}/${total} pairs bearish, resuming buys`);
+      }
+    }
+  }
+
+  private async cancelAllBuyOrders(): Promise<void> {
+    for (const pair of this.config.pairs) {
+      try {
+        const openOrders = await this.exchange.fetchOpenOrders(pair.symbol);
+        const buyOrders = openOrders.filter(o => o.side === 'buy');
+        for (const order of buyOrders) {
+          await this.exchange.cancelOrder(order.id, pair.symbol);
+        }
+        if (buyOrders.length > 0) {
+          this.log.info(`Market panic: cancelled ${buyOrders.length} buy orders for ${pair.symbol}`);
+        }
+      } catch (err) {
+        this.log.error(`Market panic: failed to cancel buy orders for ${pair.symbol}: ${err}`);
+      }
+    }
+  }
+
+  private async checkBtcWatchdog(): Promise<void> {
+    if (!this.config.marketProtection.btcWatchdogEnabled) return;
+
+    const now = Date.now();
+    const intervalMs = this.config.marketProtection.btcCheckIntervalSec * 1000;
+    if (now - this.lastBtcCheck < intervalMs) return;
+    this.lastBtcCheck = now;
+
+    try {
+      const candles = await this.exchange.fetchOHLCV('BTC/USDT', '15m', 4);
+      if (candles.length < 2) {
+        this.log.warn('BTC WATCHDOG: not enough candles to evaluate');
+        return;
+      }
+
+      const firstOpen = candles[0].open;
+      const lastClose = candles[candles.length - 1].close;
+      const changePercent = ((lastClose - firstOpen) / firstOpen) * 100;
+
+      if (changePercent <= -this.config.marketProtection.btcDropThresholdPercent) {
+        if (!this.btcPaused) {
+          this.log.warn(`BTC WATCHDOG: BTC dropped ${changePercent.toFixed(2)}% in 1h — pausing all buys`);
+        }
+        this.btcPaused = true;
+      } else {
+        if (this.btcPaused) {
+          this.log.info(`BTC WATCHDOG: BTC recovered (${changePercent >= 0 ? '+' : ''}${changePercent.toFixed(2)}% in 1h) — resuming buys`);
+        }
+        this.btcPaused = false;
+      }
+    } catch (err) {
+      this.log.error(`BTC WATCHDOG: failed to fetch BTC candles: ${err}`);
+    }
+  }
+
+  /** Returns true if market protection is active and buys should be blocked. */
+  private isMarketProtectionActive(): boolean {
+    return this.marketPanic || this.btcPaused;
+  }
+
+  // ----------------------------------------------------------
   // Summary log
   // ----------------------------------------------------------
 
@@ -728,6 +848,8 @@ export class ComboManager {
       sells: sells.length,
       totalSpent: totalSpent.toFixed(2),
       totalEarned: totalEarned.toFixed(2),
+      marketPanic: this.marketPanic ? 'YES — buys blocked' : 'no',
+      btcWatchdog: this.btcPaused ? 'PAUSED — BTC drop detected' : 'ok',
     });
 
     // Per-pair summary line

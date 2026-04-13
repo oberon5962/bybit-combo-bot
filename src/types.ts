@@ -19,6 +19,9 @@ export interface BotConfig {
   dca: DCAConfig;
   indicators: IndicatorConfig;
 
+  // Market protection
+  marketProtection: MarketProtectionConfig;
+
   // Polling interval in seconds
   tickIntervalSec: number;
 
@@ -71,6 +74,16 @@ export interface IndicatorConfig {
   emaSlowPeriod: number;        // default 21
   bollingerPeriod: number;      // default 20
   bollingerStdDev: number;      // default 2
+}
+
+export interface MarketProtectionConfig {
+  // Market Panic: если N из пар одновременно bearish EMA → снять все buy-ордера
+  panicBearishPairsThreshold: number;  // сколько пар должны быть bearish (2 = 2 из 3)
+
+  // BTC Watchdog: если BTC упал > X% за час → пауза всех покупок
+  btcWatchdogEnabled: boolean;
+  btcDropThresholdPercent: number;     // порог падения BTC за час (3 = -3%)
+  btcCheckIntervalSec: number;        // как часто проверять BTC (300 = 5 мин)
 }
 
 // ============================================================

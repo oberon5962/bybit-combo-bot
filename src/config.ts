@@ -101,6 +101,16 @@ export function loadConfig(): BotConfig {
     },
 
     // -------------------------------------------------------
+    // Market Protection — защита от рыночной паники
+    // -------------------------------------------------------
+    marketProtection: {
+      panicBearishPairsThreshold: 2,   // 2 из 3 пар bearish → паника (999 = отключить)
+      btcWatchdogEnabled: true,         // следить за BTC как индикатором рынка (false = отключить)
+      btcDropThresholdPercent: 3,       // BTC упал на 3% за час → пауза покупок
+      btcCheckIntervalSec: 300,         // проверять BTC каждые 5 минут
+    },
+
+    // -------------------------------------------------------
     // Bot Intervals
     // -------------------------------------------------------
     tickIntervalSec: 10,             // Проверка каждые 10 секунд
@@ -173,6 +183,19 @@ function validateConfig(config: BotConfig): void {
     if (config.dca.rsiBoostMultiplier <= 0) errors.push('rsiBoostMultiplier must be > 0');
     if (config.dca.rsiSkipThreshold <= config.dca.rsiBoostThreshold) {
       errors.push('rsiSkipThreshold must be > rsiBoostThreshold');
+    }
+  }
+
+  // Market Protection
+  if (config.marketProtection.panicBearishPairsThreshold < 1) {
+    errors.push('panicBearishPairsThreshold must be >= 1');
+  }
+  if (config.marketProtection.btcWatchdogEnabled) {
+    if (config.marketProtection.btcDropThresholdPercent <= 0 || config.marketProtection.btcDropThresholdPercent > 50) {
+      errors.push('btcDropThresholdPercent must be between 0 and 50');
+    }
+    if (config.marketProtection.btcCheckIntervalSec < 60) {
+      errors.push('btcCheckIntervalSec must be >= 60 seconds');
     }
   }
 
