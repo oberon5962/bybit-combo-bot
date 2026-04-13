@@ -42,7 +42,7 @@ bybit-combo-bot/
 
 | Параметр | Значение | Описание |
 |---|---|---|
-| **Пары** | SUI/USDT 25%, SOL/USDT 35%, XRP/USDT 40% | 3 пары, суммарная аллокация 100% |
+| **Пары** | SUI/USDT 25%, SOL/USDT 40%, XRP/USDT 35% | 3 пары, суммарная аллокация 100% |
 | **Режим** | USE_TESTNET=true | Тестовая сеть Bybit |
 | **Капитал** | ~$98-112 USDT | На тестнете |
 | **Tick интервал** | 10 сек | Проверка рынка каждые 10 секунд |
@@ -52,9 +52,10 @@ bybit-combo-bot/
 
 | Параметр | Значение |
 |---|---|
-| gridLevels | 10 (5 buy + 5 sell) |
-| gridSpacingPercent | 0.3% |
-| orderSizePercent | 14% от аллокации пары |
+| gridLevels | 20 (10 buy + 10 sell) |
+| gridSpacingPercent | 0.5% |
+| orderSizePercent | 20% от аллокации пары |
+| rebalancePercent | 2% (вверх или вниз от центра) |
 | rsiOverboughtThreshold | 70 (100 = отключить) |
 | useEmaFilter | true (false = отключить) |
 
@@ -100,7 +101,7 @@ bybit-combo-bot/
 - RSI > rsiOverboughtThreshold (70) — grid buy пропускается
 - EMA bearish crossover (fast < slow) — grid buy пропускается
 
-**Rebalance:** если цена ушла >5% от центра сетки — все ордера отменяются и сетка пересоздаётся.
+**Rebalance:** если цена ушла >2% от центра сетки (вверх или вниз) — все ордера отменяются и сетка пересоздаётся.
 
 **Counter-orders:** при fill buy ордера ставится sell counter на цену + spacing%; при fill sell ордера — buy counter на цену - spacing%. Counter-orders проверяют баланс перед размещением.
 
@@ -268,6 +269,49 @@ npm start
 - **console** — всё в реальном времени
 
 Summary каждые 10 тиков: капитал, PnL, drawdown, trades, positions, market panic/BTC watchdog.
+
+## Changelog
+
+### v0.7.0 — `6d59eb2` (2026-04-13)
+
+Крупное обновление: исправление критических багов, улучшение orphan-sell, skip-логирование, retry.
+
+**Критические фиксы:**
+- **closePosition возвращает boolean** — SL/TP/trailing проверяют результат и не сбрасывают позицию при неудачной продаже
+- **Trailing SL при убытке → cooldown** — раньше trailing SL при убытке не запускал cooldown, теперь запускает (как обычный SL)
+- **Counter-buy без RSI/EMA фильтра** — контр-ордер после sell fill больше не блокируется индикаторами (часть grid-цикла)
+- **Counter-sell корректировка суммы** — если fee съел часть баланса, ордер автоматически уменьшается вместо ошибки
+- **filledAmount fallback** — fallback на expectedAmount только при status=closed, иначе 0 (предотвращает phantom fills)
+- **Обработка 'cancelled' от Bybit** — Bybit возвращает и 'canceled', и 'cancelled', теперь обрабатываются оба варианта
+
+**Orphan-sell покрытие:**
+- Старая логика: "есть ли хоть 1 sell ордер?" → Новая: "покрывают ли sell-ордера всю позицию?"
+- Непокрытая позиция → несколько sell-ордеров на разных ценовых уровнях (+0.5%, +1.0%...)
+- Цена sell = `max(entryBased, priceBased)` — защита от отклонения Bybit по минимальной цене
+- Максимум 5 orphan-sell за тик (safety limit)
+
+**Sync (sync.ts):**
+- При пропаже ордера из open orders — проверяет через `fetchOrder` был ли он filled
+- Filled ордера обновляют позицию и записывают trade
+- Fallback на `fetchClosedOrders` если order purged из истории Bybit
+- Неизвестные ордера на бирже adoptируются в grid (вместо отмены)
+
+**Skip-логирование:**
+- Причины пропуска grid-ордеров выводятся на уровне INFO (было DEBUG)
+- Обобщённые причины: `overbought`, `EMA bearish`, `low USDT`, `low SOL` — без конкретных цифр RSI/баланса
+- Дедупликация: лог появляется только при изменении причин, молчит между тиками
+- `Grid orders resumed` — когда все ордера снова размещены
+
+**Retry и устойчивость:**
+- `RateLimitExceeded` добавлен в transient errors для retry
+- Exponential backoff: 1s → 2s → 4s (было линейное 1s → 2s)
+
+**Конфигурация:**
+- Аллокации: SUI 25%, SOL 40%, XRP 35%
+- orderSizePercent: 20% (было 18%)
+- rebalancePercent: 2% (было 3%)
+- gridLevels: 20 (10 buy + 10 sell)
+- Подробные комментарии для indicators (RSI, EMA, Bollinger)
 
 ## Важные замечания
 
