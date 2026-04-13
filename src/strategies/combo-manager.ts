@@ -709,6 +709,13 @@ export class ComboManager {
       const fallbackPrice = ticker.last;
 
       if (signal === 'buy' || signal === 'strong_buy') {
+        // Check free USDT before market buy
+        const usdtBal = await this.exchange.fetchBalance('USDT');
+        const estimatedCost = suggestedAmount * fallbackPrice;
+        if (usdtBal.free < estimatedCost) {
+          this.log.debug(`${symbol}: skipping ${strategy} buy — free USDT ${usdtBal.free.toFixed(2)} < needed ${estimatedCost.toFixed(2)}`);
+          return;
+        }
         const order = await this.exchange.createMarketBuy(symbol, suggestedAmount, strategy as any);
         const filledAmount = order.filled > 0 ? order.filled : suggestedAmount;
         const buyPrice = order.price || fallbackPrice;
@@ -726,7 +733,17 @@ export class ComboManager {
           this.state.setLastDcaBuyTime(symbol, Date.now());
         }
       } else if (signal === 'sell' || signal === 'strong_sell') {
-        const order = await this.exchange.createMarketSell(symbol, suggestedAmount, strategy as any);
+        // Check free crypto balance before market sell (crypto may be locked in limit sell orders)
+        const base = symbol.split('/')[0];
+        const allBal = await this.exchange.fetchAllBalances();
+        const freeCrypto = allBal[base]?.free ?? 0;
+        if (freeCrypto < suggestedAmount * 0.5) {
+          this.log.debug(`${symbol}: skipping ${strategy} sell — free ${base} ${freeCrypto.toFixed(6)} < needed ${suggestedAmount.toFixed(6)} (locked in orders)`);
+          return;
+        }
+        // Use actual free balance if less than suggested (partial sell)
+        const sellAmount = Math.min(suggestedAmount, freeCrypto);
+        const order = await this.exchange.createMarketSell(symbol, sellAmount, strategy as any);
         const filledAmount = order.filled > 0 ? order.filled : suggestedAmount;
         const sellPrice = order.price || fallbackPrice;
         const sellCost = filledAmount * sellPrice;
