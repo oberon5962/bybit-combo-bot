@@ -313,13 +313,13 @@ export class ComboManager {
       // We pass indicators so grid can track state, but grid.isBuyAllowed() plus
       // the EMA filter will naturally block new buys when bearish.
       // However, to be safe, we skip DCA and meta-signal entirely.
-      const gridDecisions = await this.grid.evaluate(symbol, ticker, indicators, allocationUSDT);
+      const gridDecisions = await this.grid.evaluate(symbol, ticker, indicators, allocationUSDT, true);
       // Only keep non-buy decisions from grid (sells, holds)
       allDecisions.push(...gridDecisions);
 
       this.log.debug(`${symbol}: market protection active (panic=${this.marketPanic}, btcPaused=${this.btcPaused}) — skipping DCA/meta buys`);
     } else {
-      const gridDecisions = await this.grid.evaluate(symbol, ticker, indicators, allocationUSDT);
+      const gridDecisions = await this.grid.evaluate(symbol, ticker, indicators, allocationUSDT, false);
       allDecisions.push(...gridDecisions);
 
       const dcaDecisions = await this.dca.evaluate(symbol, ticker, indicators, allocationUSDT);
@@ -628,22 +628,23 @@ export class ComboManager {
       }
 
       const order = await this.exchange.createMarketSell(symbol, sellAmount, 'risk');
+      const filledAmount = order.filled > 0 ? order.filled : sellAmount;
       const fillPrice = order.price || currentPrice;
 
-      const slCost = sellAmount * fillPrice;
+      const slCost = filledAmount * fillPrice;
       this.state.addTrade({
         timestamp: Date.now(),
         symbol,
         side: 'sell',
-        amount: sellAmount,
+        amount: filledAmount,
         price: fillPrice,
         cost: slCost,
         fee: slCost * 0.001,
         strategy: reason,
       });
 
-      // Update position tracking
-      this.state.reducePosition(symbol, sellAmount);
+      // Update position tracking with actual filled amount
+      this.state.reducePosition(symbol, filledAmount);
 
       const position = this.state.getPosition(symbol);
       this.log.info(`${reason.toUpperCase()} executed for ${symbol}`, {
@@ -699,31 +700,33 @@ export class ComboManager {
 
       if (signal === 'buy' || signal === 'strong_buy') {
         const order = await this.exchange.createMarketBuy(symbol, suggestedAmount, strategy as any);
+        const filledAmount = order.filled > 0 ? order.filled : suggestedAmount;
         const buyPrice = order.price || fallbackPrice;
-        const buyCost = suggestedAmount * buyPrice;
+        const buyCost = filledAmount * buyPrice;
         this.state.addTrade({
           timestamp: Date.now(), symbol, side: 'buy',
-          amount: suggestedAmount, price: buyPrice,
+          amount: filledAmount, price: buyPrice,
           cost: buyCost, fee: buyCost * 0.001, strategy,
         });
         // Track position for stop-loss / take-profit
-        this.state.addToPosition(symbol, suggestedAmount, suggestedAmount * buyPrice);
+        this.state.addToPosition(symbol, filledAmount, filledAmount * buyPrice);
         // Update DCA-specific stats and timer
         if (strategy === 'dca') {
-          this.state.addDcaPurchase(symbol, suggestedAmount * buyPrice, suggestedAmount);
+          this.state.addDcaPurchase(symbol, filledAmount * buyPrice, filledAmount);
           this.state.setLastDcaBuyTime(symbol, Date.now());
         }
       } else if (signal === 'sell' || signal === 'strong_sell') {
         const order = await this.exchange.createMarketSell(symbol, suggestedAmount, strategy as any);
+        const filledAmount = order.filled > 0 ? order.filled : suggestedAmount;
         const sellPrice = order.price || fallbackPrice;
-        const sellCost = suggestedAmount * sellPrice;
+        const sellCost = filledAmount * sellPrice;
         this.state.addTrade({
           timestamp: Date.now(), symbol, side: 'sell',
-          amount: suggestedAmount, price: sellPrice,
+          amount: filledAmount, price: sellPrice,
           cost: sellCost, fee: sellCost * 0.001, strategy,
         });
         // Track position for stop-loss / take-profit
-        this.state.reducePosition(symbol, suggestedAmount);
+        this.state.reducePosition(symbol, filledAmount);
       }
     } catch (err) {
       this.log.error(`Order execution failed: ${err}`, { decision });
@@ -788,23 +791,29 @@ export class ComboManager {
           this.log.info(`Selling ${roundedSellAmount} ${base} (~${valueUSDT.toFixed(2)} USDT)`);
 
           const order = await this.exchange.createMarketSell(pair.symbol, roundedSellAmount, 'risk');
+          const filledAmount = order.filled > 0 ? order.filled : roundedSellAmount;
           const tpPrice = order.price || ticker.last;
-          const tpCost = roundedSellAmount * tpPrice;
+          const tpCost = filledAmount * tpPrice;
           this.state.addTrade({
             timestamp: Date.now(),
             symbol: pair.symbol,
             side: 'sell',
-            amount: roundedSellAmount,
+            amount: filledAmount,
             price: tpPrice,
             cost: tpCost,
             fee: tpCost * 0.001,
             strategy: 'portfolio-take-profit',
           });
 
-          this.log.info(`SOLD ${base}: ${roundedSellAmount} @ ~${(order.price || ticker.last).toFixed(2)}`);
+          this.log.info(`SOLD ${base}: ${filledAmount} @ ~${(order.price || ticker.last).toFixed(2)}`);
 
-          // Reset position tracking after full sell
-          this.state.resetPosition(pair.symbol);
+          // Only reset if fully sold, otherwise reduce by actual fill
+          if (filledAmount >= roundedSellAmount * 0.99) {
+            this.state.resetPosition(pair.symbol);
+          } else {
+            this.state.reducePosition(pair.symbol, filledAmount);
+            this.log.warn(`${base}: partial fill ${filledAmount}/${roundedSellAmount} — position reduced, not reset`);
+          }
         } catch (err) {
           this.log.error(`Failed to sell ${base}: ${sanitizeError(err)}`);
         }

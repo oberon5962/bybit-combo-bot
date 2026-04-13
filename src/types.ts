@@ -146,6 +146,7 @@ export interface BotOrder {
   type: 'limit' | 'market';
   price: number;
   amount: number;
+  filled: number;          // actual filled amount (may differ from amount on partial fills)
   status: 'open' | 'filled' | 'cancelled';
   strategy: 'grid' | 'dca' | 'risk';
   timestamp: number;

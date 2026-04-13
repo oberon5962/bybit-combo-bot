@@ -20,6 +20,7 @@ export class GridStrategy {
   private precisionCache: Map<string, { pricePrecision: number; amountPrecision: number; minAmount: number; minCost: number }> = new Map();
   private lastSkipSummary: Map<string, string> = new Map(); // suppress repeated skip logs
   private lastRebalanceTime: Map<string, number> = new Map(); // cooldown between rebalances
+  private _marketProtectionActive: boolean = false;
 
   private maxOpenOrdersPerPair: number;
 
@@ -298,6 +299,11 @@ export class GridStrategy {
         }
 
         if (level.side === 'buy' && level.price < currentPrice) {
+          // Block new buy orders during market protection (panic / BTC watchdog)
+          if (this._marketProtectionActive) {
+            addSkip('market protection');
+            continue;
+          }
           // RSI + EMA filter
           const buyCheck = this.isBuyAllowed(symbol);
           if (!buyCheck.allowed) {
@@ -368,13 +374,19 @@ export class GridStrategy {
     ticker: Ticker,
     indicators: IndicatorSnapshot,
     allocationUSDT: number,
+    marketProtectionActive: boolean = false,
   ): Promise<StrategyDecision[]> {
     if (!this.config.enabled) return [];
 
     // Store latest indicators for buy filter
     this.lastIndicators.set(symbol, indicators);
 
-    const freshlyInitialized = await this.initGrid(symbol, ticker.last, allocationUSDT);
+    // When market protection is active, skip grid init/rebalance (which places buy orders)
+    // but still process fills and counter-orders below
+    this._marketProtectionActive = marketProtectionActive;
+    const freshlyInitialized = marketProtectionActive
+      ? false
+      : await this.initGrid(symbol, ticker.last, allocationUSDT);
 
     const decisions: StrategyDecision[] = [];
     const levels = this.state.getGridLevels(symbol);

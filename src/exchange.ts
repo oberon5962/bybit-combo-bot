@@ -223,6 +223,7 @@ export class BybitExchange {
       type: order.type as 'limit' | 'market',
       price: order.price ?? 0,
       amount: order.amount ?? 0,
+      filled: order.filled ?? 0,
       status: order.status === 'closed' ? 'filled'
         : order.status === 'canceled' ? 'cancelled'
         : 'open',
