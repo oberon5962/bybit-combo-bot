@@ -135,16 +135,24 @@ export class ComboManager {
     }
 
     // Deposit/withdrawal detection: compare with previous tick value
+    // NOTE: Trigger on jumps >20%. False positives from flash crashes / unrecorded grid fills
+    // are handled by checking recent trades AND open grid orders before adjusting capital.
     let skipGlobalChecks = false;
     if (this.lastTickPortfolioValue > 0) {
       const jumpPercent = ((totalPortfolioUSDT - this.lastTickPortfolioValue) / this.lastTickPortfolioValue) * 100;
       if (Math.abs(jumpPercent) > 20) {
-        // Check if any trades happened recently (within last 2 tick intervals)
+        // Check if any trades happened recently (within last 5 tick intervals — enough time for grid fills to be recorded)
         const trades = this.state.getRecentTrades();
-        const cutoff = Date.now() - this.config.tickIntervalSec * 2000;
+        const cutoff = Date.now() - this.config.tickIntervalSec * 5000;
         const hasRecentTrades = trades.length > 0 && trades[trades.length - 1].timestamp > cutoff;
 
-        if (!hasRecentTrades) {
+        // Also check if there are open grid orders — fills from these could explain the jump
+        const hasOpenGridOrders = this.config.pairs.some(pair => {
+          const levels = this.state.getGridLevels(pair.symbol);
+          return levels.some(l => l.orderId);
+        });
+
+        if (!hasRecentTrades && !hasOpenGridOrders) {
           const change = totalPortfolioUSDT - this.lastTickPortfolioValue;
           if (change > 0) {
             // Deposit
@@ -158,9 +166,9 @@ export class ComboManager {
             this.log.info(`WITHDRAWAL DETECTED: ${change.toFixed(2)} USDT → new startingCapital: ${this.state.startingCapital.toFixed(2)}`);
           }
         } else {
-          // Trades + huge jump → suspicious, freeze global checks this tick
+          // Trades or open orders + huge jump → likely market movement or fill, freeze global checks this tick
           skipGlobalChecks = true;
-          this.log.warn(`Portfolio spike ${jumpPercent > 0 ? '+' : ''}${jumpPercent.toFixed(0)}% with recent trades — freezing peak/drawdown/TP this tick`);
+          this.log.warn(`Portfolio spike ${jumpPercent > 0 ? '+' : ''}${jumpPercent.toFixed(0)}% with active trading — freezing peak/drawdown/TP this tick`);
         }
       }
     }
@@ -216,7 +224,9 @@ export class ComboManager {
     this.state.recordTick();
 
     // Process each trading pair
-    // Use TOTAL USDT (not free) for allocation calculation — free fluctuates as grid locks funds
+    // Use TOTAL PORTFOLIO value (USDT + crypto) for allocation — not just USDT balance.
+    // Using only USDT would shrink allocations as crypto accumulates (e.g. $100 USDT + $200 crypto = $300 portfolio,
+    // but allocation from $100 would be 3x too small).
     for (const pair of this.config.pairs) {
       // Re-check global halted state (drawdown / portfolio TP)
       if (this.state.halted) {
@@ -224,7 +234,7 @@ export class ComboManager {
         break;
       }
       try {
-        await this.processPair(pair, currentBalance.total);
+        await this.processPair(pair, totalPortfolioUSDT);
       } catch (err) {
         this.log.error(`Error processing ${pair.symbol}: ${sanitizeError(err)}`);
       }

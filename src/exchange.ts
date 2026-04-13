@@ -293,10 +293,11 @@ export class BybitExchange {
           || err?.constructor?.name === 'RateLimitExceeded'
           || (err?.message && /ECONNRESET|rate.?limit/i.test(err.message));
 
-        // NEVER retry order placement on timeout — order may already exist on exchange
+        // NEVER retry order placement on transient errors — order may already exist on exchange
+        // NetworkError / ECONNRESET can happen AFTER Bybit accepted the order (response lost on the way back)
         const isOrderPlacement = /\b(buy|sell)\b/i.test(label);
-        if (isTimeout && isOrderPlacement) {
-          this.log.error(`${label}: TIMEOUT on order placement — NOT retrying (order may exist on exchange). Manual check required.`);
+        if (isTransient && isOrderPlacement) {
+          this.log.error(`${label}: transient error on order placement — NOT retrying (order may exist on exchange). Manual check required.`);
           throw err;
         }
 

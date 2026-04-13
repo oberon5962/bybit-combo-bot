@@ -108,22 +108,44 @@ async function main(): Promise<void> {
   // ----------------------------------------------------------
 
   let shutdownCount = 0;
+  let shutdownInProgress = false;
   const shutdown = async (signal: string) => {
     shutdownCount++;
     shuttingDown = true;
     clearInterval(interval);
 
     if (shutdownCount === 1) {
+      if (shutdownInProgress) return; // guard against duplicate signals
+      shutdownInProgress = true;
+
       log.info(`Received ${signal}. Soft shutdown — keeping grid orders on exchange...`);
+
+      // Wait for current tick to finish before shutting down
+      // to prevent race: tick places order AFTER shutdown cancels all
+      if (tickInProgress) {
+        log.info('Waiting for current tick to finish...');
+        const maxWait = 30000; // 30s max wait
+        const start = Date.now();
+        while (tickInProgress && Date.now() - start < maxWait) {
+          await new Promise(r => setTimeout(r, 200));
+        }
+        if (tickInProgress) {
+          log.warn('Tick still running after 30s — proceeding with shutdown');
+        }
+      }
+
       await manager.shutdown(false); // soft: keep orders alive
       log.info('Bot stopped. Goodbye!');
       process.exit(0);
-    } else {
+    } else if (shutdownCount === 2) {
       // Second Ctrl+C = hard shutdown: cancel all orders
       log.info(`Received ${signal} again. Hard shutdown — cancelling all orders...`);
       await manager.shutdown(true).catch(() => {});
       log.info('All orders cancelled. Bot stopped.');
       process.exit(1);
+    } else {
+      // Third+ Ctrl+C = force exit immediately
+      process.exit(2);
     }
   };
 

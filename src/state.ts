@@ -131,11 +131,17 @@ export class StateManager {
 
   private load(): BotState {
     try {
-      // Windows crash recovery: if main file is missing but .tmp exists, use it
+      // Windows crash recovery: if main file is missing, try .tmp then .bak
       const tmpFile = STATE_FILE + '.tmp';
-      if (!fs.existsSync(STATE_FILE) && fs.existsSync(tmpFile)) {
-        this.log.warn(`State file missing but .tmp found — recovering from ${tmpFile}`);
-        fs.renameSync(tmpFile, STATE_FILE);
+      const bakFile = STATE_FILE + '.bak';
+      if (!fs.existsSync(STATE_FILE)) {
+        if (fs.existsSync(tmpFile)) {
+          this.log.warn(`State file missing but .tmp found — recovering from ${tmpFile}`);
+          fs.renameSync(tmpFile, STATE_FILE);
+        } else if (fs.existsSync(bakFile)) {
+          this.log.warn(`State file missing but .bak found — recovering from ${bakFile}`);
+          fs.copyFileSync(bakFile, STATE_FILE);
+        }
       }
       if (fs.existsSync(STATE_FILE)) {
         const raw = fs.readFileSync(STATE_FILE, 'utf-8');
@@ -199,13 +205,24 @@ export class StateManager {
     }
   }
 
+  /** Immediate flush — use for critical state changes (fills, position updates) that must survive a crash. */
+  saveCritical(): void {
+    this.dirty = true;
+    this.flushToDisk();
+  }
+
   flushToDisk(): void {
     if (!this.dirty) return;
     try {
       const json = JSON.stringify(this.state, null, 2);
-      // Atomic write: write to temp file, then rename (rename is atomic on same filesystem)
       const tmpFile = STATE_FILE + '.tmp';
+      const bakFile = STATE_FILE + '.bak';
       fs.writeFileSync(tmpFile, json, 'utf-8');
+      // Windows: fs.renameSync is NOT atomic when target exists (deletes then renames).
+      // Keep a .bak so we can recover if crash happens between delete and rename.
+      if (fs.existsSync(STATE_FILE)) {
+        try { fs.copyFileSync(STATE_FILE, bakFile); } catch { /* best effort */ }
+      }
       fs.renameSync(tmpFile, STATE_FILE);
       this.dirty = false;
       this.log.debug('State saved to disk');
@@ -295,7 +312,7 @@ export class StateManager {
     const ps = this.getPairState(symbol);
     ps.positionAmount += amount;
     ps.positionCostBasis += cost;
-    this.save();
+    this.saveCritical(); // position changes must survive crash
   }
   reducePosition(symbol: string, amount: number): void {
     const ps = this.getPairState(symbol);
@@ -303,7 +320,7 @@ export class StateManager {
       // Position is essentially zero — reset to avoid division by near-zero
       ps.positionAmount = 0;
       ps.positionCostBasis = 0;
-      this.save();
+      this.saveCritical();
       return;
     }
     // Reduce cost basis proportionally
@@ -315,13 +332,13 @@ export class StateManager {
       ps.positionAmount = 0;
       ps.positionCostBasis = 0;
     }
-    this.save();
+    this.saveCritical(); // position changes must survive crash
   }
   resetPosition(symbol: string): void {
     const ps = this.getPairState(symbol);
     ps.positionAmount = 0;
     ps.positionCostBasis = 0;
-    this.save();
+    this.saveCritical();
   }
 
   // Per-pair halt
@@ -402,7 +419,7 @@ export class StateManager {
     if (this.state.recentTrades.length > 500) {
       this.state.recentTrades = this.state.recentTrades.slice(-500);
     }
-    this.save();
+    this.saveCritical(); // trade records must survive crash
   }
 
   getRecentTrades(symbol?: string): TradeEntry[] {

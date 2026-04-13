@@ -390,6 +390,8 @@ export class GridStrategy {
 
     const decisions: StrategyDecision[] = [];
     const levels = this.state.getGridLevels(symbol);
+    // Track crypto committed to counter-sell orders this tick to avoid double-selling with orphan-sell
+    let counterSellCommittedThisTick = 0;
 
     // Check if any orders have filled
     try {
@@ -437,7 +439,8 @@ export class GridStrategy {
             continue;
           }
 
-          if (orderInfo.filled > 0 && orderInfo.remaining > 0) {
+          const isPartialFill = orderInfo.filled > 0 && orderInfo.remaining > 0;
+          if (isPartialFill) {
             this.log.warn(`Grid ${filledSide} at ${filledPrice} PARTIALLY filled: ${orderInfo.filled} (remaining: ${orderInfo.remaining})`, { symbol });
           }
 
@@ -528,6 +531,7 @@ export class GridStrategy {
                 `Grid counter-sell ${symbol} @ ${counterPrice}`,
               );
               counterOrderId = order.id;
+              counterSellCommittedThisTick += counterAmount;
             } else {
               // Counter-buy is part of grid cycle — no RSI/EMA filter (only initial buys are filtered)
               // Check free USDT before placing buy counter-order
@@ -573,6 +577,19 @@ export class GridStrategy {
             level.orderId = undefined;
             level.filled = false;
           }
+
+          // Partial fill: create a new level for the remaining unfilled portion
+          // so the bot retries the original side at the original price (e.g. buy 7 more SUI)
+          if (isPartialFill) {
+            const remainingLevel: GridLevelState = {
+              price: filledPrice,
+              side: filledSide,
+              orderId: undefined,
+              filled: false,
+            };
+            levels.push(remainingLevel);
+            this.log.info(`Grid partial fill: added retry level for remaining ${orderInfo.remaining} ${filledSide} @ ${filledPrice}`, { symbol });
+          }
         }
       }
 
@@ -603,9 +620,12 @@ export class GridStrategy {
       try {
         const balances = await this.exchange.fetchAllBalances();
         const base = symbol.split('/')[0];
-        const freeBal = balances[base]?.free ?? 0;
+        // Subtract crypto already committed to counter-sell orders this tick
+        // (API balance may not reflect these yet since they were just placed)
+        const rawFreeBal = balances[base]?.free ?? 0;
+        const freeBal = Math.max(0, rawFreeBal - counterSellCommittedThisTick);
         // Free balance = crypto not in any sell order = uncovered
-        this.log.debug(`Orphan check ${symbol}: pos=${position.amount.toFixed(4)}, free ${base}=${freeBal.toFixed(4)}`);
+        this.log.debug(`Orphan check ${symbol}: pos=${position.amount.toFixed(4)}, free ${base}=${rawFreeBal.toFixed(4)} (counter-committed: ${counterSellCommittedThisTick.toFixed(4)}, effective: ${freeBal.toFixed(4)})`);
 
         const currentOrderCount = levels.filter(l => l.orderId).length;
         if (freeBal > 0 && freeBal * ticker.last >= precision.minCost && currentOrderCount < this.maxOpenOrdersPerPair) {
@@ -627,8 +647,9 @@ export class GridStrategy {
               precision.pricePrecision,
             );
 
-            // Check if this price level already has a sell order
-            const existsAtPrice = levels.some((l) => l.side === 'sell' && l.orderId && Math.abs(l.price - sellPrice) < sellPrice * 0.001);
+            // Check if this price level already has a sell level (with or without orderId)
+            // Without this, cancelled sell orders leave orphan levels that keep spawning duplicates
+            const existsAtPrice = levels.some((l) => l.side === 'sell' && Math.abs(l.price - sellPrice) < sellPrice * 0.001);
             if (existsAtPrice) { priceStep++; continue; }
 
             let sellAmount = this.roundAmountForMarket(

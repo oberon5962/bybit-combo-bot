@@ -44,7 +44,7 @@ bybit-combo-bot/
 |---|---|---|
 | **Пары** | SUI/USDT 25%, SOL/USDT 40%, XRP/USDT 35% | 3 пары, суммарная аллокация 100% |
 | **Режим** | USE_TESTNET=true | Тестовая сеть Bybit |
-| **Капитал** | ~$98-112 USDT | На тестнете |
+| **Капитал** | ~$300 USDT | На реальном Bybit |
 | **Tick интервал** | 10 сек | Проверка рынка каждые 10 секунд |
 | **Sync интервал** | 6 часов | Полная синхронизация с Bybit |
 
@@ -54,7 +54,7 @@ bybit-combo-bot/
 |---|---|
 | gridLevels | 20 (10 buy + 10 sell) |
 | gridSpacingPercent | 0.5% |
-| orderSizePercent | 20% от аллокации пары |
+| orderSizePercent | 14% от аллокации пары |
 | rebalancePercent | 2% (вверх или вниз от центра) |
 | rsiOverboughtThreshold | 70 (100 = отключить) |
 | useEmaFilter | true (false = отключить) |
@@ -350,6 +350,24 @@ Summary каждые 10 тиков: капитал, PnL, drawdown, trades, posit
 - indicators.ts: EMA seed = SMA(period) вместо одного значения (точные сигналы при малом количестве свечей)
 - indicators.ts: NaN forward-fill вместо filter (сохраняет индексы массива для crossover detection)
 - index.ts: shutdown race fix — `shuttingDown` flag блокирует тики при shutdown
+
+### v0.9.0 — `054afbd` (2026-04-14)
+
+Аудит раунд 3 — 8 багов (2 critical, 2 high, 4 medium).
+
+**Критические фиксы:**
+- **exchange.ts: retry дублирует ордера** — `withRetry` ретраил размещение ордеров при NetworkError/ECONNRESET (ордер уже на бирже, ответ потерялся). Теперь ВСЕ transient ошибки блокируют retry для order placement, не только timeout
+- **combo-manager.ts: аллокация от USDT вместо портфеля** — `processPair` получал `currentBalance.total` (только USDT), а не `totalPortfolioUSDT`. При $200 в крипте и $100 USDT аллокации были 3x меньше нужного
+
+**Высокий приоритет:**
+- **combo-manager.ts: flash crash = ложный withdrawal** — grid fill ещё не записан в state, скачок портфеля принимался за вывод средств, обнуляя drawdown protection. Окно проверки trades 2→5 тиков + проверка наличия open grid orders
+- **index.ts: shutdown race** — тик мог разместить ордер ПОСЛЕ того как shutdown отменил всё; двойной Ctrl+C запускал два shutdown параллельно. Теперь: ожидание завершения тика + guard `shutdownInProgress` + 3-й Ctrl+C = force exit
+
+**Средний приоритет:**
+- **state.ts: debounced write теряет fills при crash** — новый метод `saveCritical()` для немедленной записи позиций и трейдов; `.bak` файл для crash recovery на Windows (rename не атомарен)
+- **grid.ts: orphan-sell бесконечный рост levels** — `existsAtPrice` проверял только уровни с `orderId`, отменённые биржей ордера создавали дубли каждый тик
+- **grid.ts: double sell (counter + orphan)** — counter-sell + orphan-sell на одну крипту в одном тике (API не отражает залоченный баланс мгновенно). Трекинг `counterSellCommittedThisTick`
+- **grid.ts: partial fill теряет объём** — уровень переключался на counter-side, оставшаяся часть buy забывалась. Теперь создаётся retry-level для оставшегося объёма
 
 ## Важные замечания
 
