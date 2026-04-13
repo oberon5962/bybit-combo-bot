@@ -48,6 +48,20 @@ export function calcRSI(closes: number[], period: number = 14): number {
 export function calcEMA(values: number[], period: number): number[] {
   if (values.length === 0) return [];
   const k = 2 / (period + 1);
+
+  // Seed with SMA of first `period` values for accurate initialization
+  // (single-value seed causes unreliable EMA on short histories)
+  if (values.length >= period) {
+    const seed = values.slice(0, period).reduce((a, b) => a + b, 0) / period;
+    const ema: number[] = new Array(period - 1).fill(seed);
+    ema.push(seed);
+    for (let i = period; i < values.length; i++) {
+      ema.push(values[i] * k + ema[i - 1] * (1 - k));
+    }
+    return ema;
+  }
+
+  // Not enough data for proper SMA seed — fallback to first value
   const ema: number[] = [values[0]];
   for (let i = 1; i < values.length; i++) {
     ema.push(values[i] * k + ema[i - 1] * (1 - k));
@@ -129,9 +143,20 @@ export function computeIndicators(
     };
   }
 
-  // Filter out NaN/Infinity values that can come from exchange API errors
-  const closes = candles.map((c) => c.close).filter((c) => !isNaN(c) && isFinite(c));
-  if (closes.length < Math.max(config.rsiPeriod, config.emaSlowPeriod, config.bollingerPeriod) + 1) {
+  // Forward-fill NaN/Infinity values to preserve temporal alignment
+  // (filtering shifts indices and breaks EMA crossover detection)
+  const rawCloses = candles.map((c) => c.close);
+  const closes: number[] = [];
+  for (let i = 0; i < rawCloses.length; i++) {
+    if (!isNaN(rawCloses[i]) && isFinite(rawCloses[i])) {
+      closes.push(rawCloses[i]);
+    } else {
+      closes.push(i > 0 ? closes[i - 1] : 0);
+    }
+  }
+  // Check if we still have enough valid data
+  const validCount = closes.filter(c => c > 0).length;
+  if (validCount < Math.max(config.rsiPeriod, config.emaSlowPeriod, config.bollingerPeriod) + 1) {
     const price = closes.length > 0 ? closes[closes.length - 1] : 0;
     return {
       rsi: 50, emaFast: price, emaSlow: price, emaCrossover: 'neutral',

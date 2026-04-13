@@ -819,11 +819,21 @@ export class ComboManager {
       try {
         const openOrders = await this.exchange.fetchOpenOrders(pair.symbol);
         const buyOrders = openOrders.filter(o => o.side === 'buy');
+        const cancelledIds = new Set<string>();
         for (const order of buyOrders) {
           await this.exchange.cancelOrder(order.id, pair.symbol);
+          cancelledIds.add(order.id);
         }
-        if (buyOrders.length > 0) {
-          this.log.info(`Market panic: cancelled ${buyOrders.length} buy orders for ${pair.symbol}`);
+        // Clear stale orderId from grid state so levels can be re-placed later
+        if (cancelledIds.size > 0) {
+          const levels = this.state.getGridLevels(pair.symbol);
+          for (const level of levels) {
+            if (level.orderId && cancelledIds.has(level.orderId)) {
+              level.orderId = undefined;
+            }
+          }
+          this.state.setGridLevels(pair.symbol, levels);
+          this.log.info(`Market panic: cancelled ${cancelledIds.size} buy orders for ${pair.symbol}, grid state cleaned`);
         }
       } catch (err) {
         this.log.error(`Market panic: failed to cancel buy orders for ${pair.symbol}: ${sanitizeError(err)}`);

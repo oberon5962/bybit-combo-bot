@@ -129,7 +129,6 @@ export class ExchangeSync {
               const orderInfo = await this.exchange.fetchOrder(level.orderId, symbol);
               if (orderInfo.filled > 0) {
                 // Order was filled (fully or partially before cancel) — update position
-                // Order was FILLED — update position
                 const fillPrice = orderInfo.price > 0 ? orderInfo.price : level.price;
                 const fillAmount = orderInfo.filled;
                 const fillCost = fillAmount * fillPrice;
@@ -148,15 +147,27 @@ export class ExchangeSync {
                   fee: fillCost * 0.001,
                   strategy: 'grid-sync',
                 });
-                this.log.info(`[sync] ${symbol}: order ${level.orderId} at ${level.price} (${level.side}) was FILLED — position updated (${fillAmount} @ ${fillPrice})`);
+                // Flip level to counter-side so grid places counter-order on next tick
+                const gridSpacingPercent = this.config.grid.gridSpacingPercent;
+                const counterSide: 'buy' | 'sell' = level.side === 'buy' ? 'sell' : 'buy';
+                const counterPrice = level.side === 'buy'
+                  ? fillPrice * (1 + gridSpacingPercent / 100)
+                  : fillPrice * (1 - gridSpacingPercent / 100);
+                this.log.info(`[sync] ${symbol}: order ${level.orderId} at ${level.price} (${level.side}) was FILLED — position updated (${fillAmount} @ ${fillPrice}), level flipped to ${counterSide} @ ${counterPrice.toFixed(4)}`);
+                level.side = counterSide;
+                level.price = counterPrice;
+                level.orderId = undefined;
+                level.filled = false;
               } else {
                 this.log.info(`[sync] ${symbol}: order ${level.orderId} at ${level.price} (${level.side}) was ${orderInfo.status} — removing from state`);
+                level.orderId = undefined;
+                level.filled = false;
               }
             } catch (err) {
               this.log.warn(`[sync] ${symbol}: could not fetch order ${level.orderId}: ${sanitizeError(err)} — removing from state`);
+              level.orderId = undefined;
+              level.filled = false;
             }
-            level.orderId = undefined;
-            level.filled = false;
             removedCount++;
           }
         }

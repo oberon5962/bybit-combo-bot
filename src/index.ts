@@ -59,10 +59,12 @@ async function main(): Promise<void> {
 
   let tickCount = 0;
   let tickInProgress = false; // Guard against overlapping ticks
+  let shuttingDown = false;   // Prevent ticks during shutdown
   let lastSyncTime = Date.now();
 
   const runTick = async () => {
-    // Prevent concurrent ticks if previous tick is still running (slow API, etc.)
+    // Prevent ticks during shutdown or if previous tick still running
+    if (shuttingDown) return;
     if (tickInProgress) {
       log.warn('Previous tick still running, skipping this tick');
       return;
@@ -108,18 +110,20 @@ async function main(): Promise<void> {
   let shutdownCount = 0;
   const shutdown = async (signal: string) => {
     shutdownCount++;
+    shuttingDown = true;
+    clearInterval(interval);
+
     if (shutdownCount === 1) {
       log.info(`Received ${signal}. Soft shutdown — keeping grid orders on exchange...`);
-      clearInterval(interval);
       await manager.shutdown(false); // soft: keep orders alive
       log.info('Bot stopped. Goodbye!');
       process.exit(0);
     } else {
       // Second Ctrl+C = hard shutdown: cancel all orders
       log.info(`Received ${signal} again. Hard shutdown — cancelling all orders...`);
-      await manager.shutdown(true);
+      await manager.shutdown(true).catch(() => {});
       log.info('All orders cancelled. Bot stopped.');
-      process.exit(0);
+      process.exit(1);
     }
   };
 
