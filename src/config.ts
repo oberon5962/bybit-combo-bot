@@ -38,8 +38,10 @@ export function loadConfig(): BotConfig {
     // BTC — надёжная база, ETH — потенциал роста.
     // Если капитал > 500 USDT, можно добавить SOL.
     pairs: [
-      { symbol: 'BTC/USDT', allocationPercent: 35 },
-      { symbol: 'ETH/USDT', allocationPercent: 35 },
+      // { symbol: 'BTC/USDT', allocationPercent: 35 },
+      // { symbol: 'ETH/USDT', allocationPercent: 35 },
+      { symbol: 'SUI/USDT', allocationPercent: 35 },
+      { symbol: 'SOL/USDT', allocationPercent: 35 },
       { symbol: 'XRP/USDT', allocationPercent: 30 },
     ],
 
@@ -51,8 +53,16 @@ export function loadConfig(): BotConfig {
       maxOpenOrdersPerPair: gridLevels + 2, // Запас под grid-уровни + контр-ордера
       stopLossPercent: 14,            // Стоп-лосс на позицию (шире для высокой волатильности)
       takeProfitPercent: 12,          // Тейк-профит (поменьше, чтобы чаще фиксировать)
-      portfolioTakeProfitPercent: 100, // Продать ВСЁ когда портфель вырос на 30% от старта
-                                      // Было 300 USDT → стало 450 USDT → продаём все монеты
+      portfolioTakeProfitPercent: 100, // Продать ВСЁ когда портфель вырос на 100% от старта
+                                      // Было 200 USDT → стало 400 USDT → продаём все монеты
+
+      // Cooldown после SL: пауза 2 часа, после 3 SL подряд — полный halt
+      cooldownAfterSLSec: 2 * 60 * 60,  // 2 часа пауза после SL
+      cooldownMaxSL: 3,                  // 3 SL подряд → halt до ручного вмешательства
+
+      // Trailing SL: SL двигается вверх за ценой
+      trailingSLPercent: 5,              // продаём если цена упала на 5% от пика
+      trailingSLActivationPercent: 3,    // trailing включается после +3% от entry
     },
 
     // -------------------------------------------------------
@@ -62,7 +72,9 @@ export function loadConfig(): BotConfig {
       enabled: true,
       gridLevels,                    // 6 buy + 6 sell (сетка под малый капитал)
       gridSpacingPercent: 0.3,       // 0.3% между уровнями (покрытие 2.5% в каждую сторону)
-      orderSizePercent: 14,          // Каждый ордер = 18% от аллокации пары
+      orderSizePercent: 14,          // Каждый ордер = 14% от аллокации пары
+      rsiOverboughtThreshold: 70,    // Пропускаем grid-buy при RSI > 70 (100 = отключить)
+      useEmaFilter: true,            // Пропускаем grid-buy при медвежьем EMA кроссовере (false = отключить)
     },
 
     // -------------------------------------------------------
@@ -129,12 +141,30 @@ function validateConfig(config: BotConfig): void {
   if (config.risk.takeProfitPercent <= 0 || config.risk.takeProfitPercent > 100) {
     errors.push('takeProfitPercent must be between 0 and 100');
   }
+  if (config.risk.cooldownAfterSLSec < 0) {
+    errors.push('cooldownAfterSLSec must be >= 0 (0 = halt forever)');
+  }
+  if (config.risk.cooldownMaxSL < 1) {
+    errors.push('cooldownMaxSL must be >= 1');
+  }
+  if (config.risk.trailingSLPercent <= 0 || config.risk.trailingSLPercent > 50) {
+    errors.push('trailingSLPercent must be between 0 and 50');
+  }
+  if (config.risk.trailingSLActivationPercent < 0) {
+    errors.push('trailingSLActivationPercent must be >= 0');
+  }
+  if (config.risk.trailingSLActivationPercent >= config.risk.takeProfitPercent) {
+    errors.push('trailingSLActivationPercent must be < takeProfitPercent (otherwise TP fires first)');
+  }
 
   // Grid
   if (config.grid.enabled) {
     if (config.grid.gridSpacingPercent <= 0) errors.push('gridSpacingPercent must be > 0');
     if (config.grid.gridLevels < 2) errors.push('gridLevels must be >= 2');
     if (config.grid.orderSizePercent <= 0) errors.push('grid.orderSizePercent must be > 0');
+    if (config.grid.rsiOverboughtThreshold < 50 || config.grid.rsiOverboughtThreshold > 100) {
+      errors.push('grid.rsiOverboughtThreshold must be between 50 and 100');
+    }
   }
 
   // DCA

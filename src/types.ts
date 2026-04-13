@@ -37,6 +37,14 @@ export interface RiskConfig {
   stopLossPercent: number;      // per-position stop-loss
   takeProfitPercent: number;    // per-position take-profit
   portfolioTakeProfitPercent: number; // sell all when portfolio grows by X% from start
+
+  // Cooldown after stop-loss
+  cooldownAfterSLSec: number;   // пауза после SL (0 = halt навсегда, как раньше)
+  cooldownMaxSL: number;        // макс SL подряд до полного halt
+
+  // Trailing stop-loss
+  trailingSLPercent: number;              // trailing SL расстояние от пика (напр. 5%)
+  trailingSLActivationPercent: number;    // активация trailing после +N% от entry
 }
 
 export interface GridConfig {
@@ -44,6 +52,8 @@ export interface GridConfig {
   gridLevels: number;           // number of grid lines
   gridSpacingPercent: number;   // distance between levels as % of price
   orderSizePercent: number;     // % of pair allocation per grid order
+  rsiOverboughtThreshold: number; // skip grid buy when RSI > this (e.g. 70)
+  useEmaFilter: boolean;          // skip grid buy on bearish EMA crossover
 }
 
 export interface DCAConfig {

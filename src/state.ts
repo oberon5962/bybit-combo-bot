@@ -41,6 +41,13 @@ export interface PairState {
   // Per-pair halt (SL/TP triggered — pair paused, other pairs continue)
   halted: boolean;
   haltReason?: string;
+
+  // Cooldown after SL
+  cooldownUntil: number;    // timestamp когда cooldown заканчивается (0 = нет)
+  consecutiveSL: number;    // счётчик SL подряд
+
+  // Trailing SL
+  trailingPeak: number;     // максимальная цена с момента входа (0 = не активирован)
 }
 
 export interface BotState {
@@ -96,6 +103,9 @@ function createEmptyPairState(): PairState {
     positionAmount: 0,
     positionCostBasis: 0,
     halted: false,
+    cooldownUntil: 0,
+    consecutiveSL: 0,
+    trailingPeak: 0,
   };
 }
 
@@ -147,6 +157,9 @@ export class StateManager {
               positionCostBasis: typeof pd.positionCostBasis === 'number' ? pd.positionCostBasis : 0,
               halted: typeof pd.halted === 'boolean' ? pd.halted : false,
               haltReason: typeof pd.haltReason === 'string' ? pd.haltReason : undefined,
+              cooldownUntil: typeof pd.cooldownUntil === 'number' ? pd.cooldownUntil : 0,
+              consecutiveSL: typeof pd.consecutiveSL === 'number' ? pd.consecutiveSL : 0,
+              trailingPeak: typeof pd.trailingPeak === 'number' ? pd.trailingPeak : 0,
             };
           }
         }
@@ -321,6 +334,52 @@ export class StateManager {
     const ps = this.getPairState(symbol);
     ps.halted = false;
     ps.haltReason = undefined;
+    this.save();
+  }
+
+  // Cooldown
+  setCooldown(symbol: string, untilTimestamp: number): void {
+    const ps = this.getPairState(symbol);
+    ps.cooldownUntil = untilTimestamp;
+    this.save();
+  }
+  getCooldownUntil(symbol: string): number {
+    return this.getPairState(symbol).cooldownUntil;
+  }
+  clearCooldown(symbol: string): void {
+    const ps = this.getPairState(symbol);
+    ps.cooldownUntil = 0;
+    this.save();
+  }
+  incrementConsecutiveSL(symbol: string): number {
+    const ps = this.getPairState(symbol);
+    ps.consecutiveSL++;
+    this.save();
+    return ps.consecutiveSL;
+  }
+  resetConsecutiveSL(symbol: string): void {
+    const ps = this.getPairState(symbol);
+    ps.consecutiveSL = 0;
+    this.save();
+  }
+  getConsecutiveSL(symbol: string): number {
+    return this.getPairState(symbol).consecutiveSL;
+  }
+
+  // Trailing SL
+  updateTrailingPeak(symbol: string, price: number): void {
+    const ps = this.getPairState(symbol);
+    if (price > ps.trailingPeak) {
+      ps.trailingPeak = price;
+      this.save();
+    }
+  }
+  getTrailingPeak(symbol: string): number {
+    return this.getPairState(symbol).trailingPeak;
+  }
+  resetTrailingPeak(symbol: string): void {
+    const ps = this.getPairState(symbol);
+    ps.trailingPeak = 0;
     this.save();
   }
   // Check if ALL pairs are halted (used for global halt message)

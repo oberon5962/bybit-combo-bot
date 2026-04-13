@@ -59,11 +59,23 @@ export class ComboManager {
       this.state.peakCapital = totalPortfolioValue;
     }
 
-    // Auto-reset per-pair halts on restart — restart IS the manual intervention
+    // On restart: cooldown pairs resume, hard-halted pairs (max SL exceeded) stay halted
     for (const pair of this.config.pairs) {
-      if (this.state.isPairHalted(pair.symbol)) {
-        this.log.info(`Auto-resuming halted pair ${pair.symbol} (bot restart = manual review)`);
-        this.state.resetPairHalt(pair.symbol);
+      const sym = pair.symbol;
+      // Clear expired cooldowns
+      if (this.state.getCooldownUntil(sym) > 0) {
+        if (Date.now() >= this.state.getCooldownUntil(sym)) {
+          this.log.info(`Cooldown expired for ${sym}, resuming`);
+          this.state.clearCooldown(sym);
+        } else {
+          const minLeft = Math.ceil((this.state.getCooldownUntil(sym) - Date.now()) / 60000);
+          this.log.info(`${sym} in cooldown, ${minLeft} min remaining`);
+        }
+      }
+      // Hard-halted pairs (consecutiveSL >= max) stay halted
+      if (this.state.isPairHalted(sym)) {
+        const reason = this.state.getHaltReason(sym) ?? '';
+        this.log.warn(`Pair ${sym} remains HALTED (${reason}). Edit bot-state.json to resume.`);
       }
     }
 
@@ -184,10 +196,23 @@ export class ComboManager {
   private async processPair(pair: PairConfig, totalUSDT: number): Promise<void> {
     const { symbol } = pair;
 
-    // Skip halted pairs (SL/TP triggered on this pair)
+    // Skip halted pairs (max consecutive SL exceeded)
     if (this.state.isPairHalted(symbol)) {
-      this.log.debug(`Skipping ${symbol} — pair is halted (SL/TP triggered)`);
+      this.log.debug(`Skipping ${symbol} — pair is halted`);
       return;
+    }
+
+    // Cooldown check — pair is paused after SL, waiting to resume
+    const cooldownUntil = this.state.getCooldownUntil(symbol);
+    if (cooldownUntil > 0) {
+      if (Date.now() < cooldownUntil) {
+        const minLeft = Math.ceil((cooldownUntil - Date.now()) / 60000);
+        this.log.debug(`Skipping ${symbol} — cooldown, ${minLeft} min left`);
+        return;
+      }
+      // Cooldown expired — resume
+      this.state.clearCooldown(symbol);
+      this.log.info(`${symbol} cooldown expired, resuming trading`);
     }
 
     // Use TOTAL USDT for allocation — free balance fluctuates as grid locks funds in orders.
@@ -351,47 +376,106 @@ export class ComboManager {
       return false;
     }
 
-    const { stopLossPercent, takeProfitPercent } = this.config.risk;
+    const { stopLossPercent, takeProfitPercent, trailingSLPercent, trailingSLActivationPercent,
+            cooldownAfterSLSec, cooldownMaxSL } = this.config.risk;
     const pnlPercent = ((currentPrice - position.avgEntryPrice) / position.avgEntryPrice) * 100;
 
-    // STOP-LOSS: price dropped below entry by stopLossPercent
+    // --- 1. HARD STOP-LOSS: price crashed from entry ---
     if (pnlPercent <= -stopLossPercent) {
       this.log.warn('='.repeat(60));
       this.log.warn(`STOP-LOSS TRIGGERED for ${symbol}!`);
       this.log.warn(`Entry avg: ${position.avgEntryPrice.toFixed(2)} | Current: ${currentPrice.toFixed(2)} | PnL: ${pnlPercent.toFixed(1)}%`);
-      this.log.warn(`Selling ${position.amount} to limit losses`);
       this.log.warn('='.repeat(60));
 
       await this.closePosition(symbol, position.amount, currentPrice, 'stop-loss');
-      // HALT only THIS PAIR — other pairs continue trading
-      this.state.haltPair(symbol, `stop-loss: entry ${position.avgEntryPrice.toFixed(2)}, exit ${currentPrice.toFixed(2)}, PnL ${pnlPercent.toFixed(1)}%`);
-      this.log.warn(`Pair ${symbol} HALTED after stop-loss. Other pairs continue. Restart bot to resume this pair.`);
+      await this.handlePostSL(symbol, position.avgEntryPrice, currentPrice, pnlPercent, cooldownAfterSLSec, cooldownMaxSL);
       return true;
     }
 
-    // TAKE-PROFIT: price rose above entry by takeProfitPercent
+    // --- 2. TRAILING STOP-LOSS: price retreated from peak ---
+    if (pnlPercent >= trailingSLActivationPercent) {
+      // Update peak price
+      this.state.updateTrailingPeak(symbol, currentPrice);
+    }
+
+    const trailingPeak = this.state.getTrailingPeak(symbol);
+    if (trailingPeak > 0) {
+      const dropFromPeak = ((trailingPeak - currentPrice) / trailingPeak) * 100;
+      if (dropFromPeak >= trailingSLPercent) {
+        const trailingPnl = ((currentPrice - position.avgEntryPrice) / position.avgEntryPrice) * 100;
+        this.log.info('='.repeat(60));
+        this.log.info(`TRAILING STOP-LOSS TRIGGERED for ${symbol}!`);
+        this.log.info(`Entry: ${position.avgEntryPrice.toFixed(2)} | Peak: ${trailingPeak.toFixed(2)} | Current: ${currentPrice.toFixed(2)}`);
+        this.log.info(`Drop from peak: -${dropFromPeak.toFixed(1)}% | PnL from entry: ${trailingPnl >= 0 ? '+' : ''}${trailingPnl.toFixed(1)}%`);
+        this.log.info('='.repeat(60));
+
+        await this.closePosition(symbol, position.amount, currentPrice, 'trailing-stop');
+        // Trailing SL usually closes in profit — reset and continue like TP
+        this.state.resetPosition(symbol);
+        this.state.resetTrailingPeak(symbol);
+        this.state.resetConsecutiveSL(symbol);
+        this.state.setGridInitialized(symbol, false);
+        this.log.info(`${symbol} trailing SL done. Position reset, grid will rebuild on next tick.`);
+        return true;
+      }
+    }
+
+    // --- 3. TAKE-PROFIT: price reached target ---
     if (pnlPercent >= takeProfitPercent) {
       this.log.info('='.repeat(60));
       this.log.info(`TAKE-PROFIT TRIGGERED for ${symbol}!`);
       this.log.info(`Entry avg: ${position.avgEntryPrice.toFixed(2)} | Current: ${currentPrice.toFixed(2)} | PnL: +${pnlPercent.toFixed(1)}%`);
-      this.log.info(`Selling ${position.amount} to lock in profit`);
       this.log.info('='.repeat(60));
 
       await this.closePosition(symbol, position.amount, currentPrice, 'take-profit');
-      // HALT only THIS PAIR — other pairs continue trading
-      this.state.haltPair(symbol, `take-profit: entry ${position.avgEntryPrice.toFixed(2)}, exit ${currentPrice.toFixed(2)}, PnL +${pnlPercent.toFixed(1)}%`);
-      this.log.info(`Pair ${symbol} HALTED after take-profit. Other pairs continue. Restart bot to resume this pair.`);
+      this.state.resetPosition(symbol);
+      this.state.resetTrailingPeak(symbol);
+      this.state.resetConsecutiveSL(symbol);
+      this.state.setGridInitialized(symbol, false);
+      this.log.info(`${symbol} take-profit done. Position reset, grid will rebuild on next tick.`);
       return true;
     }
 
     return false;
   }
 
+  private async handlePostSL(
+    symbol: string,
+    entryPrice: number,
+    exitPrice: number,
+    pnlPercent: number,
+    cooldownSec: number,
+    maxConsecutive: number,
+  ): Promise<void> {
+    const count = this.state.incrementConsecutiveSL(symbol);
+    this.state.resetPosition(symbol);
+    this.state.resetTrailingPeak(symbol);
+    this.state.setGridInitialized(symbol, false);
+
+    const reason = `stop-loss: entry ${entryPrice.toFixed(2)}, exit ${exitPrice.toFixed(2)}, PnL ${pnlPercent.toFixed(1)}%`;
+
+    if (count >= maxConsecutive) {
+      // Too many SL in a row — full halt
+      this.state.haltPair(symbol, `${reason} [${count}x SL — halted]`);
+      this.log.warn(`${symbol} HALTED — ${count} consecutive stop-losses. Edit bot-state.json to resume.`);
+    } else if (cooldownSec > 0) {
+      // Cooldown — pause and resume later
+      const until = Date.now() + cooldownSec * 1000;
+      this.state.setCooldown(symbol, until);
+      const hours = (cooldownSec / 3600).toFixed(1);
+      this.log.warn(`${symbol} cooldown ${hours}h after SL (${count}/${maxConsecutive}). Will resume at ${new Date(until).toLocaleTimeString()}`);
+    } else {
+      // cooldownSec = 0 — halt forever (old behavior)
+      this.state.haltPair(symbol, reason);
+      this.log.warn(`${symbol} HALTED after stop-loss. Edit bot-state.json to resume.`);
+    }
+  }
+
   private async closePosition(
     symbol: string,
     amount: number,
     currentPrice: number,
-    reason: 'stop-loss' | 'take-profit',
+    reason: 'stop-loss' | 'take-profit' | 'trailing-stop',
   ): Promise<void> {
     try {
       // Cancel all open grid orders for this pair first
@@ -625,11 +709,20 @@ export class ComboManager {
     const totalSpent = buys.reduce((s, t) => s + t.cost, 0);
     const totalEarned = sells.reduce((s, t) => s + t.cost, 0);
 
+    // PnL
+    const pnl = currentCapital - this.state.startingCapital;
+    const pnlPct = this.state.startingCapital > 0 ? (pnl / this.state.startingCapital) * 100 : 0;
+    const drawdown = this.state.peakCapital > 0
+      ? ((this.state.peakCapital - currentCapital) / this.state.peakCapital) * 100
+      : 0;
+
     this.log.info('=== BOT SUMMARY ===', {
       totalTicks: this.state.totalTicks,
       currentCapital: currentCapital.toFixed(2),
-      peakCapital: this.state.peakCapital.toFixed(2),
       startingCapital: this.state.startingCapital.toFixed(2),
+      peakCapital: this.state.peakCapital.toFixed(2),
+      PnL: `${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)} USDT (${pnl >= 0 ? '+' : ''}${pnlPct.toFixed(1)}%)`,
+      drawdown: `${drawdown.toFixed(1)}%`,
       totalTrades: trades.length,
       buys: buys.length,
       sells: sells.length,
@@ -637,33 +730,58 @@ export class ComboManager {
       totalEarned: totalEarned.toFixed(2),
     });
 
-    // Show halted pairs with reasons
-    const haltedPairs = this.config.pairs.filter(p => this.state.isPairHalted(p.symbol));
-    if (haltedPairs.length > 0) {
-      for (const p of haltedPairs) {
-        const reason = this.state.getHaltReason(p.symbol) ?? 'unknown';
-        this.log.warn(`Halted: ${p.symbol} (${reason})`);
-      }
-    }
-
-    // Per-pair position & DCA stats
+    // Per-pair summary line
     for (const pair of this.config.pairs) {
-      const position = this.state.getPosition(pair.symbol);
-      if (position.amount > 0) {
-        this.log.info(`Position ${pair.symbol}`, {
-          amount: position.amount.toFixed(6),
-          costBasis: position.costBasis.toFixed(2),
-          avgEntry: position.avgEntryPrice.toFixed(2),
-        });
+      const sym = pair.symbol;
+      const pairTrades = trades.filter((t) => t.symbol === sym);
+      const position = this.state.getPosition(sym);
+      const isHalted = this.state.isPairHalted(sym);
+      const haltReason = this.state.getHaltReason(sym);
+
+      const pairBuys = pairTrades.filter((t) => t.side === 'buy');
+      const pairSells = pairTrades.filter((t) => t.side === 'sell');
+      const slTrades = pairTrades.filter((t) => t.strategy === 'stop-loss');
+      const tpTrades = pairTrades.filter((t) => t.strategy === 'take-profit');
+      const tslTrades = pairTrades.filter((t) => t.strategy === 'trailing-stop');
+
+      // Build compact status line
+      const parts: string[] = [];
+
+      // Trades count
+      parts.push(`${pairBuys.length}B/${pairSells.length}S`);
+
+      // Position
+      if (position.amount > 0 && position.avgEntryPrice > 0) {
+        parts.push(`pos ${position.amount.toFixed(6)} @ ${position.avgEntryPrice.toFixed(2)} (${position.costBasis.toFixed(2)} USDT)`);
+      } else {
+        parts.push('no position');
       }
-      const dcaStats = this.dca.getStats(pair.symbol);
-      if (dcaStats.totalBought > 0) {
-        this.log.info(`DCA stats ${pair.symbol}`, {
-          invested: dcaStats.totalInvested.toFixed(2),
-          bought: dcaStats.totalBought.toFixed(6),
-          avgPrice: dcaStats.avgPrice.toFixed(2),
-        });
+
+      // SL / Trailing SL / TP
+      if (slTrades.length > 0) {
+        const slCost = slTrades.reduce((s, t) => s + t.cost, 0);
+        parts.push(`SL: ${slTrades.length}x ${slCost.toFixed(2)} USDT`);
       }
+      if (tslTrades.length > 0) {
+        const tslCost = tslTrades.reduce((s, t) => s + t.cost, 0);
+        parts.push(`TSL: ${tslTrades.length}x ${tslCost.toFixed(2)} USDT`);
+      }
+      if (tpTrades.length > 0) {
+        const tpCost = tpTrades.reduce((s, t) => s + t.cost, 0);
+        parts.push(`TP: ${tpTrades.length}x ${tpCost.toFixed(2)} USDT`);
+      }
+
+      // Status
+      const cooldownUntil = this.state.getCooldownUntil(sym);
+      if (isHalted) {
+        parts.push(`HALTED — ${haltReason ?? 'unknown'}`);
+      } else if (cooldownUntil > 0 && Date.now() < cooldownUntil) {
+        const minLeft = Math.ceil((cooldownUntil - Date.now()) / 60000);
+        parts.push(`COOLDOWN — ${minLeft} min left`);
+      }
+
+      const level = (isHalted || cooldownUntil > Date.now()) ? 'warn' : 'info';
+      this.log[level](`  ${sym}: ${parts.join(' | ')}`);
     }
   }
 

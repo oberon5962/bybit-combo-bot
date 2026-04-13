@@ -13,6 +13,7 @@ export class GridStrategy {
   private config: GridConfig;
   private exchange: BybitExchange;
   private log: Logger;
+  private lastIndicators: Map<string, IndicatorSnapshot> = new Map();
   private state: StateManager;
   private restoredLogged: Set<string> = new Set(); // prevent repeated "Grid restored" logs
   // BUG #12 fix: cache market precision per symbol
@@ -32,6 +33,25 @@ export class GridStrategy {
       this.log.info(`Market precision for ${symbol}: price=${p.pricePrecision}, amount=${p.amountPrecision}, minAmount=${p.minAmount}, minCost=${p.minCost}`);
     }
     return this.precisionCache.get(symbol)!;
+  }
+
+  // RSI + EMA filter: should we allow grid buy orders?
+  isBuyAllowed(symbol: string): { allowed: boolean; reason: string } {
+    const ind = this.lastIndicators.get(symbol);
+    if (!ind) return { allowed: true, reason: 'no indicators yet' };
+
+    // Skip buy if RSI overbought
+    const rsiThreshold = this.config.rsiOverboughtThreshold;
+    if (ind.rsi > rsiThreshold) {
+      return { allowed: false, reason: `RSI=${ind.rsi.toFixed(0)} > ${rsiThreshold} (overbought)` };
+    }
+
+    // Skip buy if bearish EMA crossover
+    if (this.config.useEmaFilter && ind.emaCrossover === 'bearish') {
+      return { allowed: false, reason: `EMA bearish crossover (fast ${ind.emaFast.toFixed(2)} < slow ${ind.emaSlow.toFixed(2)})` };
+    }
+
+    return { allowed: true, reason: 'ok' };
   }
 
   private roundPriceForMarket(price: number, pricePrecision: number): number {
@@ -180,6 +200,12 @@ export class GridStrategy {
         }
 
         if (level.side === 'buy' && level.price < currentPrice) {
+          // RSI + EMA filter
+          const buyCheck = this.isBuyAllowed(symbol);
+          if (!buyCheck.allowed) {
+            this.log.debug(`Grid buy skipped for ${symbol} at ${level.price}: ${buyCheck.reason}`);
+            continue;
+          }
           const orderCost = amount * level.price;
           if (freeUSDT < orderCost) {
             this.log.debug(`Grid buy skipped for ${symbol}: free USDT=${freeUSDT.toFixed(2)} < needed ${orderCost.toFixed(2)}`);
@@ -206,7 +232,12 @@ export class GridStrategy {
           freeCrypto -= amount;
         }
       } catch (err) {
-        this.log.error(`Failed to place grid order: ${err}`, { symbol, level });
+        const errStr = String(err);
+        if (errStr.includes('InsufficientFunds') || errStr.includes('Insufficient balance')) {
+          this.log.debug(`Grid order skipped (insufficient balance) for ${symbol} at ${level.price}`);
+          break; // no point trying remaining levels if balance is depleted
+        }
+        this.log.error(`Failed to place grid order: ${err}`, { symbol });
       }
     }
 
@@ -226,6 +257,9 @@ export class GridStrategy {
   ): Promise<StrategyDecision[]> {
     if (!this.config.enabled) return [];
 
+    // Store latest indicators for buy filter
+    this.lastIndicators.set(symbol, indicators);
+
     const freshlyInitialized = await this.initGrid(symbol, ticker.last, allocationUSDT);
 
     const decisions: StrategyDecision[] = [];
@@ -237,9 +271,11 @@ export class GridStrategy {
       const openIds = new Set(openOrders.map((o) => o.id));
 
       let levelsChanged = false;
+      const processedOrderIds = new Set<string>(); // prevent processing same orderId twice
 
       for (const level of levels) {
-        if (level.orderId && !openIds.has(level.orderId)) {
+        if (level.orderId && !openIds.has(level.orderId) && !processedOrderIds.has(level.orderId)) {
+          processedOrderIds.add(level.orderId);
           const precision = await this.getPrecision(symbol);
           const filledSide = level.side;
           const filledPrice = level.price;
@@ -316,6 +352,16 @@ export class GridStrategy {
           // BUG #3 fix: use the SAME amount from the filled order, rounded to market precision
           const counterAmount = this.roundAmountForMarket(filledAmount, precision.amountPrecision);
 
+          // Skip counter-order if below exchange minimums
+          const counterValue = counterAmount * counterPrice;
+          if (counterAmount < precision.minAmount || counterValue < precision.minCost) {
+            this.log.debug(`Grid counter-order too small for ${symbol}: ${counterAmount} @ ${counterPrice} = ${counterValue.toFixed(2)} USDT (min: ${precision.minAmount} / ${precision.minCost} USDT)`);
+            level.orderId = undefined;
+            level.filled = false;
+            levelsChanged = true;
+            continue;
+          }
+
           // BUG #7 fix: execute counter-order HERE, and only update state AFTER success
           try {
             let counterOrderId: string | undefined;
@@ -341,6 +387,15 @@ export class GridStrategy {
               );
               counterOrderId = order.id;
             } else {
+              // RSI + EMA filter for counter-buy
+              const buyCheck = this.isBuyAllowed(symbol);
+              if (!buyCheck.allowed) {
+                this.log.debug(`Grid counter-buy skipped for ${symbol}: ${buyCheck.reason}`);
+                level.orderId = undefined;
+                level.filled = false;
+                levelsChanged = true;
+                continue;
+              }
               // Check free USDT before placing buy counter-order
               const counterCost = counterAmount * counterPrice;
               try {
