@@ -426,7 +426,11 @@ export class ComboManager {
       this.log.warn(`Entry avg: ${position.avgEntryPrice.toFixed(2)} | Current: ${currentPrice.toFixed(2)} | PnL: ${pnlPercent.toFixed(1)}%`);
       this.log.warn('='.repeat(60));
 
-      await this.closePosition(symbol, position.amount, currentPrice, 'stop-loss');
+      const sold = await this.closePosition(symbol, position.amount, currentPrice, 'stop-loss');
+      if (!sold) {
+        this.log.warn(`${symbol} SL: closePosition failed — keeping position in state`);
+        return false;
+      }
       await this.handlePostSL(symbol, position.avgEntryPrice, currentPrice, pnlPercent, cooldownAfterSLSec, cooldownMaxSL);
       return true;
     }
@@ -448,13 +452,22 @@ export class ComboManager {
         this.log.info(`Drop from peak: -${dropFromPeak.toFixed(1)}% | PnL from entry: ${trailingPnl >= 0 ? '+' : ''}${trailingPnl.toFixed(1)}%`);
         this.log.info('='.repeat(60));
 
-        await this.closePosition(symbol, position.amount, currentPrice, 'trailing-stop');
-        // Trailing SL usually closes in profit — reset and continue like TP
+        const sold = await this.closePosition(symbol, position.amount, currentPrice, 'trailing-stop');
+        if (!sold) {
+          this.log.warn(`${symbol} trailing SL: closePosition failed — keeping position in state`);
+          return false;
+        }
         this.state.resetPosition(symbol);
         this.state.resetTrailingPeak(symbol);
-        this.state.resetConsecutiveSL(symbol);
         this.state.setGridInitialized(symbol, false);
-        this.log.info(`${symbol} trailing SL done. Position reset, grid will rebuild on next tick.`);
+
+        if (trailingPnl < 0) {
+          await this.handlePostSL(symbol, position.avgEntryPrice, currentPrice, trailingPnl, cooldownAfterSLSec, cooldownMaxSL);
+          this.log.info(`${symbol} trailing SL done (loss). Cooldown applied.`);
+        } else {
+          this.state.resetConsecutiveSL(symbol);
+          this.log.info(`${symbol} trailing SL done (profit). Grid will rebuild on next tick.`);
+        }
         return true;
       }
     }
@@ -466,7 +479,11 @@ export class ComboManager {
       this.log.info(`Entry avg: ${position.avgEntryPrice.toFixed(2)} | Current: ${currentPrice.toFixed(2)} | PnL: +${pnlPercent.toFixed(1)}%`);
       this.log.info('='.repeat(60));
 
-      await this.closePosition(symbol, position.amount, currentPrice, 'take-profit');
+      const sold = await this.closePosition(symbol, position.amount, currentPrice, 'take-profit');
+      if (!sold) {
+        this.log.warn(`${symbol} TP: closePosition failed — keeping position in state`);
+        return false;
+      }
       this.state.resetPosition(symbol);
       this.state.resetTrailingPeak(symbol);
       this.state.resetConsecutiveSL(symbol);
@@ -515,7 +532,7 @@ export class ComboManager {
     amount: number,
     currentPrice: number,
     reason: 'stop-loss' | 'take-profit' | 'trailing-stop',
-  ): Promise<void> {
+  ): Promise<boolean> {
     try {
       // Cancel all open grid orders for this pair first
       await this.grid.cancelAll(symbol);
@@ -535,7 +552,7 @@ export class ComboManager {
 
       if (sellAmount <= 0) {
         this.log.warn(`${reason}: No free ${base} balance to sell after 5 attempts`);
-        return;
+        return false;
       }
 
       // Round to market precision to avoid exchange rejection
@@ -545,11 +562,11 @@ export class ComboManager {
         sellAmount = Math.floor(sellAmount * factor) / factor;
         if (sellAmount <= 0 || sellAmount < mp.minAmount) {
           this.log.warn(`${reason}: Sell amount ${sellAmount} below minimum ${mp.minAmount} for ${symbol}`);
-          return;
+          return false;
         }
         if (sellAmount * currentPrice < mp.minCost) {
           this.log.warn(`${reason}: Sell cost ${(sellAmount * currentPrice).toFixed(2)} below minCost ${mp.minCost} for ${symbol}`);
-          return;
+          return false;
         }
       } catch (precErr) {
         this.log.warn(`${reason}: Failed to get precision for ${symbol}, using raw amount: ${precErr}`);
@@ -579,8 +596,10 @@ export class ComboManager {
         price: fillPrice.toFixed(2),
         remainingPosition: position.amount,
       });
+      return true;
     } catch (err) {
       this.log.error(`${reason} execution failed for ${symbol}: ${sanitizeError(err)}`);
+      return false;
     }
   }
 

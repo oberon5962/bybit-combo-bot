@@ -287,10 +287,11 @@ export class BybitExchange {
         const isTransient = err?.constructor?.name === 'RequestTimeout'
           || err?.constructor?.name === 'NetworkError'
           || err?.constructor?.name === 'ExchangeNotAvailable'
-          || (err?.message && /timeout|ETIMEDOUT|ECONNRESET/i.test(err.message));
+          || err?.constructor?.name === 'RateLimitExceeded'
+          || (err?.message && /timeout|ETIMEDOUT|ECONNRESET|rate.?limit/i.test(err.message));
 
         if (isTransient && attempt < maxRetries) {
-          const delay = 1000 * (attempt + 1); // 1s, 2s
+          const delay = 1000 * Math.pow(2, attempt); // 1s, 2s, 4s (exponential)
           this.log.warn(`${label}: transient error (attempt ${attempt + 1}/${maxRetries + 1}), retrying in ${delay}ms: ${sanitizeError(err.message || err)}`);
           await new Promise(r => setTimeout(r, delay));
           continue;

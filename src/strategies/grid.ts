@@ -18,6 +18,7 @@ export class GridStrategy {
   private restoredLogged: Set<string> = new Set(); // prevent repeated "Grid restored" logs
   // BUG #12 fix: cache market precision per symbol
   private precisionCache: Map<string, { pricePrecision: number; amountPrecision: number; minAmount: number; minCost: number }> = new Map();
+  private lastSkipSummary: Map<string, string> = new Map(); // suppress repeated skip logs
 
   constructor(config: BotConfig, exchange: BybitExchange, log: Logger, state: StateManager) {
     this.config = config.grid;
@@ -43,12 +44,12 @@ export class GridStrategy {
     // Skip buy if RSI overbought
     const rsiThreshold = this.config.rsiOverboughtThreshold;
     if (ind.rsi > rsiThreshold) {
-      return { allowed: false, reason: `RSI=${ind.rsi.toFixed(0)} > ${rsiThreshold} (overbought)` };
+      return { allowed: false, reason: 'overbought' };
     }
 
     // Skip buy if bearish EMA crossover
     if (this.config.useEmaFilter && ind.emaCrossover === 'bearish') {
-      return { allowed: false, reason: `EMA bearish crossover (fast ${ind.emaFast.toFixed(2)} < slow ${ind.emaSlow.toFixed(2)})` };
+      return { allowed: false, reason: 'EMA bearish' };
     }
 
     return { allowed: true, reason: 'ok' };
@@ -174,6 +175,10 @@ export class GridStrategy {
       this.log.warn(`Failed to fetch balances for grid checks: ${sanitizeError(err)}`);
     }
 
+    // Track skip reasons for summary log (generic keys — no volatile values like RSI or balance)
+    const skipReasons: Set<string> = new Set();
+    const addSkip = (reason: string) => { skipReasons.add(reason); };
+
     for (const level of levels) {
       if (level.orderId || level.filled) continue;
 
@@ -183,32 +188,30 @@ export class GridStrategy {
         // Bump up to exchange minimum if too small, but don't exceed budget
         if (amount < precision.minAmount) {
           if (precision.minAmount * level.price > orderBudget * 1.5) {
-            this.log.debug(`Grid order for ${symbol} at ${level.price}: min amount costs ${(precision.minAmount * level.price).toFixed(2)} but budget is ${orderBudget.toFixed(2)}. Skipping.`);
+            addSkip('budget too small');
             continue;
           }
           amount = precision.minAmount;
-          this.log.debug(`Grid order bumped to minAmount for ${symbol}: ${amount}`);
         }
         if (amount * level.price < precision.minCost) {
           const minAmountForCost = Math.ceil((precision.minCost / level.price) * Math.pow(10, precision.amountPrecision)) / Math.pow(10, precision.amountPrecision);
           if (minAmountForCost * level.price > orderBudget * 1.5) {
-            this.log.debug(`Grid order for ${symbol} at ${level.price}: minCost requires ${(minAmountForCost * level.price).toFixed(2)} but budget is ${orderBudget.toFixed(2)}. Skipping.`);
+            addSkip('below minCost');
             continue;
           }
           amount = Math.max(amount, minAmountForCost);
-          this.log.debug(`Grid order bumped to minCost for ${symbol}: ${amount} (~${(amount * level.price).toFixed(2)} USDT)`);
         }
 
         if (level.side === 'buy' && level.price < currentPrice) {
           // RSI + EMA filter
           const buyCheck = this.isBuyAllowed(symbol);
           if (!buyCheck.allowed) {
-            this.log.debug(`Grid buy skipped for ${symbol} at ${level.price}: ${buyCheck.reason}`);
+            addSkip(buyCheck.reason);
             continue;
           }
           const orderCost = amount * level.price;
           if (freeUSDT < orderCost) {
-            this.log.debug(`Grid buy skipped for ${symbol}: free USDT=${freeUSDT.toFixed(2)} < needed ${orderCost.toFixed(2)}`);
+            addSkip('low USDT');
             continue;
           }
           const order = await this.exchange.withRetry(
@@ -220,7 +223,7 @@ export class GridStrategy {
         } else if (level.side === 'sell' && level.price > currentPrice) {
           // Check if we have enough free crypto to place this sell
           if (freeCrypto < amount) {
-            this.log.debug(`Grid sell skipped for ${symbol}: free ${base}=${freeCrypto.toFixed(8)} < needed ${amount}`);
+            addSkip(`low ${base}`);
             continue;
           }
           const order = await this.exchange.withRetry(
@@ -234,11 +237,25 @@ export class GridStrategy {
       } catch (err) {
         const errStr = String(err);
         if (errStr.includes('InsufficientFunds') || errStr.includes('Insufficient balance')) {
-          this.log.debug(`Grid order skipped (insufficient balance) for ${symbol} at ${level.price}`);
+          addSkip('insufficient balance');
           break; // no point trying remaining levels if balance is depleted
         }
         this.log.error(`Failed to place grid order: ${err}`, { symbol });
       }
+    }
+
+    // Log skip summary — only when reasons change from last tick
+    if (skipReasons.size > 0) {
+      const summary = [...skipReasons].sort().join(', ');
+      const prevSummary = this.lastSkipSummary.get(symbol);
+      if (summary !== prevSummary) {
+        this.log.info(`Grid skip ${symbol}: ${summary}`);
+        this.lastSkipSummary.set(symbol, summary);
+      }
+    } else if (this.lastSkipSummary.has(symbol)) {
+      // Was skipping, now all orders placed — log resume
+      this.log.info(`Grid orders resumed for ${symbol} — all levels placed`);
+      this.lastSkipSummary.delete(symbol);
     }
 
     // Save updated order IDs
@@ -287,8 +304,17 @@ export class GridStrategy {
             precision.amountPrecision,
           );
 
-          // Determine actual filled amount
-          const filledAmount = orderInfo.filled > 0 ? orderInfo.filled : expectedAmount;
+          // Determine actual filled amount (only fallback to expected if order is confirmed closed)
+          const filledAmount = orderInfo.filled > 0
+            ? orderInfo.filled
+            : (orderInfo.status === 'closed' ? expectedAmount : 0);
+          if (filledAmount <= 0) {
+            this.log.warn(`Grid ${filledSide} at ${filledPrice}: filled=0, status=${orderInfo.status} — skipping`, { symbol });
+            level.orderId = undefined;
+            level.filled = false;
+            levelsChanged = true;
+            continue;
+          }
           // CRITICAL: never use price=0 — fallback to the level's limit price
           const actualPrice = orderInfo.price > 0 ? orderInfo.price : filledPrice;
           if (actualPrice <= 0) {
@@ -299,7 +325,7 @@ export class GridStrategy {
             continue;
           }
 
-          if ((orderInfo.status === 'canceled' || orderInfo.status === 'purged') && orderInfo.filled === 0) {
+          if ((orderInfo.status === 'canceled' || orderInfo.status === 'cancelled' || orderInfo.status === 'purged') && orderInfo.filled === 0) {
             // Order was cancelled/purged without any fill — just clear it
             this.log.warn(`Grid ${filledSide} at ${filledPrice} was ${orderInfo.status} (no fill), resetting level`, { symbol });
             level.orderId = undefined;
@@ -352,7 +378,7 @@ export class GridStrategy {
           const counterSide: 'buy' | 'sell' = filledSide === 'buy' ? 'sell' : 'buy';
 
           // BUG #3 fix: use the SAME amount from the filled order, rounded to market precision
-          const counterAmount = this.roundAmountForMarket(filledAmount, precision.amountPrecision);
+          let counterAmount = this.roundAmountForMarket(filledAmount, precision.amountPrecision);
 
           // Skip counter-order if below exchange minimums
           const counterValue = counterAmount * counterPrice;
@@ -369,19 +395,27 @@ export class GridStrategy {
             let counterOrderId: string | undefined;
             if (counterSide === 'sell') {
               // Check free crypto balance before placing sell counter-order
+              // Use available balance if slightly less than needed (fee consumed some)
               try {
                 const balances = await this.exchange.fetchAllBalances();
                 const base = symbol.split('/')[0];
                 const freeBal = balances[base]?.free ?? 0;
-                if (freeBal < counterAmount) {
+                if (freeBal < counterAmount * 0.99) {
+                  // Significantly less than needed — skip
                   this.log.warn(`Grid counter-sell skipped for ${symbol}: free ${base}=${freeBal.toFixed(8)} < needed ${counterAmount}`);
                   level.orderId = undefined;
                   level.filled = false;
                   levelsChanged = true;
                   continue;
                 }
+                if (freeBal < counterAmount) {
+                  // Slightly less (fee consumed some) — adjust amount down
+                  const adjusted = this.roundAmountForMarket(freeBal, precision.amountPrecision);
+                  this.log.info(`Grid counter-sell adjusted for ${symbol}: ${counterAmount} → ${adjusted} (fee consumed ${(counterAmount - freeBal).toFixed(8)} ${base})`);
+                  counterAmount = adjusted;
+                }
               } catch (balErr) {
-                this.log.warn(`Failed to check balance for counter-sell, proceeding anyway: ${balErr}`);
+                this.log.warn(`Failed to check balance for counter-sell, proceeding anyway: ${sanitizeError(balErr)}`);
               }
               const order = await this.exchange.withRetry(
                 () => this.exchange.createLimitSell(symbol, counterAmount, counterPrice, 'grid'),
@@ -389,15 +423,7 @@ export class GridStrategy {
               );
               counterOrderId = order.id;
             } else {
-              // RSI + EMA filter for counter-buy
-              const buyCheck = this.isBuyAllowed(symbol);
-              if (!buyCheck.allowed) {
-                this.log.debug(`Grid counter-buy skipped for ${symbol}: ${buyCheck.reason}`);
-                level.orderId = undefined;
-                level.filled = false;
-                levelsChanged = true;
-                continue;
-              }
+              // Counter-buy is part of grid cycle — no RSI/EMA filter (only initial buys are filtered)
               // Check free USDT before placing buy counter-order
               const counterCost = counterAmount * counterPrice;
               try {
@@ -456,6 +482,74 @@ export class GridStrategy {
       const unplacedLevels = levels.filter((l) => !l.orderId && !l.filled);
       if (unplacedLevels.length > 0) {
         await this.placeGridOrders(symbol, allocationUSDT, ticker.last);
+      }
+    }
+
+    // Orphan position check: if position exceeds sell orders coverage, place additional sells
+    const position = this.state.getPosition(symbol);
+    if (position.amount > 0) {
+      const sellOrdersAmount = levels
+        .filter((l) => l.side === 'sell' && l.orderId && !l.filled)
+        .reduce((sum, l) => {
+          // Estimate amount from order cost / price (we don't store amount in level)
+          // Use orderSizePercent as approximation
+          return sum + (allocationUSDT * this.config.orderSizePercent / 100) / l.price;
+        }, 0);
+      const uncoveredAmount = position.amount - sellOrdersAmount;
+      this.log.debug(`Orphan check ${symbol}: pos=${position.amount.toFixed(4)}, sellCoverage=${sellOrdersAmount.toFixed(4)}, uncovered=${uncoveredAmount.toFixed(4)}`);
+
+      if (uncoveredAmount > 0) {
+        const precision = await this.getPrecision(symbol);
+        try {
+          const balances = await this.exchange.fetchAllBalances();
+          const base = symbol.split('/')[0];
+          const freeBal = balances[base]?.free ?? 0;
+          if (freeBal <= 0) return decisions;
+
+          // Place sells in chunks of orderSize at increasing price levels
+          const orderAmount = allocationUSDT * this.config.orderSizePercent / 100 / ticker.last;
+          let remaining = Math.min(uncoveredAmount, freeBal);
+          let priceStep = 1;
+
+          while (remaining > 0) {
+            const entryBased = position.avgEntryPrice * (1 + this.config.gridSpacingPercent * priceStep / 100);
+            const priceBased = ticker.last * (1 + this.config.gridSpacingPercent * priceStep / 100);
+            const sellPrice = this.roundPriceForMarket(
+              Math.max(entryBased, priceBased),
+              precision.pricePrecision,
+            );
+
+            // Check if this price level already has a sell order
+            const existsAtPrice = levels.some((l) => l.side === 'sell' && l.orderId && Math.abs(l.price - sellPrice) < sellPrice * 0.001);
+            if (existsAtPrice) { priceStep++; continue; }
+
+            let sellAmount = this.roundAmountForMarket(
+              Math.min(remaining, orderAmount),
+              precision.amountPrecision,
+            );
+            // If chunk is below minCost, use all remaining
+            if (sellAmount * sellPrice < precision.minCost) {
+              sellAmount = this.roundAmountForMarket(remaining, precision.amountPrecision);
+            }
+            if (sellAmount <= 0 || sellAmount < precision.minAmount || sellAmount * sellPrice < precision.minCost) break;
+
+            const order = await this.exchange.withRetry(
+              () => this.exchange.createLimitSell(symbol, sellAmount, sellPrice, 'grid'),
+              `Grid orphan-sell ${symbol} @ ${sellPrice}`,
+            );
+            levels.push({ price: sellPrice, side: 'sell', orderId: order.id, filled: false });
+            this.log.info(`Grid orphan-sell placed for ${symbol}: ${sellAmount} @ ${sellPrice} (uncovered position)`);
+            remaining -= sellAmount;
+            priceStep++;
+
+            // Safety: max 5 orphan sells per tick
+            if (priceStep > 5) break;
+          }
+          levels.sort((a, b) => a.price - b.price);
+          this.state.setGridLevels(symbol, levels);
+        } catch (err) {
+          this.log.warn(`Failed to place orphan-sell for ${symbol}: ${sanitizeError(err)}`);
+        }
       }
     }
 

@@ -41,8 +41,8 @@ export function loadConfig(): BotConfig {
       // { symbol: 'BTC/USDT', allocationPercent: 35 },
       // { symbol: 'ETH/USDT', allocationPercent: 35 },
       { symbol: 'SUI/USDT', allocationPercent: 25 },
-      { symbol: 'SOL/USDT', allocationPercent: 35 },
-      { symbol: 'XRP/USDT', allocationPercent: 40 },
+      { symbol: 'SOL/USDT', allocationPercent: 40 },
+      { symbol: 'XRP/USDT', allocationPercent: 35 },
     ],
 
     // -------------------------------------------------------
@@ -56,7 +56,7 @@ export function loadConfig(): BotConfig {
       portfolioTakeProfitPercent: 100, // Продать ВСЁ когда портфель вырос на 100% от старта
                                       // Было 200 USDT → стало 400 USDT → продаём все монеты
 
-      // Cooldown после SL: пауза 2 часа, после 3 SL подряд — полный halt
+      // Cooldown после StopLess (SL): пауза 2 часа, после 3  подряд — полный halt
       cooldownAfterSLSec: 2 * 60 * 60,  // 2 часа пауза после SL
       cooldownMaxSL: 3,                  // 3 SL подряд → halt до ручного вмешательства
 
@@ -72,8 +72,8 @@ export function loadConfig(): BotConfig {
       enabled: true,
       gridLevels,                    // 10 buy + 10 sell (покрытие ±5% от центра)
       gridSpacingPercent: 0.5,       // 0.5% между уровнями (покрытие 5% в каждую сторону)
-      orderSizePercent: 18,          // Каждый ордер = 18% от аллокации пары
-      rebalancePercent: 3,           // Перестроить сетку если цена ушла >3% от центра
+      orderSizePercent: 20,          // Каждый ордер = 18% от аллокации пары
+      rebalancePercent: 2,           // Перестроить сетку если цена ушла >2% от центра (вверх или вниз)
       rsiOverboughtThreshold: 70,    // Пропускаем grid-buy при RSI > 70 (100 = отключить)
       useEmaFilter: true,            // Пропускаем grid-buy при медвежьем EMA кроссовере (false = отключить)
     },
@@ -94,11 +94,21 @@ export function loadConfig(): BotConfig {
     // Technical Indicators
     // -------------------------------------------------------
     indicators: {
-      rsiPeriod: 14,
-      emaFastPeriod: 9,
-      emaSlowPeriod: 21,
-      bollingerPeriod: 20,
-      bollingerStdDev: 2,
+      rsiPeriod: 14,              // RSI (Relative Strength Index) — период 14 свечей
+                                  // RSI < 30 = перепроданность (хорошо покупать)
+                                  // RSI > 70 = перекупленность (grid-buy блокируется)
+                                  // Используется в grid (rsiOverboughtThreshold) и DCA (rsiBoostThreshold)
+
+      emaFastPeriod: 9,           // EMA быстрая (9 свечей) — реагирует на цену быстрее
+      emaSlowPeriod: 21,          // EMA медленная (21 свеча) — показывает тренд
+                                  // Когда fast < slow = bearish crossover → grid-buy блокируется
+                                  // Когда fast > slow = bullish → покупки разрешены
+                                  // Управляется флагом useEmaFilter (false = отключить)
+
+      bollingerPeriod: 20,        // Bollinger Bands — период скользящей средней (20 свечей)
+      bollingerStdDev: 2,         // Bollinger Bands — ширина полос (2 стандартных отклонения)
+                                  // Пока не используется в торговой логике, подготовлено для
+                                  // будущей стратегии: покупать у нижней полосы, продавать у верхней
     },
 
     // -------------------------------------------------------

@@ -124,8 +124,36 @@ export class ExchangeSync {
             // Order still exists on exchange — keep it
             validCount++;
           } else {
-            // Order NOT on exchange — was filled or cancelled
-            this.log.info(`[sync] ${symbol}: order ${level.orderId} at ${level.price} (${level.side}) not found on Bybit — removing from state`);
+            // Order NOT in open orders — check if it was filled or cancelled
+            try {
+              const orderInfo = await this.exchange.fetchOrder(level.orderId, symbol);
+              if (orderInfo.status === 'closed' && orderInfo.filled > 0) {
+                // Order was FILLED — update position
+                const fillPrice = orderInfo.price > 0 ? orderInfo.price : level.price;
+                const fillAmount = orderInfo.filled;
+                const fillCost = fillAmount * fillPrice;
+                if (level.side === 'buy') {
+                  this.state.addToPosition(symbol, fillAmount, fillCost);
+                } else {
+                  this.state.reducePosition(symbol, fillAmount);
+                }
+                this.state.addTrade({
+                  timestamp: Date.now(),
+                  symbol,
+                  side: level.side,
+                  amount: fillAmount,
+                  price: fillPrice,
+                  cost: fillCost,
+                  fee: fillCost * 0.001,
+                  strategy: 'grid-sync',
+                });
+                this.log.info(`[sync] ${symbol}: order ${level.orderId} at ${level.price} (${level.side}) was FILLED — position updated (${fillAmount} @ ${fillPrice})`);
+              } else {
+                this.log.info(`[sync] ${symbol}: order ${level.orderId} at ${level.price} (${level.side}) was ${orderInfo.status} — removing from state`);
+              }
+            } catch (err) {
+              this.log.warn(`[sync] ${symbol}: could not fetch order ${level.orderId}: ${sanitizeError(err)} — removing from state`);
+            }
             level.orderId = undefined;
             level.filled = false;
             removedCount++;
