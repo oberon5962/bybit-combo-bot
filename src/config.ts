@@ -14,6 +14,8 @@ export function loadConfig(): BotConfig {
   const apiKey = process.env.BYBIT_API_KEY ?? '';
   const apiSecret = process.env.BYBIT_API_SECRET ?? '';
   const testnet = (process.env.USE_TESTNET ?? 'true') === 'true';
+  const telegramToken = process.env.TELEGRAM_BOT_TOKEN ?? '';
+  const telegramChatId = process.env.TELEGRAM_CHAT_ID ?? '';
 
   if (!apiKey || !apiSecret) {
     throw new Error(
@@ -40,9 +42,9 @@ export function loadConfig(): BotConfig {
     pairs: [
       // { symbol: 'BTC/USDT', allocationPercent: 35 },
       // { symbol: 'ETH/USDT', allocationPercent: 35 },
-      { symbol: 'SUI/USDT', allocationPercent: 25 },
-      { symbol: 'SOL/USDT', allocationPercent: 40 },
-      { symbol: 'XRP/USDT', allocationPercent: 35 },
+      { symbol: 'SUI/USDT', allocationPercent: 30 },
+      { symbol: 'SOL/USDT', allocationPercent: 30 },
+      { symbol: 'XRP/USDT', allocationPercent: 40 },
     ],
 
     // -------------------------------------------------------
@@ -142,6 +144,19 @@ export function loadConfig(): BotConfig {
       btcWatchdogEnabled: true,         // следить за BTC как индикатором рынка (false = отключить)
       btcDropThresholdPercent: 3,       // BTC упал на 3% за час → пауза покупок пока btc не устаканится
       btcCheckIntervalSec: 300,         // проверять BTC каждые 5 минут
+    },
+
+    // -------------------------------------------------------
+    // Telegram Notifications
+    // -------------------------------------------------------
+    telegram: {
+      enabled: !!telegramToken && !!telegramChatId,
+      botToken: telegramToken,
+      chatId: telegramChatId,
+      sendSummary: true,            // summary в Telegram
+      sendFills: true,              // уведомления о сделках
+      sendAlerts: true,             // SL/TP/halt/panic
+      summaryIntervalTicks: 60,     // summary раз в 60 тиков (~10 мин)
     },
 
     // -------------------------------------------------------

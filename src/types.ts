@@ -25,6 +25,9 @@ export interface BotConfig {
   // Market protection
   marketProtection: MarketProtectionConfig;
 
+  // Telegram notifications
+  telegram: TelegramConfig;
+
   // Polling interval in seconds
   tickIntervalSec: number;
 
@@ -105,6 +108,16 @@ export interface MarketProtectionConfig {
   btcWatchdogEnabled: boolean;
   btcDropThresholdPercent: number;     // порог падения BTC за час (3 = -3%)
   btcCheckIntervalSec: number;        // как часто проверять BTC (300 = 5 мин)
+}
+
+export interface TelegramConfig {
+  enabled: boolean;
+  botToken: string;
+  chatId: string;
+  sendSummary: boolean;           // отправлять summary
+  sendFills: boolean;             // уведомления о сделках
+  sendAlerts: boolean;            // SL/TP/halt/panic/cooldown
+  summaryIntervalTicks: number;   // summary раз в N тиков (60 = ~10 мин при 10s tick)
 }
 
 // ============================================================

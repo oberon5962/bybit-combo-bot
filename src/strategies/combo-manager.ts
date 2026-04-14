@@ -11,6 +11,7 @@ import { computeIndicators } from '../indicators';
 import { GridStrategy } from './grid';
 import { DCAStrategy } from './dca';
 import { StateManager } from '../state';
+import { TelegramNotifier } from '../telegram';
 
 export class ComboManager {
   private config: BotConfig;
@@ -27,6 +28,7 @@ export class ComboManager {
   private lastBtcCheck: number = 0;
   private lastIndicatorsPerPair: Map<string, IndicatorSnapshot> = new Map();
   private lastTickPortfolioValue: number = 0;
+  private tg: TelegramNotifier;
 
   constructor(config: BotConfig, exchange: BybitExchange, log: Logger, state: StateManager) {
     this.config = config;
@@ -35,6 +37,7 @@ export class ComboManager {
     this.state = state;
     this.grid = new GridStrategy(config, exchange, log, state);
     this.dca = new DCAStrategy(config, exchange, log, state);
+    this.tg = new TelegramNotifier(config.telegram, log);
   }
 
   // ----------------------------------------------------------
@@ -95,6 +98,11 @@ export class ComboManager {
       totalTicks: this.state.totalTicks,
       resumed: this.state.totalTicks > 0 ? 'YES — continuing from saved state' : 'NO — fresh start',
     });
+
+    // Telegram startup message
+    const mode = this.config.testnet ? 'TESTNET' : 'LIVE';
+    const pairs = this.config.pairs.map(p => `${p.symbol} (${p.allocationPercent}%)`).join(', ');
+    this.tg.sendStartup(mode, pairs);
   }
 
   // ----------------------------------------------------------
@@ -189,6 +197,7 @@ export class ComboManager {
       if (drawdown > this.config.risk.maxDrawdownPercent) {
         this.log.error(`MAX DRAWDOWN EXCEEDED: ${drawdown.toFixed(1)}% > ${this.config.risk.maxDrawdownPercent}%`);
         this.log.error('HALTING ALL TRADING.');
+        this.tg.sendAlert(`🚨 <b>MAX DRAWDOWN ${drawdown.toFixed(1)}%</b>\nPeak: ${this.state.peakCapital.toFixed(2)} → ${totalPortfolioUSDT.toFixed(2)} USDT\nBot HALTED!`);
         this.state.halted = true;
         return;
       }
@@ -212,6 +221,7 @@ export class ComboManager {
 
       await this.sellEverything();
       this.state.halted = true;
+      this.tg.sendAlert(`🎉 <b>PORTFOLIO TAKE-PROFIT!</b>\nStart: ${this.state.startingCapital.toFixed(2)} → ${totalPortfolioUSDT.toFixed(2)} USDT (+${profitPercent.toFixed(1)}%)\nAll sold. Bot halted.`);
       this.log.info('All positions sold. Bot halted. Congratulations!');
       return;
     }
@@ -315,6 +325,7 @@ export class ComboManager {
 
     const allDecisions: StrategyDecision[] = [];
     const protectionActive = this.isMarketProtectionActive();
+    const tradesBeforeGrid = this.state.getRecentTrades().length;
 
     if (protectionActive) {
       // Market protection active — only check grid fills (to process existing orders,
@@ -348,6 +359,16 @@ export class ComboManager {
         continue;
       }
       await this.executeDecision(decision, indicators);
+    }
+
+    // Telegram: notify about new fills
+    const allTrades = this.state.getRecentTrades();
+    if (allTrades.length > tradesBeforeGrid) {
+      const newTrades = allTrades.slice(tradesBeforeGrid);
+      for (const t of newTrades) {
+        const icon = t.side === 'buy' ? '🔵' : '🟠';
+        this.tg.sendFill(`${icon} <b>${t.side.toUpperCase()} ${t.symbol}</b>\n${t.amount} @ ${t.price.toFixed(4)}\nCost: ${t.cost.toFixed(2)} USDT | ${t.strategy}`);
+      }
     }
   }
 
@@ -492,6 +513,7 @@ export class ComboManager {
         this.log.warn(`${symbol} SL: closePosition failed — keeping position in state`);
         return false;
       }
+      this.tg.sendAlert(`🔴 <b>STOP-LOSS ${symbol}</b>\nEntry: ${position.avgEntryPrice.toFixed(2)} → ${currentPrice.toFixed(2)}\nPnL: ${pnlPercent.toFixed(1)}%`);
       await this.handlePostSL(symbol, position.avgEntryPrice, currentPrice, pnlPercent, cooldownAfterSLSec, cooldownMaxSL);
       return true;
     }
@@ -518,6 +540,7 @@ export class ComboManager {
           this.log.warn(`${symbol} trailing SL: closePosition failed — keeping position in state`);
           return false;
         }
+        this.tg.sendAlert(`🟡 <b>TRAILING SL ${symbol}</b>\nEntry: ${position.avgEntryPrice.toFixed(2)} | Peak: ${trailingPeak.toFixed(2)} → ${currentPrice.toFixed(2)}\nDrop: -${dropFromPeak.toFixed(1)}% | PnL: ${trailingPnl >= 0 ? '+' : ''}${trailingPnl.toFixed(1)}%`);
         // closePosition already called reducePosition — only reset if fully sold
         const trailRemaining = this.state.getPosition(symbol);
         if (trailRemaining.amount < 1e-12) {
@@ -551,6 +574,7 @@ export class ComboManager {
         this.log.warn(`${symbol} TP: closePosition failed — keeping position in state`);
         return false;
       }
+      this.tg.sendAlert(`🟢 <b>TAKE-PROFIT ${symbol}</b>\nEntry: ${position.avgEntryPrice.toFixed(2)} → ${currentPrice.toFixed(2)}\nPnL: +${pnlPercent.toFixed(1)}%`);
       // closePosition already called reducePosition — only reset if fully sold
       const tpRemaining = this.state.getPosition(symbol);
       if (tpRemaining.amount < 1e-12) {
@@ -1010,6 +1034,7 @@ export class ComboManager {
     });
 
     // Per-pair summary line
+    const pairLines: string[] = [];
     for (const pair of this.config.pairs) {
       const sym = pair.symbol;
       const pairTrades = trades.filter((t) => t.symbol === sym);
@@ -1061,7 +1086,21 @@ export class ComboManager {
 
       const level = (isHalted || cooldownUntil > Date.now()) ? 'warn' : 'info';
       this.log[level](`  ${sym}: ${parts.join(' | ')}`);
+      pairLines.push(`${sym}: ${parts.join(' | ')}`);
     }
+
+    // Telegram summary
+    const sign = pnl >= 0 ? '+' : '';
+    const tgText = [
+      `<b>BOT SUMMARY</b> (tick ${this.state.totalTicks})`,
+      `Capital: <b>${currentCapital.toFixed(2)}</b> USDT`,
+      `PnL: ${sign}${pnl.toFixed(2)} USDT (${sign}${pnlPct.toFixed(1)}%)`,
+      `Drawdown: ${drawdown.toFixed(1)}%`,
+      `Trades: ${trades.length} (${buys.length}B/${sells.length}S)`,
+      '',
+      ...pairLines,
+    ].join('\n');
+    this.tg.sendSummary(this.state.totalTicks, tgText);
   }
 
   // ----------------------------------------------------------
