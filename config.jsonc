@@ -102,5 +102,5 @@
   // ============================================================
   "tickIntervalSec": 10,               // Основной цикл бота (10 сек, НЕ hot-reload)
   "syncIntervalSec": 21600,            // Sync с Bybit каждые 6 часов (НЕ hot-reload)
-  "configReloadIntervalTicks": 3        // Перечитывать config.json каждые 3 тика (0 = выкл, проверка раз в 5 мин)
+  "configReloadIntervalTicks": 6        // Перечитывать config.json каждые 6 тиков (0 = выкл, проверка раз в 5 мин)
 }
