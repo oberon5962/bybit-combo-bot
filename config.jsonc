@@ -1,0 +1,105 @@
+{
+  // ============================================================
+  // Trading Pairs & Allocation (сумма <= 100%)
+  // ============================================================
+  "pairs": [
+    { "symbol": "SUI/USDT", "allocationPercent": 25 },  // 25% капитала на SUI
+    { "symbol": "SOL/USDT", "allocationPercent": 40 },  // 40% капитала на SOL
+    { "symbol": "XRP/USDT", "allocationPercent": 35 }   // 35% капитала на XRP
+  ],
+
+  // ============================================================
+  // Risk Management — управление рисками
+  // ============================================================
+  "risk": {
+    "maxDrawdownPercent": 15,           // HALT если портфель упал на 15% от пика
+    "stopLossPercent": 10,              // Стоп-лосс на позицию (% от entry)
+    "takeProfitPercent": 12,            // Тейк-профит на позицию (% от entry)
+    "portfolioTakeProfitPercent": 100,  // Продать ВСЁ когда портфель +100% от старта
+    "cooldownAfterSLSec": 1800,         // Пауза после SL (1800 = 30 мин, 0 = halt навсегда)
+    "cooldownMaxSL": 3,                 // Макс SL подряд до полного halt
+    "trailingSLPercent": 5,             // Trailing SL: продаём если цена упала на 5% от пика
+    "trailingSLActivationPercent": 3    // Trailing SL включается после +3% от entry
+  },
+
+  // ============================================================
+  // Grid Strategy — сеточная торговля
+  // ============================================================
+  "grid": {
+    "enabled": true,                    // true = grid включен, false = выключить grid
+    "gridLevels": 10,                   // Кол-во уровней (делятся на buy/sell)
+    "gridSpacingPercent": 0.8,          // Расстояние между BUY-уровнями (% от цены)
+    "gridSpacingSellPercent": 1.4,      // Расстояние между SELL-уровнями (% от цены)
+    "orderSizePercent": 12,             // Размер ордера (% от аллокации пары)
+    "rebalancePercent": 3,              // Перестроить сетку если цена ушла >3% от центра
+    "rsiOverboughtThreshold": 70,       // Пропускаем grid-buy при RSI > 70 (100 = отключить)
+    "useEmaFilter": false,              // true = блокировать buy при bearish EMA crossover
+    "useBollingerAdaptive": true,       // Адаптивный grid по Bollinger Bands
+    "bollingerBuyMultiplier": 1.5,      // orderSize * 1.5 при покупке у нижней полосы BB
+    "bollingerSellMultiplier": 1.5,     // orderSize * 1.5 при продаже у верхней полосы BB
+    "bollingerShiftLevels": 2           // Перекинуть 2 уровня в пользу buy/sell по BB
+  },
+
+  // ============================================================
+  // DCA Strategy — усреднение позиции
+  // ============================================================
+  "dca": {
+    "enabled": false,                   // true = DCA включен, false = выключить DCA
+    "intervalSec": 10800,               // Интервал DCA-покупок (10800 = 3 часа)
+    "baseOrderPercent": 5,              // Размер DCA-покупки (% от аллокации пары)
+    "rsiBoostThreshold": 28,            // Покупаем 1.7x когда RSI < 28 (перепроданность)
+    "rsiBoostMultiplier": 1.7,          // Множитель при перепроданности
+    "rsiSkipThreshold": 70              // Пропускаем DCA-покупку при RSI > 70
+  },
+
+  // ============================================================
+  // Technical Indicators — настройки индикаторов
+  // ============================================================
+  "indicators": {
+    "rsiPeriod": 14,                    // RSI период (14 свечей)
+    "emaFastPeriod": 9,                 // EMA быстрая (9 свечей)
+    "emaSlowPeriod": 21,                // EMA медленная (21 свеча)
+    "bollingerPeriod": 20,              // Bollinger Bands период (20 свечей)
+    "bollingerStdDev": 2                // Bollinger Bands ширина (2 std dev)
+  },
+
+  // ============================================================
+  // Meta-Signal — комбинированные сигналы (RSI + BB + EMA)
+  // ============================================================
+  "metaSignal": {
+    "enabled": false,                   // true = meta-signal включен (рыночные ордера)
+    "buyRsiThreshold": 35,              // Покупка при RSI < 35 + цена ниже BB middle
+    "strongBuyRsiThreshold": 25,        // Сильная покупка при RSI < 25 + bullish EMA
+    "sellRsiThreshold": 75,             // Продажа при RSI > 75 + цена выше BB upper
+    "strongSellRsiThreshold": 80,       // Сильная продажа при RSI > 80 + bearish EMA
+    "orderSizeMultiplier": 1.0,         // Обычный ордер = grid.orderSizePercent * 1.0
+    "strongOrderSizeMultiplier": 1.5    // Сильный ордер = grid.orderSizePercent * 1.5
+  },
+
+  // ============================================================
+  // Market Protection — защита от рыночной паники
+  // ============================================================
+  "marketProtection": {
+    "panicBearishPairsThreshold": 999,  // Сколько пар bearish для паники (999 = отключено)
+    "btcWatchdogEnabled": true,         // Следить за BTC как индикатором рынка
+    "btcDropThresholdPercent": 3,       // BTC упал на 3% за час → пауза покупок
+    "btcCheckIntervalSec": 300          // Проверять BTC каждые 5 минут
+  },
+
+  // ============================================================
+  // Telegram — настройки уведомлений (токен/chatId в .env)
+  // ============================================================
+  "telegram": {
+    "sendSummary": true,                // Отправлять summary в Telegram
+    "sendFills": true,                  // Уведомления о сделках
+    "sendAlerts": true,                 // Алерты: SL/TP/halt/panic
+    "summaryIntervalTicks": 60          // Summary раз в 60 тиков (~10 мин)
+  },
+
+  // ============================================================
+  // Bot Intervals — интервалы работы
+  // ============================================================
+  "tickIntervalSec": 10,               // Основной цикл бота (10 сек, НЕ hot-reload)
+  "syncIntervalSec": 21600,            // Sync с Bybit каждые 6 часов (НЕ hot-reload)
+  "configReloadIntervalTicks": 3        // Перечитывать config.json каждые 3 тика (0 = выкл, проверка раз в 5 мин)
+}

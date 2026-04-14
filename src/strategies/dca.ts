@@ -23,6 +23,11 @@ export class DCAStrategy {
     this.state = state;
   }
 
+  /** Hot-reload: обновить конфиг DCA. Применится к следующему DCA-циклу. */
+  updateConfig(config: BotConfig): void {
+    this.config = config.dca;
+  }
+
   // ----------------------------------------------------------
   // Evaluate — called each tick
   // ----------------------------------------------------------

@@ -33,6 +33,9 @@ export interface BotConfig {
 
   // Sync with exchange interval in seconds (0 = only on startup)
   syncIntervalSec: number;
+
+  // How often to hot-reload config from disk (in ticks). 0 = disabled.
+  configReloadIntervalTicks: number;
 }
 
 export interface PairConfig {

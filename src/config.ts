@@ -2,15 +2,20 @@
 // Bybit Combo Bot — Configuration
 // ============================================================
 //
-// Edit these values to match your trading preferences.
-// Start with TESTNET=true and small amounts!
+// API keys: .env file (BYBIT_API_KEY, BYBIT_API_SECRET, etc.)
+// All other params: config.jsonc (hot-reloaded at runtime)
 // ============================================================
 
+import fs from 'fs';
+import path from 'path';
 import { BotConfig } from './types';
 import dotenv from 'dotenv';
 dotenv.config();
 
+const CONFIG_PATH = path.resolve(__dirname, '..', 'config.jsonc');
+
 export function loadConfig(): BotConfig {
+  // --- .env: API keys & tokens (never hot-reloaded, restart required) ---
   const apiKey = process.env.BYBIT_API_KEY ?? '';
   const apiSecret = process.env.BYBIT_API_SECRET ?? '';
   const testnet = (process.env.USE_TESTNET ?? 'true') === 'true';
@@ -24,146 +29,98 @@ export function loadConfig(): BotConfig {
     );
   }
 
-  const gridLevels = 14;
+  // --- config.jsonc: all tunable parameters (hot-reloaded) ---
+  // Supports // line comments in JSON
+  const raw = fs.readFileSync(CONFIG_PATH, 'utf-8');
+  const stripped = raw.replace(/\/\/.*$/gm, '');
+  const json = JSON.parse(stripped);
+
+  const gridLevels = json.grid?.gridLevels ?? -1;
+  const defaultNum = -1;
+  const defaultBool = false;
 
   const config: BotConfig = {
-    // API
     apiKey,
     apiSecret,
     testnet,
 
-    // -------------------------------------------------------
-    // Trading Pairs & Allocation
-    // -------------------------------------------------------
-    // При маленьком капитале (100-500 USDT) лучше 2 пары, а не 3,
-    // чтобы ордера не были слишком мелкими (Bybit имеет минимумы).
-    // BTC — надёжная база, ETH — потенциал роста.
-    // Если капитал > 500 USDT, можно добавить SOL.
-    pairs: [
-      // { symbol: 'BTC/USDT', allocationPercent: 35 },
-      // { symbol: 'ETH/USDT', allocationPercent: 35 },
-      { symbol: 'SUI/USDT', allocationPercent: 30 },
-      { symbol: 'SOL/USDT', allocationPercent: 30 },
-      { symbol: 'XRP/USDT', allocationPercent: 40 },
-    ],
+    pairs: json.pairs ?? [{ "symbol": "BTC/USDT", "allocationPercent": 50 },
+                          { "symbol": "ETH/USDT", "allocationPercent": 50 }],
 
-    // -------------------------------------------------------
-    // Risk Management
-    // -------------------------------------------------------
     risk: {
-      maxDrawdownPercent: 15,        // HALT если портфель упал на 15% от пика
-      maxOpenOrdersPerPair: gridLevels + 4, // Запас под grid-уровни + контр-ордера + orphan sells
-      stopLossPercent: 10,            // Стоп-лосс на позицию (шире для высокой волатильности)
-      takeProfitPercent: 12,          // Тейк-профит (поменьше, чтобы чаще фиксировать)
-      portfolioTakeProfitPercent: 100, // Продать ВСЁ когда портфель вырос на 100% от старта
-                                      // Было 200 USDT → стало 400 USDT → продаём все монеты
-
-      // Cooldown после StopLess (SL): пауза 2 часа, после 3  подряд — полный halt
-      cooldownAfterSLSec: 30 * 60,       // 30 минут пауза после SL
-      cooldownMaxSL: 3,                  // 3 SL подряд → halt до ручного вмешательства
-
-      // Trailing SL: SL двигается вверх за ценой
-      trailingSLPercent: 5,              // продаём если цена упала на 5% от пика
-      trailingSLActivationPercent: 3,    // trailing включается после +3% от entry
+      maxDrawdownPercent: json.risk?.maxDrawdownPercent ?? defaultNum,
+      maxOpenOrdersPerPair: gridLevels + 4,
+      stopLossPercent: json.risk?.stopLossPercent ?? defaultNum,
+      takeProfitPercent: json.risk?.takeProfitPercent ?? defaultNum,
+      portfolioTakeProfitPercent: json.risk?.portfolioTakeProfitPercent ?? defaultNum,
+      cooldownAfterSLSec: json.risk?.cooldownAfterSLSec ?? defaultNum,
+      cooldownMaxSL: json.risk?.cooldownMaxSL ?? defaultNum,
+      trailingSLPercent: json.risk?.trailingSLPercent ?? defaultNum,
+      trailingSLActivationPercent: json.risk?.trailingSLActivationPercent ?? defaultNum,
     },
 
-    // -------------------------------------------------------
-    // Grid Strategy
-    // -------------------------------------------------------
     grid: {
-      enabled: true,
-      gridLevels,                    // 10 buy + 10 sell (покрытие ±5% от центра)
-      gridSpacingPercent: 0.6,       // 0.6% между buy-уровнями
-      gridSpacingSellPercent: 1.0,   // 1.2% между sell-уровнями (выше маржа при продаже)
-      orderSizePercent: 10,          // Каждый ордер = 10% от аллокации пары
-      rebalancePercent: 3,             // Перестроить сетку если цена ушла >3% от центра (~5 из 7 уровней сработают)
-      rsiOverboughtThreshold: 70,    // Пропускаем grid-buy при RSI > 70 (100 = отключить)
-      useEmaFilter: false,           // Отключен: grid торгует всегда, RSI overbought (70) остаётся как защита
-
-      // Bollinger Bands адаптивный grid (false = отключить)
-      // Когда цена у нижней полосы — больше buy уровней + увеличенный orderSize
-      // Когда цена у верхней полосы + EMA bearish — больше sell уровней + увеличенный orderSize
-      // Когда цена у верхней полосы + EMA bullish — не усиливаем sell (тренд сильный)
-      useBollingerAdaptive: true,
-      bollingerBuyMultiplier: 1.5,   // orderSize * 1.5 при покупке у нижней полосы
-      bollingerSellMultiplier: 1.5,  // orderSize * 1.5 при продаже у верхней полосы (только EMA bearish)
-      bollingerShiftLevels: 2,       // перекинуть 2 уровня: напр. 7/7 → 9/5 buy/sell (или 5/9)
+      enabled: json.grid?.enabled ?? defaultBool,
+      gridLevels,
+      gridSpacingPercent: json.grid?.gridSpacingPercent ?? defaultNum,
+      gridSpacingSellPercent: json.grid?.gridSpacingSellPercent ?? defaultNum,
+      orderSizePercent: json.grid?.orderSizePercent ?? defaultNum,
+      rebalancePercent: json.grid?.rebalancePercent ?? defaultNum,
+      rsiOverboughtThreshold: json.grid?.rsiOverboughtThreshold ?? defaultNum,
+      useEmaFilter: json.grid?.useEmaFilter ?? defaultBool,
+      useBollingerAdaptive: json.grid?.useBollingerAdaptive ?? defaultBool,
+      bollingerBuyMultiplier: json.grid?.bollingerBuyMultiplier ?? defaultNum,
+      bollingerSellMultiplier: json.grid?.bollingerSellMultiplier ?? defaultNum,
+      bollingerShiftLevels: json.grid?.bollingerShiftLevels ?? defaultNum,
     },
 
-    // -------------------------------------------------------
-    // DCA Strategy
-    // -------------------------------------------------------
     dca: {
-      enabled: false,
-      intervalSec: 3 * 60 * 60,         // Каждые 3 часа (10800 сек)
-      baseOrderPercent: 5,              // 5% от аллокации пары за одну DCA-покупку
-      rsiBoostThreshold: 28,            // Покупаем 1.5x когда RSI < 28
-      rsiBoostMultiplier: 1.7,          // 1.7x при перепроданности
-      rsiSkipThreshold: 70,             // Пропускаем покупку при RSI > 70
+      enabled: json.dca?.enabled ?? defaultBool,
+      intervalSec: json.dca?.intervalSec ?? defaultNum,
+      baseOrderPercent: json.dca?.baseOrderPercent ?? defaultNum,
+      rsiBoostThreshold: json.dca?.rsiBoostThreshold ?? defaultNum,
+      rsiBoostMultiplier: json.dca?.rsiBoostMultiplier ?? defaultNum,
+      rsiSkipThreshold: json.dca?.rsiSkipThreshold ?? defaultNum,
     },
 
-    // -------------------------------------------------------
-    // Technical Indicators
-    // -------------------------------------------------------
     indicators: {
-      rsiPeriod: 14,              // RSI (Relative Strength Index) — период 14 свечей
-                                  // RSI < 30 = перепроданность (хорошо покупать)
-                                  // RSI > 70 = перекупленность (grid-buy блокируется)
-                                  // Используется в grid (rsiOverboughtThreshold) и DCA (rsiBoostThreshold)
-
-      emaFastPeriod: 9,           // EMA быстрая (9 свечей) — реагирует на цену быстрее
-      emaSlowPeriod: 21,          // EMA медленная (21 свеча) — показывает тренд
-                                  // Когда fast < slow = bearish crossover → grid-buy блокируется
-                                  // Когда fast > slow = bullish → покупки разрешены
-                                  // Управляется флагом useEmaFilter (false = отключить)
-
-      bollingerPeriod: 20,        // Bollinger Bands — период скользящей средней (20 свечей)
-      bollingerStdDev: 2,         // Bollinger Bands — ширина полос (2 стандартных отклонения)
-                                  // Пока не используется в торговой логике, подготовлено для
-                                  // будущей стратегии: покупать у нижней полосы, продавать у верхней
+      rsiPeriod: json.indicators?.rsiPeriod ?? defaultNum,
+      emaFastPeriod: json.indicators?.emaFastPeriod ?? defaultNum,
+      emaSlowPeriod: json.indicators?.emaSlowPeriod ?? defaultNum,
+      bollingerPeriod: json.indicators?.bollingerPeriod ?? defaultNum,
+      bollingerStdDev: json.indicators?.bollingerStdDev ?? defaultNum,
     },
 
-    // -------------------------------------------------------
-    // Meta-Signal — комбинированные сигналы индикаторов
-    // -------------------------------------------------------
     metaSignal: {
-      enabled: false,                // false = отключить meta-signal (рыночные ордера по RSI+BB+EMA)
-      buyRsiThreshold: 35,           // покупка при RSI < 35 + цена ниже BB middle
-      strongBuyRsiThreshold: 25,     // сильная покупка при RSI < 25 + bullish EMA + ниже BB lower
-      sellRsiThreshold: 75,          // продажа при RSI > 70 + цена выше BB upper
-      strongSellRsiThreshold: 80,    // сильная продажа при RSI > 80 + bearish EMA + выше BB upper
-      orderSizeMultiplier: 1.0,      // обычный ордер = grid.orderSizePercent * 1.0 (сейчас 10%*1.0=10%)
-      strongOrderSizeMultiplier: 1.5, // сильный ордер = grid.orderSizePercent * 1.5 (сейчас 10%*1.5=15%)
+      enabled: json.metaSignal?.enabled ?? defaultBool,
+      buyRsiThreshold: json.metaSignal?.buyRsiThreshold ?? defaultNum,
+      strongBuyRsiThreshold: json.metaSignal?.strongBuyRsiThreshold ?? defaultNum,
+      sellRsiThreshold: json.metaSignal?.sellRsiThreshold ?? defaultNum,
+      strongSellRsiThreshold: json.metaSignal?.strongSellRsiThreshold ?? defaultNum,
+      orderSizeMultiplier: json.metaSignal?.orderSizeMultiplier ?? defaultNum,
+      strongOrderSizeMultiplier: json.metaSignal?.strongOrderSizeMultiplier ?? defaultNum,
     },
 
-    // -------------------------------------------------------
-    // Market Protection — защита от рыночной паники
-    // -------------------------------------------------------
     marketProtection: {
-      panicBearishPairsThreshold: 999,  // У сколько пар должно быть bearish одновременно, при 999 отключено
-      btcWatchdogEnabled: true,         // следить за BTC как индикатором рынка (false = отключить)
-      btcDropThresholdPercent: 3,       // BTC упал на 3% за час → пауза покупок пока btc не устаканится
-      btcCheckIntervalSec: 300,         // проверять BTC каждые 5 минут
+      panicBearishPairsThreshold: json.marketProtection?.panicBearishPairsThreshold ?? defaultNum,
+      btcWatchdogEnabled: json.marketProtection?.btcWatchdogEnabled ?? defaultBool,
+      btcDropThresholdPercent: json.marketProtection?.btcDropThresholdPercent ?? defaultNum,
+      btcCheckIntervalSec: json.marketProtection?.btcCheckIntervalSec ?? defaultNum,
     },
 
-    // -------------------------------------------------------
-    // Telegram Notifications
-    // -------------------------------------------------------
     telegram: {
       enabled: !!telegramToken && !!telegramChatId,
       botToken: telegramToken,
       chatId: telegramChatId,
-      sendSummary: true,            // summary в Telegram
-      sendFills: true,              // уведомления о сделках
-      sendAlerts: true,             // SL/TP/halt/panic
-      summaryIntervalTicks: 60,     // summary раз в 60 тиков (~10 мин)
+      sendSummary: json.telegram?.sendSummary ?? defaultBool,
+      sendFills: json.telegram?.sendFills ?? defaultBool,
+      sendAlerts: json.telegram?.sendAlerts ?? defaultBool,
+      summaryIntervalTicks: json.telegram?.summaryIntervalTicks ?? defaultNum,
     },
 
-    // -------------------------------------------------------
-    // Bot Intervals
-    // -------------------------------------------------------
-    tickIntervalSec: 10,             // Проверка каждые 10 секунд
-    syncIntervalSec: 6 * 60 * 60,   // Полный sync с Bybit каждые 6 часов (4 раза в сутки)
+    tickIntervalSec: json.tickIntervalSec ?? defaultNum,
+    syncIntervalSec: json.syncIntervalSec ?? defaultNum,
+    configReloadIntervalTicks: json.configReloadIntervalTicks ?? defaultNum,
   };
 
   validateConfig(config);
@@ -264,6 +221,7 @@ function validateConfig(config: BotConfig): void {
   // Tick & Sync
   if (config.tickIntervalSec < 10) errors.push('tickIntervalSec must be >= 10 seconds');
   if (config.syncIntervalSec < 0) errors.push('syncIntervalSec must be >= 0 (0 = disabled)');
+  if (config.configReloadIntervalTicks < 0) errors.push('configReloadIntervalTicks must be >= 0 (0 = disabled)');
 
   if (errors.length > 0) {
     throw new Error('Config validation failed:\n  - ' + errors.join('\n  - '));

@@ -8,6 +8,7 @@
 - **CCXT** — Bybit V5 API (spot)
 - **Winston** — логирование (файл + консоль)
 - **dotenv** — конфигурация API ключей
+- **Telegram Bot API** — уведомления (native https, без зависимостей)
 
 ## Структура проекта
 
@@ -18,6 +19,7 @@ bybit-combo-bot/
 ├── .gitignore
 ├── package.json
 ├── tsconfig.json
+├── config.jsonc              # Все параметры бота (hot-reload без перезапуска)
 ├── README.md
 ├── CLAUDE.md
 ├── bot-state.json            # Состояние бота (создаётся автоматически)
@@ -32,6 +34,7 @@ bybit-combo-bot/
     ├── logger.ts             # Winston: bot.log (10MB x5), errors.log (5MB x3), console
     ├── state.ts              # Персистентное состояние (JSON, debounced atomic write)
     ├── sync.ts               # Синхронизация с биржей при старте + каждые 6ч
+    ├── telegram.ts           # Telegram уведомления (queue, rate-limit, HTML)
     └── strategies/
         ├── grid.ts           # Grid-стратегия (сетка лимитных ордеров + counter-orders)
         ├── dca.ts            # DCA-стратегия с RSI-фильтром (отключена)
@@ -43,8 +46,8 @@ bybit-combo-bot/
 | Параметр | Значение | Описание |
 |---|---|---|
 | **Пары** | SUI/USDT 25%, SOL/USDT 40%, XRP/USDT 35% | 3 пары, суммарная аллокация 100% |
-| **Режим** | USE_TESTNET=true | Тестовая сеть Bybit |
-| **Капитал** | ~$300 USDT | На реальном Bybit |
+| **Режим** | USE_TESTNET=false | Mainnet Bybit |
+| **Капитал** | ~$304 USDT | На реальном Bybit |
 | **Tick интервал** | 10 сек | Проверка рынка каждые 10 секунд |
 | **Sync интервал** | 6 часов | Полная синхронизация с Bybit |
 
@@ -52,31 +55,36 @@ bybit-combo-bot/
 
 | Параметр | Значение |
 |---|---|
-| gridLevels | 20 (10 buy + 10 sell) |
-| gridSpacingPercent | 0.5% |
-| orderSizePercent | 14% от аллокации пары |
-| rebalancePercent | 2% (вверх или вниз от центра) |
+| gridLevels | 10 (5 buy + 5 sell) |
+| gridSpacingPercent | 0.8% (buy) |
+| gridSpacingSellPercent | 1.4% (sell) |
+| orderSizePercent | 12% от аллокации пары |
+| rebalancePercent | 3% (вверх или вниз от центра) |
 | rsiOverboughtThreshold | 70 (100 = отключить) |
-| useEmaFilter | true (false = отключить) |
+| useEmaFilter | false (отключён) |
+| useBollingerAdaptive | true |
+| bollingerBuyMultiplier | 1.5x (у нижней BB) |
+| bollingerSellMultiplier | 1.5x (у верхней BB + bearish EMA) |
+| bollingerShiftLevels | 2 |
 
 ### Risk Management
 
 | Параметр | Значение |
 |---|---|
-| stopLossPercent | 14% |
+| stopLossPercent | 10% |
 | takeProfitPercent | 12% |
 | trailingSLPercent | 5% (trailing) |
 | trailingSLActivationPercent | 3% (активация trailing) |
 | maxDrawdownPercent | 15% |
 | portfolioTakeProfitPercent | 100% |
-| cooldownAfterSLSec | 7200 (2 часа) |
+| cooldownAfterSLSec | 1800 (30 минут) |
 | cooldownMaxSL | 3 (3 SL подряд = halt) |
 
 ### Market Protection
 
 | Параметр | Значение |
 |---|---|
-| panicBearishPairsThreshold | 2 (2 из 3 bearish = cancel all buys) |
+| panicBearishPairsThreshold | 999 (сколько пар вают должно зафиксировать bearish, при 999 - отключено) |
 | btcWatchdogEnabled | true |
 | btcDropThresholdPercent | 3% за час |
 | btcCheckIntervalSec | 300 (5 мин) |
@@ -91,17 +99,34 @@ bybit-combo-bot/
 | rsiBoostThreshold | 28 (покупаем 1.7x) |
 | rsiSkipThreshold | 70 |
 
+### Telegram-уведомления
+
+| Параметр | Значение |
+|---|---|
+| enabled | auto (при наличии token + chatId) |
+| sendSummary | true (раз в 60 тиков ≈ 10 мин) |
+| sendFills | true (уведомления об исполненных сделках) |
+| sendAlerts | true (SL/TP/halt/panic/cooldown) |
+
+Бот отправляет в Telegram:
+- Стартовое сообщение (режим, пары)
+- Summary портфеля каждые ~10 минут
+- Fill-уведомления при исполнении grid-ордеров
+- Алерты: Stop-Loss, Trailing SL, Take-Profit, Max Drawdown, Portfolio TP
+
 ## Торговая стратегия
 
 ### 1. Grid (сеточная торговля)
 
-Размещает сетку лимитных ордеров на покупку ниже текущей цены и на продажу выше. Когда покупка исполняется — бот ставит контр-ордер на продажу на уровень выше (+ gridSpacing%). Когда продажа исполняется — ставит контр-ордер на покупку ниже. Зарабатывает на каждом колебании цены внутри диапазона.
+Размещает сетку лимитных ордеров на покупку ниже текущей цены и на продажу выше. Buy-уровни с шагом 0.8%, sell-уровни с шагом 1.4% (раздельные spacing). Когда покупка исполняется — бот ставит контр-ордер на продажу на уровень выше (+ gridSpacingSell%). Когда продажа исполняется — ставит контр-ордер на покупку ниже. Зарабатывает на каждом колебании цены внутри диапазона.
+
+**Bollinger Bands Adaptive Grid:** когда цена у нижней полосы BB — больше buy-уровней (shift +2) и увеличенный orderSize (x1.5). Когда у верхней BB + bearish EMA — больше sell-уровней и увеличенный sell size. При bullish EMA sell не усиливается.
 
 **Фильтры для buy-ордеров:**
 - RSI > rsiOverboughtThreshold (70) — grid buy пропускается
-- EMA bearish crossover (fast < slow) — grid buy пропускается
+- EMA фильтр отключён (useEmaFilter=false)
 
-**Rebalance:** если цена ушла >2% от центра сетки (вверх или вниз) — все ордера отменяются и сетка пересоздаётся.
+**Rebalance:** если цена ушла >3% от центра сетки (вверх или вниз) — все ордера отменяются и сетка пересоздаётся.
 
 **Counter-orders:** при fill buy ордера ставится sell counter на цену + spacing%; при fill sell ордера — buy counter на цену - spacing%. Counter-orders проверяют баланс перед размещением.
 
@@ -140,19 +165,19 @@ Grid-ордера — лимитные, исполняются напрямую 
    - Grid: проверяет fills, ставит counter-orders, replaces unplaced levels
    - DCA + мета-сигналы (если market protection не активна)
    - Выполняет market orders от DCA и meta
-9. Каждые 10 тиков — сводка (summary log)
+9. Каждые 10 тиков — сводка (summary log + Telegram каждые 60 тиков)
 
 ## Управление рисками
 
 ### Многоуровневая защита
 
-1. **Hard Stop-Loss (14%)** — цена упала на 14% от avg entry → market sell + cooldown
+1. **Hard Stop-Loss (10%)** — цена упала на 10% от avg entry → market sell + cooldown
 2. **Trailing Stop-Loss (5%, активация +3%)** — после роста >3% от entry включается trailing; если цена падает на 5% от пика → sell. Обычно фиксирует прибыль.
 3. **Take-Profit (12%)** — цена выросла на 12% от entry → market sell + reset
 4. **Portfolio Take-Profit (100%)** — портфель удвоился → sell everything + halt
 5. **Max Drawdown (15%)** — портфель упал на 15% от пика → halt
-6. **Cooldown** — после SL пауза 2 часа; 3 SL подряд = halt до ручного вмешательства
-7. **Market Panic** — 2+ из 3 пар bearish EMA → cancel all buy orders
+6. **Cooldown** — после SL пауза 30 минут; 3 SL подряд = halt до ручного вмешательства
+7. **Market Panic** — отключён (threshold=999)
 8. **BTC Watchdog** — BTC упал на 3%+ за час → пауза всех покупок
 9. **RSI + EMA фильтры** — блокируют grid buy при overbought / bearish crossover
 
@@ -181,6 +206,21 @@ Grid-ордера — лимитные, исполняются напрямую 
 - История последних 100 сделок
 
 Запись debounced (не чаще раза в секунду) и атомарная (write → tmp → rename).
+
+**Ручная коррекция позиций** — если нужно вписать позицию вручную (после сброса state, миграции и т.д.), редактировать `bot-state.json` → `pairs["SUI/USDT"]`:
+
+```json
+{
+  "positionAmount": 38.72771,
+  "positionCostBasis": 36.50
+}
+```
+
+- `positionAmount` — количество крипты (total, не free)
+- `positionCostBasis` — сколько USDT потрачено на покупку (amount × avgEntry)
+- `avgEntryPrice` вычисляется на лету: `costBasis / amount`
+- **НЕ** использовать `position: { amount, avgEntryPrice }` — такого поля нет, state его проигнорирует
+- Бот должен быть остановлен при редактировании (иначе debounced write перезапишет)
 
 ### Синхронизация с биржей (sync.ts)
 
@@ -351,6 +391,31 @@ Summary каждые 10 тиков: капитал, PnL, drawdown, trades, posit
 - indicators.ts: NaN forward-fill вместо filter (сохраняет индексы массива для crossover detection)
 - index.ts: shutdown race fix — `shuttingDown` flag блокирует тики при shutdown
 
+### v1.0.0 — `14204bb` (2026-04-14)
+
+Переход на mainnet + Telegram-интеграция + оптимизация grid.
+
+**Telegram-уведомления (`telegram.ts`):**
+- Новый модуль `TelegramNotifier` — очередь сообщений, rate-limit 100ms, timeout 10s
+- Startup message, summary каждые 60 тиков (~10 мин), fill-уведомления, алерты (SL/TP/halt/panic)
+- Native `https` без внешних зависимостей, HTML parse mode
+- Интеграция в `combo-manager.ts` — дублирует ключевые сообщения в Telegram
+
+**Grid-оптимизация:**
+- Раздельные buy/sell spacing: `gridSpacingPercent` (buy), `gridSpacingSellPercent` (sell)
+- gridLevels: 20→14
+- orderSizePercent: 14%→10%
+- rebalancePercent: 2%→3%
+- useEmaFilter: true→false (отключён)
+
+**Аллокации:** SUI 25%→30%, SOL 40%→30%, XRP 35%→40%
+
+**Risk:** stopLossPercent 14%→10%, cooldownAfterSLSec 7200→1800 (30 мин)
+
+**Market Protection:** panicBearishPairsThreshold 2→999 (отключён)
+
+**Mainnet:** USE_TESTNET=false, чистый bot-state.json
+
 ### v0.9.0 — `054afbd` (2026-04-14)
 
 Аудит раунд 3 — 8 багов (2 critical, 2 high, 4 medium).
@@ -368,6 +433,30 @@ Summary каждые 10 тиков: капитал, PnL, drawdown, trades, posit
 - **grid.ts: orphan-sell бесконечный рост levels** — `existsAtPrice` проверял только уровни с `orderId`, отменённые биржей ордера создавали дубли каждый тик
 - **grid.ts: double sell (counter + orphan)** — counter-sell + orphan-sell на одну крипту в одном тике (API не отражает залоченный баланс мгновенно). Трекинг `counterSellCommittedThisTick`
 - **grid.ts: partial fill теряет объём** — уровень переключался на counter-side, оставшаяся часть buy забывалась. Теперь создаётся retry-level для оставшегося объёма
+
+### v1.1.0 — (2026-04-14)
+
+Hot-reload конфигурации из config.jsonc, очистка Telegram-логов, улучшение валидации.
+
+**Hot-reload config.jsonc:**
+- Все параметры бота вынесены в `config.jsonc` (JSON с поддержкой `//` комментариев)
+- Бот перечитывает config.jsonc каждые N тиков (`configReloadIntervalTicks`, по умолчанию 3)
+- При `configReloadIntervalTicks=0` — fallback-проверка каждые 30 тиков (для возможности включить обратно)
+- Hot-reload обновляет: grid, dca, risk, metaSignal, marketProtection, indicators, telegram
+- НЕ обновляет: tickIntervalSec, syncIntervalSec, добавление/удаление пар (нужен перезапуск)
+- При ошибке чтения/валидации — сохраняет предыдущий конфиг, логирует ошибку
+
+**Telegram-логи:**
+- Убраны HTML-теги из лога `bot.log` (в Telegram по-прежнему HTML)
+- Укорочено: `Telegram sent: <текст до 50 символов>`
+
+**Валидация конфигурации:**
+- Все default-значения заменены на `defaultNum=-1` / `defaultBool=false`
+- `validateConfig()` ловит пропущенные поля из config.jsonc (вместо молчаливых fallback)
+
+**Grid-тюнинг:**
+- gridLevels: 14→10, gridSpacingPercent: 0.6%→0.8%, gridSpacingSellPercent: 1.0%→1.4%, orderSizePercent: 10%→12%
+- Аллокации: SUI 30%→25%, SOL 30%→40%, XRP 40%→35%
 
 ## Важные замечания
 

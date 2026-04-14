@@ -32,6 +32,12 @@ export class GridStrategy {
     this.state = state;
   }
 
+  /** Hot-reload: обновить конфиг без перестроения сетки. Новые параметры применятся к новым ордерам. */
+  updateConfig(config: BotConfig): void {
+    this.config = config.grid;
+    this.maxOpenOrdersPerPair = config.risk.maxOpenOrdersPerPair;
+  }
+
   private async getPrecision(symbol: string) {
     if (!this.precisionCache.has(symbol)) {
       const p = await this.exchange.getMarketPrecision(symbol);

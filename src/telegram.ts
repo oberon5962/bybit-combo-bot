@@ -74,7 +74,8 @@ export class TelegramNotifier {
       const text = this.queue.shift()!;
       try {
         await this.sendMessage(text);
-        this.log.info(`Telegram message sent (${text.slice(0, 40)}...)`);
+        const short = text.replace(/<[^>]+>/g, '').replace(/\n/g, ' ').slice(0, 50);
+        this.log.info(`Telegram sent: ${short}`);
       } catch (err) {
         this.log.error(`Telegram send failed: ${err}`);
       }

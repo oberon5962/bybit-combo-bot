@@ -8,6 +8,7 @@ import {
 } from '../types';
 import { BybitExchange } from '../exchange';
 import { computeIndicators } from '../indicators';
+import { loadConfig } from '../config';
 import { GridStrategy } from './grid';
 import { DCAStrategy } from './dca';
 import { StateManager } from '../state';
@@ -29,6 +30,7 @@ export class ComboManager {
   private lastIndicatorsPerPair: Map<string, IndicatorSnapshot> = new Map();
   private lastTickPortfolioValue: number = 0;
   private tg: TelegramNotifier;
+  private ticksSinceConfigReload: number = 0;
 
   constructor(config: BotConfig, exchange: BybitExchange, log: Logger, state: StateManager) {
     this.config = config;
@@ -122,6 +124,24 @@ export class ComboManager {
         : '';
       this.log.warn(`Bot is HALTED due to drawdown limit.${pairInfo} Manual intervention required.`);
       return;
+    }
+
+    // Hot-reload config from config.jsonc every N ticks
+    // When configReloadIntervalTicks=0, still check every 30 ticks to detect re-enable
+    const reloadInterval = this.config.configReloadIntervalTicks || 30;
+    this.ticksSinceConfigReload++;
+    if (this.ticksSinceConfigReload >= reloadInterval) {
+      this.ticksSinceConfigReload = 0;
+      try {
+        const newConfig = loadConfig();
+        this.config = newConfig;
+        this.grid.updateConfig(newConfig);
+        this.dca.updateConfig(newConfig);
+        this.tg = new TelegramNotifier(newConfig.telegram, this.log);
+        this.log.info('Config reloaded from config.jsonc');
+      } catch (err) {
+        this.log.error(`Config reload failed (keeping previous config): ${sanitizeError(err)}`);
+      }
     }
 
     // Fetch USDT + all balances in ONE API call (instead of two)
