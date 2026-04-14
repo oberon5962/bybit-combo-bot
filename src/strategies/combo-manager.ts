@@ -13,6 +13,9 @@ import { GridStrategy } from './grid';
 import { DCAStrategy } from './dca';
 import { StateManager } from '../state';
 import { TelegramNotifier, TelegramCommand } from '../telegram';
+import { createHash } from 'crypto';
+import { readFileSync } from 'fs';
+import { resolve } from 'path';
 
 export class ComboManager {
   private config: BotConfig;
@@ -31,6 +34,7 @@ export class ComboManager {
   private lastTickPortfolioValue: number = 0;
   private tg: TelegramNotifier;
   private ticksSinceConfigReload: number = 0;
+  private lastConfigHash: string = '';
   private ticksSinceCommandPoll: number = 0;
 
   constructor(config: BotConfig, exchange: BybitExchange, log: Logger, state: StateManager) {
@@ -102,6 +106,15 @@ export class ComboManager {
       resumed: this.state.totalTicks > 0 ? 'YES — continuing from saved state' : 'NO — fresh start',
     });
 
+    // Restore Telegram update offset from persisted state (prevents replaying commands on restart)
+    if (this.state.telegramUpdateId > 0) {
+      this.tg.setLastUpdateId(this.state.telegramUpdateId);
+    }
+
+    // Initialize config hash to prevent spurious reload on first tick
+    const cfgPath = resolve(__dirname, '../../config.jsonc');
+    this.lastConfigHash = createHash('md5').update(readFileSync(cfgPath, 'utf-8')).digest('hex');
+
     // Telegram startup message
     const mode = this.config.testnet ? 'TESTNET' : 'LIVE';
     const pairs = this.config.pairs.map(p => `${p.symbol} (${p.allocationPercent}%)`).join(', ');
@@ -137,14 +150,18 @@ export class ComboManager {
     if (this.ticksSinceConfigReload >= reloadInterval) {
       this.ticksSinceConfigReload = 0;
       try {
-        const newConfig = loadConfig();
-        this.config = newConfig;
-        this.grid.updateConfig(newConfig);
-        this.dca.updateConfig(newConfig);
-        const oldUpdateId = this.tg.getLastUpdateId();
-        this.tg = new TelegramNotifier(newConfig.telegram, this.log);
-        this.tg.setLastUpdateId(oldUpdateId);
-        this.log.info('Config reloaded from config.jsonc');
+        const configPath = resolve(__dirname, '../../config.jsonc');
+        const content = readFileSync(configPath, 'utf-8');
+        const hash = createHash('md5').update(content).digest('hex');
+        if (hash !== this.lastConfigHash) {
+          this.lastConfigHash = hash;
+          const newConfig = loadConfig();
+          this.config = newConfig;
+          this.grid.updateConfig(newConfig);
+          this.dca.updateConfig(newConfig);
+          this.tg.updateConfig(newConfig.telegram);
+          this.log.info('Config reloaded from config.jsonc');
+        }
       } catch (err) {
         this.log.error(`Config reload failed (keeping previous config): ${sanitizeError(err)}`);
       }
@@ -1186,6 +1203,11 @@ export class ComboManager {
     this.ticksSinceCommandPoll = 0;
 
     const commands = await this.tg.pollCommands();
+    // Persist update offset to prevent replaying commands on restart
+    const newOffset = this.tg.getLastUpdateId();
+    if (newOffset !== this.state.telegramUpdateId) {
+      this.state.telegramUpdateId = newOffset;
+    }
     for (const cmd of commands) {
       this.log.info(`Telegram command: /${cmd.command} ${cmd.args}${cmd.confirmed ? ' [confirmed]' : ''}`);
       try {
@@ -1322,7 +1344,7 @@ export class ComboManager {
   private async cmdStop(): Promise<void> {
     this.state.halted = true;
     this.log.info('Telegram /stop: bot halted');
-    this.tg.sendReply('Бот остановлен (/stop). Ордера остаются на бирже.\nДля возобновления: /start');
+    this.tg.sendReply('Бот остановлен (/stop). Ордера остаются на бирже.\nДля возобновления: /run');
   }
 
   private async cmdStart(): Promise<void> {

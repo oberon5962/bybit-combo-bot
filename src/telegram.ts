@@ -33,6 +33,7 @@ export class TelegramNotifier {
 
   getLastUpdateId(): number { return this.lastUpdateId; }
   setLastUpdateId(id: number): void { this.lastUpdateId = id; }
+  updateConfig(config: TelegramConfig): void { this.config = config; }
 
   // ----------------------------------------------------------
   // Public API — Notifications
@@ -79,6 +80,11 @@ export class TelegramNotifier {
   /** Send reply with inline keyboard [Да] [Нет] for confirmation */
   sendConfirmation(text: string, callbackData: string): void {
     if (!this.config.enabled) return;
+    const fullData = `confirm:${callbackData}`;
+    if (Buffer.byteLength(fullData, 'utf-8') > 64) {
+      this.sendReply('⚠️ Слишком длинная команда для подтверждения. Сократите аргументы.');
+      return;
+    }
     const payload = JSON.stringify({
       chat_id: this.config.chatId,
       text,
@@ -86,7 +92,7 @@ export class TelegramNotifier {
       disable_web_page_preview: true,
       reply_markup: {
         inline_keyboard: [[
-          { text: '✅ Да', callback_data: `confirm:${callbackData}` },
+          { text: '✅ Да', callback_data: fullData },
           { text: '❌ Нет', callback_data: 'cancel' },
         ]],
       },

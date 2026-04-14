@@ -471,17 +471,29 @@ Summary каждые 10 тиков: капитал, PnL, drawdown, trades, posit
 - **grid.ts: double sell (counter + orphan)** — counter-sell + orphan-sell на одну крипту в одном тике (API не отражает залоченный баланс мгновенно). Трекинг `counterSellCommittedThisTick`
 - **grid.ts: partial fill теряет объём** — уровень переключался на counter-side, оставшаяся часть buy забывалась. Теперь создаётся retry-level для оставшегося объёма
 
+### v1.2.1 (2026-04-15)
+
+Аудит Telegram-команд: 1 high, 4 medium багов.
+
+**Фиксы:**
+- **HIGH: lastUpdateId не сохранялся при рестарте** — рестарт мог повторно выполнить `/sellall` или `/buy`. Теперь `telegramUpdateId` персистится в `bot-state.json`
+- **MEDIUM: `/stop` подсказывал `/start` вместо `/run`** — пользователь не мог возобновить бота по подсказке
+- **MEDIUM: callback_data без проверки длины** — Telegram молча обрезает данные >64 байт, длинные аргументы `/buy` могли исказиться. Добавлена валидация
+- **MEDIUM: ложный reload конфига на первом тике** — hash инициализировался пустой строкой, первая проверка всегда считала конфиг "изменённым". Теперь hash вычисляется в `init()`
+- **MEDIUM: hot-reload пересоздавал TelegramNotifier** — терялась очередь сообщений и сбрасывался `lastSummaryTick` (summary в Telegram приходило чаще 10 мин). Теперь `updateConfig()` вместо `new TelegramNotifier()`
+
 ### v1.2.0 — `5af78b9` (2026-04-15)
 
 Управление ботом через Telegram-команды.
 
 **Telegram-команды (`telegram.ts` + `combo-manager.ts`):**
 - 6 команд: `/status`, `/stop`, `/run`, `/sellall`, `/buy`, `/orders`
+- Подтверждение [✅ Да / ❌ Нет] для опасных команд: `/stop`, `/sellall`, `/buy`
 - Non-blocking polling через `getUpdates` с `timeout=0`
 - Безопасность: команды принимаются только от настроенного `chatId`
 - Команды обрабатываются до проверки `halted` — `/buy` и `/run` работают при остановленном боте
-- Hot-reload сохраняет `lastUpdateId` (нет повторной обработки команд)
-- `commandPollIntervalTicks` — частота опроса Telegram (по умолчанию 3 тика)
+- `lastUpdateId` персистится в state (нет повторной обработки команд при рестарте)
+- `commandPollIntervalTicks` — частота опроса Telegram (по умолчанию каждый тик)
 
 **Ручные покупки (`/buy`):**
 - Два формата: `/buy SUI 10` (за USDT) и `/buy SUI/BTC 10` (за BTC)
@@ -492,6 +504,9 @@ Summary каждые 10 тиков: капитал, PnL, drawdown, trades, posit
 **Меню команд Telegram:**
 - `register-commands.ts` — одноразовый скрипт для `setMyCommands` API
 - Меню с описанием всех команд при нажатии `/` в чате с ботом
+
+**Config hot-reload:**
+- Перечитывание config.jsonc по MD5 хэшу — лог "Config reloaded" только при реальном изменении
 
 **Утилиты:**
 - `check-bybit.ts` — диагностический скрипт: балансы, открытые ордера, тикеры, последние закрытые ордера

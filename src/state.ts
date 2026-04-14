@@ -69,6 +69,9 @@ export interface BotState {
 
   // Pairs bought manually via /buy that are NOT in config.pairs (e.g. "DOGE/USDT")
   manualPairs: string[];
+
+  // Telegram lastUpdateId — persisted to avoid replaying commands on restart
+  telegramUpdateId: number;
 }
 
 export interface TradeEntry {
@@ -96,6 +99,7 @@ function createEmptyState(): BotState {
     halted: false,
     recentTrades: [],
     manualPairs: [],
+    telegramUpdateId: 0,
   };
 }
 
@@ -162,6 +166,7 @@ export class StateManager {
         state.halted = typeof parsed.halted === 'boolean' ? parsed.halted : false;
         state.recentTrades = Array.isArray(parsed.recentTrades) ? parsed.recentTrades : [];
         state.manualPairs = Array.isArray(parsed.manualPairs) ? parsed.manualPairs : [];
+        state.telegramUpdateId = typeof parsed.telegramUpdateId === 'number' ? parsed.telegramUpdateId : 0;
 
         // Restore per-pair state with validation
         if (parsed.pairs && typeof parsed.pairs === 'object') {
@@ -468,6 +473,10 @@ export class StateManager {
     this.state.manualPairs = this.state.manualPairs.filter(s => s !== symbol);
     this.save();
   }
+
+  // Telegram update offset (persisted to avoid replaying commands on restart)
+  get telegramUpdateId(): number { return this.state.telegramUpdateId; }
+  set telegramUpdateId(val: number) { this.state.telegramUpdateId = val; this.save(); }
 
   // ----------------------------------------------------------
   // Cleanup on shutdown
