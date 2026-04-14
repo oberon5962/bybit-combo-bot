@@ -51,7 +51,7 @@ export function loadConfig(): BotConfig {
     risk: {
       maxDrawdownPercent: 15,        // HALT если портфель упал на 15% от пика
       maxOpenOrdersPerPair: gridLevels + 4, // Запас под grid-уровни + контр-ордера + orphan sells
-      stopLossPercent: 14,            // Стоп-лосс на позицию (шире для высокой волатильности)
+      stopLossPercent: 10,            // Стоп-лосс на позицию (шире для высокой волатильности)
       takeProfitPercent: 12,          // Тейк-профит (поменьше, чтобы чаще фиксировать)
       portfolioTakeProfitPercent: 100, // Продать ВСЁ когда портфель вырос на 100% от старта
                                       // Было 200 USDT → стало 400 USDT → продаём все монеты
@@ -71,9 +71,9 @@ export function loadConfig(): BotConfig {
     grid: {
       enabled: true,
       gridLevels,                    // 10 buy + 10 sell (покрытие ±5% от центра)
-      gridSpacingPercent: 0.5,       // 0.5% между уровнями (покрытие 5% в каждую сторону)
+      gridSpacingPercent: 0.6,       // 0.6% между уровнями (маржа 0.4% после комиссий)
       orderSizePercent: 10,          // Каждый ордер = 10% от аллокации пары
-      rebalancePercent: 1.5,           // Перестроить сетку если цена ушла >1.5% от центра (вверх или вниз)
+      rebalancePercent: 3,             // Перестроить сетку если цена ушла >3% от центра (~5 из 7 уровней сработают)
       rsiOverboughtThreshold: 70,    // Пропускаем grid-buy при RSI > 70 (100 = отключить)
       useEmaFilter: false,           // Отключен: grid торгует всегда, RSI overbought (70) остаётся как защита
 
@@ -124,7 +124,7 @@ export function loadConfig(): BotConfig {
     // Meta-Signal — комбинированные сигналы индикаторов
     // -------------------------------------------------------
     metaSignal: {
-      enabled: true,                // false = отключить meta-signal (рыночные ордера по RSI+BB+EMA)
+      enabled: false,                // false = отключить meta-signal (рыночные ордера по RSI+BB+EMA)
       buyRsiThreshold: 35,           // покупка при RSI < 35 + цена ниже BB middle
       strongBuyRsiThreshold: 25,     // сильная покупка при RSI < 25 + bullish EMA + ниже BB lower
       sellRsiThreshold: 75,          // продажа при RSI > 70 + цена выше BB upper

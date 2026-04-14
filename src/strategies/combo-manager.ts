@@ -409,6 +409,12 @@ export class ComboManager {
       const pos = this.state.getPosition(sym);
       const sellAmount = pos.amount > 0 ? Math.min(this.roundAmountForSymbol(strongAmount, sym), pos.amount) : 0;
       if (sellAmount <= 0 || !isViableOrder(sellAmount)) return null;
+      // Don't sell below entry + fees (0.1% buy + 0.1% sell + 0.1% margin)
+      const minSellPrice = pos.avgEntryPrice * 1.003;
+      if (ticker.last < minSellPrice) {
+        this.log.info(`[combo-meta] ${sym}: STRONG SELL skipped — price ${ticker.last.toFixed(4)} < minSell ${minSellPrice.toFixed(4)} (entry ${pos.avgEntryPrice.toFixed(4)})`);
+        return null;
+      }
       return {
         strategy: 'combo-meta',
         signal: 'strong_sell',
@@ -434,6 +440,12 @@ export class ComboManager {
       const pos2 = this.state.getPosition(sym);
       const sellAmt = pos2.amount > 0 ? Math.min(this.roundAmountForSymbol(regularAmount, sym), pos2.amount) : 0;
       if (sellAmt <= 0 || !isViableOrder(sellAmt)) return null;
+      // Don't sell below entry + fees (0.1% buy + 0.1% sell + 0.1% margin)
+      const minSellPrice2 = pos2.avgEntryPrice * 1.003;
+      if (ticker.last < minSellPrice2) {
+        this.log.info(`[combo-meta] ${sym}: SELL skipped — price ${ticker.last.toFixed(4)} < minSell ${minSellPrice2.toFixed(4)} (entry ${pos2.avgEntryPrice.toFixed(4)})`);
+        return null;
+      }
       return {
         strategy: 'combo-meta',
         signal: 'sell',
