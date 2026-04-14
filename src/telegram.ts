@@ -1,13 +1,22 @@
 // ============================================================
-// Bybit Combo Bot — Telegram Notifications
+// Bybit Combo Bot — Telegram Notifications & Commands
 // ============================================================
 //
 // Отправляет уведомления в Telegram через Bot API.
 // Дублирует ключевые сообщения из лога: summary, сделки, алерты.
+// Принимает команды от пользователя через getUpdates polling.
 // ============================================================
 
 import https from 'https';
 import { TelegramConfig, Logger } from './types';
+
+export interface TelegramCommand {
+  command: string;    // e.g. 'status', 'buy', 'stop'
+  args: string;       // e.g. 'SUI/USDT 10' or ''
+  chatId: string;
+  messageId: number;
+  confirmed?: boolean; // true = user clicked Да via inline keyboard
+}
 
 export class TelegramNotifier {
   private config: TelegramConfig;
@@ -15,14 +24,18 @@ export class TelegramNotifier {
   private queue: string[] = [];
   private sending = false;
   private lastSummaryTick = 0;
+  private lastUpdateId = 0;
 
   constructor(config: TelegramConfig, log: Logger) {
     this.config = config;
     this.log = log;
   }
 
+  getLastUpdateId(): number { return this.lastUpdateId; }
+  setLastUpdateId(id: number): void { this.lastUpdateId = id; }
+
   // ----------------------------------------------------------
-  // Public API
+  // Public API — Notifications
   // ----------------------------------------------------------
 
   /** Send startup message with legend */
@@ -55,6 +68,207 @@ export class TelegramNotifier {
   sendAlert(text: string): void {
     if (!this.config.enabled || !this.config.sendAlerts) return;
     this.enqueue(text);
+  }
+
+  /** Send reply to a command — always sends if telegram is enabled (ignores sendSummary/sendFills/sendAlerts flags) */
+  sendReply(text: string): void {
+    if (!this.config.enabled) return;
+    this.enqueue(text);
+  }
+
+  /** Send reply with inline keyboard [Да] [Нет] for confirmation */
+  sendConfirmation(text: string, callbackData: string): void {
+    if (!this.config.enabled) return;
+    const payload = JSON.stringify({
+      chat_id: this.config.chatId,
+      text,
+      parse_mode: 'HTML',
+      disable_web_page_preview: true,
+      reply_markup: {
+        inline_keyboard: [[
+          { text: '✅ Да', callback_data: `confirm:${callbackData}` },
+          { text: '❌ Нет', callback_data: 'cancel' },
+        ]],
+      },
+    });
+    this.sendRaw(payload);
+  }
+
+  // ----------------------------------------------------------
+  // Public API — Command Polling
+  // ----------------------------------------------------------
+
+  /** Poll Telegram for new commands. Returns parsed commands from configured chatId only. */
+  async pollCommands(): Promise<TelegramCommand[]> {
+    if (!this.config.enabled) return [];
+
+    try {
+      const updates = await this.getUpdates();
+      const commands: TelegramCommand[] = [];
+
+      for (const update of updates) {
+        // Track offset to avoid re-processing
+        if (update.update_id >= this.lastUpdateId) {
+          this.lastUpdateId = update.update_id + 1;
+        }
+
+        // Handle callback_query (inline keyboard button press)
+        const cb = update.callback_query;
+        if (cb) {
+          const cbChatId = String(cb.message?.chat?.id ?? '');
+          if (cbChatId !== this.config.chatId) continue;
+
+          // Answer callback to remove "loading" spinner
+          this.answerCallbackQuery(cb.id);
+
+          const data = cb.data ?? '';
+          if (data === 'cancel') {
+            this.sendReply('❌ Отменено');
+            continue;
+          }
+          if (data.startsWith('confirm:')) {
+            // Parse "confirm:command:args"
+            const payload = data.substring('confirm:'.length);
+            const colonIdx = payload.indexOf(':');
+            const command = colonIdx > 0 ? payload.substring(0, colonIdx) : payload;
+            const args = colonIdx > 0 ? payload.substring(colonIdx + 1) : '';
+            commands.push({
+              command,
+              args,
+              chatId: cbChatId,
+              messageId: cb.message?.message_id ?? 0,
+              confirmed: true,
+            });
+          }
+          continue;
+        }
+
+        const msg = update.message;
+        if (!msg || !msg.text) continue;
+
+        const chatId = String(msg.chat?.id ?? '');
+
+        // Security: only accept commands from configured chatId
+        if (chatId !== this.config.chatId) {
+          this.log.warn(`Telegram: ignoring message from unknown chat ${chatId}`);
+          continue;
+        }
+
+        const text = msg.text.trim();
+        if (!text.startsWith('/')) continue;
+
+        // Parse: /command args
+        const spaceIdx = text.indexOf(' ');
+        const command = (spaceIdx > 0 ? text.substring(1, spaceIdx) : text.substring(1)).toLowerCase();
+        const args = spaceIdx > 0 ? text.substring(spaceIdx + 1).trim() : '';
+
+        // Strip @botname suffix (e.g. /status@MyBot → status)
+        const atIdx = command.indexOf('@');
+        const cleanCommand = atIdx > 0 ? command.substring(0, atIdx) : command;
+
+        commands.push({
+          command: cleanCommand,
+          args,
+          chatId,
+          messageId: msg.message_id ?? 0,
+        });
+      }
+
+      return commands;
+    } catch (err) {
+      this.log.error(`Telegram pollCommands failed: ${err}`);
+      return [];
+    }
+  }
+
+  // ----------------------------------------------------------
+  // Telegram API — setMyCommands
+  // ----------------------------------------------------------
+
+  registerCommands(): void {
+    const commands = [
+      { command: 'status', description: 'Сводка: капитал, PnL, позиции' },
+      { command: 'stop', description: 'Остановить торговлю' },
+      { command: 'run', description: 'Возобновить торговлю' },
+      { command: 'sellall', description: 'Продать всё + отменить ордера' },
+      { command: 'buy', description: '/buy SUI 10 (buy 10 tokens SUI за USDT) или /buy SUI/BTC 10 (buy 10 tokens SUI за BTC)' },
+      { command: 'orders', description: 'Открытые ордера' },
+    ];
+
+    const payload = JSON.stringify({ commands });
+    const options = {
+      hostname: 'api.telegram.org',
+      port: 443,
+      path: `/bot${this.config.botToken}/setMyCommands`,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(payload),
+      },
+      timeout: 10000,
+    };
+
+    const req = https.request(options, (res) => {
+      let data = '';
+      res.on('data', (chunk) => { data += chunk; });
+      res.on('end', () => {
+        if (res.statusCode === 200) {
+          this.log.info('Telegram: commands menu registered');
+        } else {
+          this.log.error(`Telegram setMyCommands failed: ${res.statusCode} ${data.slice(0, 200)}`);
+        }
+      });
+    });
+
+    req.on('error', (err) => { this.log.error(`Telegram setMyCommands error: ${err}`); });
+    req.on('timeout', () => { req.destroy(); this.log.error('Telegram setMyCommands timeout'); });
+    req.write(payload);
+    req.end();
+  }
+
+  // ----------------------------------------------------------
+  // Telegram API — getUpdates
+  // ----------------------------------------------------------
+
+  private getUpdates(): Promise<any[]> {
+    return new Promise((resolve, reject) => {
+      const params = new URLSearchParams({
+        timeout: '0',
+        allowed_updates: JSON.stringify(['message', 'callback_query']),
+      });
+      if (this.lastUpdateId > 0) {
+        params.set('offset', String(this.lastUpdateId));
+      }
+
+      const options = {
+        hostname: 'api.telegram.org',
+        port: 443,
+        path: `/bot${this.config.botToken}/getUpdates?${params.toString()}`,
+        method: 'GET',
+        timeout: 5000,
+      };
+
+      const req = https.request(options, (res) => {
+        let data = '';
+        res.on('data', (chunk) => { data += chunk; });
+        res.on('end', () => {
+          try {
+            const parsed = JSON.parse(data);
+            if (parsed.ok && Array.isArray(parsed.result)) {
+              resolve(parsed.result);
+            } else {
+              reject(new Error(`Telegram getUpdates: ${data.slice(0, 200)}`));
+            }
+          } catch (e) {
+            reject(new Error(`Telegram getUpdates parse error: ${e}`));
+          }
+        });
+      });
+
+      req.on('error', reject);
+      req.on('timeout', () => { req.destroy(); reject(new Error('Telegram getUpdates timeout')); });
+      req.end();
+    });
   }
 
   // ----------------------------------------------------------
@@ -126,5 +340,56 @@ export class TelegramNotifier {
       req.write(payload);
       req.end();
     });
+  }
+
+  /** Send raw JSON payload to sendMessage (for inline keyboards etc.) */
+  private sendRaw(payload: string): void {
+    const options = {
+      hostname: 'api.telegram.org',
+      port: 443,
+      path: `/bot${this.config.botToken}/sendMessage`,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(payload),
+      },
+      timeout: 10000,
+    };
+
+    const req = https.request(options, (res) => {
+      let data = '';
+      res.on('data', (chunk) => { data += chunk; });
+      res.on('end', () => {
+        if (res.statusCode !== 200) {
+          this.log.error(`Telegram sendRaw failed: ${res.statusCode} ${data.slice(0, 200)}`);
+        }
+      });
+    });
+
+    req.on('error', (err) => { this.log.error(`Telegram sendRaw error: ${err}`); });
+    req.on('timeout', () => { req.destroy(); this.log.error('Telegram sendRaw timeout'); });
+    req.write(payload);
+    req.end();
+  }
+
+  /** Answer callback query to remove loading spinner on inline button */
+  private answerCallbackQuery(callbackQueryId: string): void {
+    const payload = JSON.stringify({ callback_query_id: callbackQueryId });
+    const options = {
+      hostname: 'api.telegram.org',
+      port: 443,
+      path: `/bot${this.config.botToken}/answerCallbackQuery`,
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(payload),
+      },
+      timeout: 5000,
+    };
+
+    const req = https.request(options, () => {});
+    req.on('error', () => {});
+    req.write(payload);
+    req.end();
   }
 }

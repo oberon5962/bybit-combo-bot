@@ -12,7 +12,7 @@ import { loadConfig } from '../config';
 import { GridStrategy } from './grid';
 import { DCAStrategy } from './dca';
 import { StateManager } from '../state';
-import { TelegramNotifier } from '../telegram';
+import { TelegramNotifier, TelegramCommand } from '../telegram';
 
 export class ComboManager {
   private config: BotConfig;
@@ -31,6 +31,7 @@ export class ComboManager {
   private lastTickPortfolioValue: number = 0;
   private tg: TelegramNotifier;
   private ticksSinceConfigReload: number = 0;
+  private ticksSinceCommandPoll: number = 0;
 
   constructor(config: BotConfig, exchange: BybitExchange, log: Logger, state: StateManager) {
     this.config = config;
@@ -112,6 +113,9 @@ export class ComboManager {
   // ----------------------------------------------------------
 
   async tick(): Promise<void> {
+    // Process Telegram commands BEFORE halted check (so /start, /buy work when stopped)
+    await this.processTelegramCommands();
+
     if (this.state.halted) {
       const haltedPairs = this.config.pairs
         .filter(p => this.state.isPairHalted(p.symbol))
@@ -122,7 +126,7 @@ export class ComboManager {
       const pairInfo = haltedPairs.length > 0
         ? ` Halted pairs: ${haltedPairs.join(', ')}`
         : '';
-      this.log.warn(`Bot is HALTED due to drawdown limit.${pairInfo} Manual intervention required.`);
+      this.log.warn(`Bot is HALTED.${pairInfo} Send /run in Telegram or set "halted":false in bot-state.json + restart.`);
       return;
     }
 
@@ -137,7 +141,9 @@ export class ComboManager {
         this.config = newConfig;
         this.grid.updateConfig(newConfig);
         this.dca.updateConfig(newConfig);
+        const oldUpdateId = this.tg.getLastUpdateId();
         this.tg = new TelegramNotifier(newConfig.telegram, this.log);
+        this.tg.setLastUpdateId(oldUpdateId);
         this.log.info('Config reloaded from config.jsonc');
       } catch (err) {
         this.log.error(`Config reload failed (keeping previous config): ${sanitizeError(err)}`);
@@ -905,7 +911,51 @@ export class ComboManager {
       }
     }
 
-    // 3. Final balance
+    // 3. Sell manual pairs (bought via /buy, not in config)
+    const manualPairs = this.state.getManualPairs();
+    if (manualPairs.length > 0) {
+      const freshBalances = await this.exchange.fetchAllBalances();
+      for (const sym of manualPairs) {
+        const base = sym.split('/')[0];
+        if (this.config.pairs.some(p => p.symbol === sym)) continue; // already handled above
+        const held = freshBalances[base];
+        if (!held || held.free <= 0) continue;
+
+        try {
+          // Cancel any open orders for this pair
+          await this.exchange.cancelAllOrders(sym);
+          await new Promise(resolve => setTimeout(resolve, 500));
+
+          const updatedBal = await this.exchange.fetchAllBalances();
+          let sellAmount = updatedBal[base]?.free ?? 0;
+          if (sellAmount <= 0) continue;
+
+          const mp = await this.exchange.getMarketPrecision(sym);
+          const factor = Math.pow(10, mp.amountPrecision);
+          sellAmount = Math.floor(sellAmount * factor) / factor;
+          if (sellAmount < mp.minAmount) continue;
+
+          const ticker = await this.exchange.fetchTicker(sym);
+          if (sellAmount * ticker.last < mp.minCost) continue;
+
+          const order = await this.exchange.createMarketSell(sym, sellAmount, 'manual');
+          const filledAmount = order.filled > 0 ? order.filled : sellAmount;
+          const sellPrice = order.price || ticker.last;
+          this.state.addTrade({
+            timestamp: Date.now(), symbol: sym, side: 'sell',
+            amount: filledAmount, price: sellPrice,
+            cost: filledAmount * sellPrice, fee: filledAmount * sellPrice * 0.001,
+            strategy: 'manual',
+          });
+          this.state.reducePosition(sym, filledAmount);
+          this.log.info(`SOLD manual ${base}: ${filledAmount} @ ${sellPrice.toFixed(4)}`);
+        } catch (err) {
+          this.log.error(`Failed to sell manual pair ${sym}: ${sanitizeError(err)}`);
+        }
+      }
+    }
+
+    // 4. Final balance
     const finalBalance = await this.exchange.fetchBalance('USDT');
     const profit = finalBalance.total - this.state.startingCapital;
     const profitPct = (profit / this.state.startingCapital) * 100;
@@ -1121,6 +1171,343 @@ export class ComboManager {
       ...pairLines,
     ].join('\n');
     this.tg.sendSummary(this.state.totalTicks, tgText);
+  }
+
+  // ----------------------------------------------------------
+  // Telegram Commands
+  // ----------------------------------------------------------
+
+  private async processTelegramCommands(): Promise<void> {
+    const pollInterval = this.config.telegram.commandPollIntervalTicks;
+    if (pollInterval <= 0) return;
+
+    this.ticksSinceCommandPoll++;
+    if (this.ticksSinceCommandPoll < pollInterval) return;
+    this.ticksSinceCommandPoll = 0;
+
+    const commands = await this.tg.pollCommands();
+    for (const cmd of commands) {
+      this.log.info(`Telegram command: /${cmd.command} ${cmd.args}${cmd.confirmed ? ' [confirmed]' : ''}`);
+      try {
+        // Commands requiring confirmation: stop, sellall, buy
+        const needsConfirm = ['stop', 'sellall', 'buy'].includes(cmd.command);
+        if (needsConfirm && !cmd.confirmed) {
+          const descriptions: Record<string, string> = {
+            stop: '⏸ Остановить торговлю?',
+            sellall: '🔴 Продать ВСЁ + отменить все ордера?',
+            buy: `🛒 Купить: ${cmd.args}?`,
+          };
+          const label = descriptions[cmd.command] ?? `/${cmd.command}`;
+          const callbackData = cmd.args ? `${cmd.command}:${cmd.args}` : cmd.command;
+          this.tg.sendConfirmation(label, callbackData);
+          continue;
+        }
+
+        switch (cmd.command) {
+          case 'status':
+            await this.cmdStatus();
+            break;
+          case 'stop':
+            await this.cmdStop();
+            break;
+          case 'run':
+            await this.cmdStart();
+            break;
+          case 'sellall':
+            await this.cmdSellAll();
+            break;
+          case 'buy':
+            await this.cmdBuy(cmd.args);
+            break;
+          case 'orders':
+            await this.cmdOrders();
+            break;
+          default:
+            this.tg.sendReply(`Неизвестная команда /${cmd.command}\nДоступные: /status /stop /run /sellall /buy /orders`);
+        }
+      } catch (err) {
+        this.log.error(`Telegram command /${cmd.command} failed: ${sanitizeError(err)}`);
+        this.tg.sendReply(`Ошибка /${cmd.command}: ${sanitizeError(err)}`);
+      }
+    }
+  }
+
+  private async cmdStatus(): Promise<void> {
+    const { single: balance, all: allBalances } = await this.exchange.fetchBalanceAndAll('USDT');
+    let totalValue = balance.total;
+
+    const pairLines: string[] = [];
+    const countedBases = new Set<string>(); // avoid double-counting base currencies
+    for (const pair of this.config.pairs) {
+      const sym = pair.symbol;
+      const base = sym.split('/')[0];
+      const held = allBalances[base];
+      let pairValue = 0;
+      let price = 0;
+
+      if (held && held.total > 0) {
+        try {
+          const ticker = await this.exchange.fetchTicker(sym);
+          price = ticker.last;
+          pairValue = held.total * price;
+          totalValue += pairValue;
+          countedBases.add(base);
+        } catch { /* skip */ }
+      }
+
+      const pos = this.state.getPosition(sym);
+      const levels = this.state.getGridLevels(sym);
+      const openOrders = levels.filter(l => l.orderId).length;
+      const isHalted = this.state.isPairHalted(sym);
+
+      let line = `${sym}: `;
+      if (pos.amount > 0) {
+        const pnl = price > 0 ? ((price - pos.avgEntryPrice) / pos.avgEntryPrice * 100) : 0;
+        line += `${pos.amount.toFixed(6)} @ ${pos.avgEntryPrice.toFixed(4)} (${pnl >= 0 ? '+' : ''}${pnl.toFixed(1)}%)`;
+      } else {
+        line += 'нет позиции';
+      }
+      line += ` | ${openOrders} ордеров`;
+      if (isHalted) line += ' | HALTED';
+
+      pairLines.push(line);
+    }
+
+    // Manual pairs (bought via /buy, not in config)
+    const manualPairs = this.state.getManualPairs();
+    if (manualPairs.length > 0) {
+      pairLines.push('');
+      pairLines.push('<b>Ручные покупки:</b>');
+      for (const sym of manualPairs) {
+        const base = sym.split('/')[0];
+        const held = allBalances[base];
+        if (held && held.total > 0) {
+          try {
+            const ticker = await this.exchange.fetchTicker(sym);
+            const value = held.total * ticker.last;
+            if (!countedBases.has(base)) {
+              totalValue += value;
+              countedBases.add(base);
+            }
+            pairLines.push(`${sym}: ${held.total.toFixed(6)} (~${value.toFixed(2)} USDT)`);
+          } catch {
+            pairLines.push(`${sym}: ${held.total.toFixed(6)} (цена недоступна)`);
+          }
+        } else {
+          pairLines.push(`${sym}: продано`);
+        }
+      }
+    }
+
+    const pnl = totalValue - this.state.startingCapital;
+    const pnlPct = this.state.startingCapital > 0 ? (pnl / this.state.startingCapital) * 100 : 0;
+    const drawdown = this.state.peakCapital > 0
+      ? ((this.state.peakCapital - totalValue) / this.state.peakCapital) * 100 : 0;
+    const trades = this.state.getRecentTrades();
+
+    const text = [
+      `<b>STATUS</b> (tick ${this.state.totalTicks})`,
+      `Capital: <b>${totalValue.toFixed(2)}</b> USDT`,
+      `PnL: ${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)} (${pnl >= 0 ? '+' : ''}${pnlPct.toFixed(1)}%)`,
+      `Drawdown: ${drawdown.toFixed(1)}%`,
+      `Halted: ${this.state.halted ? 'YES' : 'no'}`,
+      `Trades: ${trades.length}`,
+      `USDT free: ${balance.free.toFixed(2)}`,
+      '',
+      ...pairLines,
+    ].join('\n');
+    this.tg.sendReply(text);
+  }
+
+  private async cmdStop(): Promise<void> {
+    this.state.halted = true;
+    this.log.info('Telegram /stop: bot halted');
+    this.tg.sendReply('Бот остановлен (/stop). Ордера остаются на бирже.\nДля возобновления: /start');
+  }
+
+  private async cmdStart(): Promise<void> {
+    this.state.halted = false;
+    // Reset all per-pair halts and cooldowns
+    for (const pair of this.config.pairs) {
+      this.state.resetPairHalt(pair.symbol);
+      this.state.clearCooldown(pair.symbol);
+      this.state.resetConsecutiveSL(pair.symbol);
+    }
+    this.log.info('Telegram /run: bot resumed, all pair halts/cooldowns cleared');
+    this.tg.sendReply('Бот запущен (/run). Все пары активны, cooldowns сброшены.');
+  }
+
+  private async cmdSellAll(): Promise<void> {
+    this.tg.sendReply('Выполняю /sellall — отмена ордеров и продажа всех позиций...');
+    await this.sellEverything();
+    this.state.halted = true;
+    this.log.info('Telegram /sellall: all positions sold, bot halted');
+
+    const balance = await this.exchange.fetchBalance('USDT');
+    this.tg.sendReply(`/sellall выполнен. USDT: ${balance.total.toFixed(2)}. Бот остановлен.`);
+  }
+
+  private async cmdBuy(args: string): Promise<void> {
+    // Parse: /buy SUI 10 → buy 10 SUI for USDT (pair = SUI/USDT)
+    // Parse: /buy SUI/BTC 10 → buy 10 SUI for BTC (pair = SUI/BTC)
+    const parts = args.trim().split(/\s+/);
+    if (parts.length < 2) {
+      this.tg.sendReply('Формат: /buy SUI 10 или /buy SUI/BTC 10\nПервое — количество base, второе — quote (по умолчанию USDT)');
+      return;
+    }
+
+    const rawPair = parts[0].toUpperCase();
+    const amount = parseFloat(parts[1]);
+
+    if (isNaN(amount) || amount <= 0) {
+      this.tg.sendReply(`Некорректное количество: ${parts[1]}`);
+      return;
+    }
+
+    // Determine symbol: SUI → SUI/USDT, SUI/BTC → SUI/BTC
+    const symbol = rawPair.includes('/') ? rawPair : `${rawPair}/USDT`;
+    const [base, quote] = symbol.split('/');
+
+    // Check quote currency balance
+    const balances = await this.exchange.fetchAllBalances();
+    const quoteBal = balances[quote];
+    if (!quoteBal || quoteBal.free <= 0) {
+      this.tg.sendReply(`Нет свободного ${quote} для покупки. Free: ${quoteBal?.free?.toFixed(4) ?? '0'}`);
+      return;
+    }
+
+    // Get market precision
+    let mp: { pricePrecision: number; amountPrecision: number; minAmount: number; minCost: number };
+    try {
+      mp = await this.exchange.getMarketPrecision(symbol);
+    } catch {
+      this.tg.sendReply(`Пара ${symbol} не найдена на бирже`);
+      return;
+    }
+
+    // Round amount to exchange precision
+    const factor = Math.pow(10, mp.amountPrecision);
+    const roundedAmount = Math.floor(amount * factor) / factor;
+
+    if (roundedAmount < mp.minAmount) {
+      this.tg.sendReply(`Количество ${roundedAmount} < минимум ${mp.minAmount} для ${symbol}`);
+      return;
+    }
+
+    // Check estimated cost
+    let ticker;
+    try {
+      ticker = await this.exchange.fetchTicker(symbol);
+    } catch {
+      this.tg.sendReply(`Не удалось получить цену ${symbol}`);
+      return;
+    }
+
+    const estimatedCost = roundedAmount * ticker.last;
+    if (estimatedCost < mp.minCost) {
+      this.tg.sendReply(`Стоимость ${estimatedCost.toFixed(2)} ${quote} < минимум ${mp.minCost} для ${symbol}`);
+      return;
+    }
+
+    if (quoteBal.free < estimatedCost) {
+      this.tg.sendReply(`Недостаточно ${quote}: нужно ~${estimatedCost.toFixed(2)}, free: ${quoteBal.free.toFixed(4)}`);
+      return;
+    }
+
+    // Execute market buy
+    try {
+      const order = await this.exchange.createMarketBuy(symbol, roundedAmount, 'manual');
+      const filledAmount = order.filled > 0 ? order.filled : roundedAmount;
+      const fillPrice = order.price || ticker.last;
+      const cost = filledAmount * fillPrice;
+
+      // Record trade with strategy='manual'
+      this.state.addTrade({
+        timestamp: Date.now(),
+        symbol,
+        side: 'buy',
+        amount: filledAmount,
+        price: fillPrice,
+        cost,
+        fee: cost * 0.001,
+        strategy: 'manual',
+      });
+
+      // Track position
+      this.state.addToPosition(symbol, filledAmount, cost);
+
+      // Track non-configured pairs for /orders, /status, /sellall
+      const isConfigured = this.config.pairs.some(p => p.symbol === symbol);
+      if (!isConfigured) {
+        this.state.addManualPair(symbol);
+      }
+
+      this.log.info(`Telegram /buy: ${filledAmount} ${base} @ ${fillPrice.toFixed(4)} = ${cost.toFixed(2)} ${quote}`);
+      this.tg.sendReply(`/buy выполнен\n${filledAmount} ${base} @ ${fillPrice.toFixed(4)}\nСтоимость: ${cost.toFixed(2)} ${quote}`);
+    } catch (err) {
+      this.log.error(`Telegram /buy failed: ${sanitizeError(err)}`);
+      this.tg.sendReply(`/buy ошибка: ${sanitizeError(err)}`);
+    }
+  }
+
+  private async cmdOrders(): Promise<void> {
+    const lines: string[] = ['<b>ОТКРЫТЫЕ ОРДЕРА</b>'];
+    let totalOrders = 0;
+
+    for (const pair of this.config.pairs) {
+      try {
+        const openOrders = await this.exchange.fetchOpenOrders(pair.symbol);
+        if (openOrders.length === 0) {
+          lines.push(`${pair.symbol}: нет ордеров`);
+          continue;
+        }
+
+        totalOrders += openOrders.length;
+        const buys = openOrders.filter(o => o.side === 'buy').sort((a, b) => b.price - a.price);
+        const sells = openOrders.filter(o => o.side === 'sell').sort((a, b) => a.price - b.price);
+
+        lines.push(`\n<b>${pair.symbol}</b> (${openOrders.length} ордеров)`);
+
+        if (sells.length > 0) {
+          lines.push(`SELL (${sells.length}):`);
+          for (const o of sells.slice(0, 5)) {
+            lines.push(`  ${o.amount} @ ${o.price}`);
+          }
+          if (sells.length > 5) lines.push(`  ...+${sells.length - 5} ещё`);
+        }
+
+        if (buys.length > 0) {
+          lines.push(`BUY (${buys.length}):`);
+          for (const o of buys.slice(0, 5)) {
+            lines.push(`  ${o.amount} @ ${o.price}`);
+          }
+          if (buys.length > 5) lines.push(`  ...+${buys.length - 5} ещё`);
+        }
+      } catch (err) {
+        lines.push(`${pair.symbol}: ошибка — ${sanitizeError(err)}`);
+      }
+    }
+
+    // Manual pairs (bought via /buy, not in config)
+    const manualPairs = this.state.getManualPairs();
+    for (const sym of manualPairs) {
+      // Skip if already shown as configured pair
+      if (this.config.pairs.some(p => p.symbol === sym)) continue;
+      try {
+        const openOrders = await this.exchange.fetchOpenOrders(sym);
+        if (openOrders.length > 0) {
+          totalOrders += openOrders.length;
+          lines.push(`\n<b>${sym}</b> (${openOrders.length}, ручная)`);
+          for (const o of openOrders.slice(0, 5)) {
+            lines.push(`  ${o.side.toUpperCase()} ${o.amount} @ ${o.price}`);
+          }
+          if (openOrders.length > 5) lines.push(`  ...+${openOrders.length - 5} ещё`);
+        }
+      } catch { /* skip */ }
+    }
+
+    lines.push(`\nВсего: ${totalOrders} ордеров`);
+    this.tg.sendReply(lines.join('\n'));
   }
 
   // ----------------------------------------------------------

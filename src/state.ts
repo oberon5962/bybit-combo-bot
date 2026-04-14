@@ -66,6 +66,9 @@ export interface BotState {
 
   // Trade history (last 100 trades)
   recentTrades: TradeEntry[];
+
+  // Pairs bought manually via /buy that are NOT in config.pairs (e.g. "DOGE/USDT")
+  manualPairs: string[];
 }
 
 export interface TradeEntry {
@@ -92,6 +95,7 @@ function createEmptyState(): BotState {
     totalTicks: 0,
     halted: false,
     recentTrades: [],
+    manualPairs: [],
   };
 }
 
@@ -157,6 +161,7 @@ export class StateManager {
         state.totalTicks = typeof parsed.totalTicks === 'number' ? parsed.totalTicks : 0;
         state.halted = typeof parsed.halted === 'boolean' ? parsed.halted : false;
         state.recentTrades = Array.isArray(parsed.recentTrades) ? parsed.recentTrades : [];
+        state.manualPairs = Array.isArray(parsed.manualPairs) ? parsed.manualPairs : [];
 
         // Restore per-pair state with validation
         if (parsed.pairs && typeof parsed.pairs === 'object') {
@@ -447,6 +452,21 @@ export class StateManager {
       return this.state.recentTrades.filter((t) => t.symbol === symbol);
     }
     return this.state.recentTrades;
+  }
+
+  // Manual pairs (bought via /buy, not in config)
+  getManualPairs(): string[] {
+    return this.state.manualPairs;
+  }
+  addManualPair(symbol: string): void {
+    if (!this.state.manualPairs.includes(symbol)) {
+      this.state.manualPairs.push(symbol);
+      this.save();
+    }
+  }
+  removeManualPair(symbol: string): void {
+    this.state.manualPairs = this.state.manualPairs.filter(s => s !== symbol);
+    this.save();
   }
 
   // ----------------------------------------------------------

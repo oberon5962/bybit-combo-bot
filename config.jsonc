@@ -93,7 +93,8 @@
     "sendSummary": true,                // Отправлять summary в Telegram
     "sendFills": true,                  // Уведомления о сделках
     "sendAlerts": true,                 // Алерты: SL/TP/halt/panic
-    "summaryIntervalTicks": 60          // Summary раз в 60 тиков (~10 мин)
+    "summaryIntervalTicks": 60,         // Summary раз в 60 тиков (~10 мин)
+    "commandPollIntervalTicks": 3       // Проверять Telegram-команды раз в 3 тика (0 = выкл)
   },
 
   // ============================================================

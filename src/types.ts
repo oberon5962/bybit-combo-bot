@@ -121,6 +121,7 @@ export interface TelegramConfig {
   sendFills: boolean;             // уведомления о сделках
   sendAlerts: boolean;            // SL/TP/halt/panic/cooldown
   summaryIntervalTicks: number;   // summary раз в N тиков (60 = ~10 мин при 10s tick)
+  commandPollIntervalTicks: number; // polling Telegram commands раз в N тиков (0 = выкл)
 }
 
 // ============================================================
@@ -178,7 +179,7 @@ export interface BotOrder {
   amount: number;
   filled: number;          // actual filled amount (may differ from amount on partial fills)
   status: 'open' | 'filled' | 'cancelled';
-  strategy: 'grid' | 'dca' | 'risk';
+  strategy: 'grid' | 'dca' | 'risk' | 'manual';
   timestamp: number;
 }
 
@@ -190,7 +191,7 @@ export interface TradeRecord {
   amount: number;
   cost: number;
   fee: number;
-  strategy: 'grid' | 'dca' | 'risk';
+  strategy: 'grid' | 'dca' | 'risk' | 'manual';
   timestamp: number;
   pnl?: number;
 }

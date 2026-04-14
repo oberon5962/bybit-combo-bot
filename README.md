@@ -23,6 +23,8 @@ bybit-combo-bot/
 ├── README.md
 ├── CLAUDE.md
 ├── bot-state.json            # Состояние бота (создаётся автоматически)
+├── check-bybit.ts            # Диагностика: балансы, ордера, тикеры, последние сделки
+├── register-commands.ts      # Одноразовая регистрация меню команд в Telegram
 ├── bot.log                   # Лог работы (создаётся автоматически)
 ├── errors.log                # Только ошибки
 └── src/
@@ -107,12 +109,35 @@ bybit-combo-bot/
 | sendSummary | true (раз в 60 тиков ≈ 10 мин) |
 | sendFills | true (уведомления об исполненных сделках) |
 | sendAlerts | true (SL/TP/halt/panic/cooldown) |
+| commandPollIntervalTicks | 3 (проверка команд каждые 3 тика) |
 
 Бот отправляет в Telegram:
 - Стартовое сообщение (режим, пары)
 - Summary портфеля каждые ~10 минут
 - Fill-уведомления при исполнении grid-ордеров
 - Алерты: Stop-Loss, Trailing SL, Take-Profit, Max Drawdown, Portfolio TP
+
+### Telegram-команды
+
+Управление ботом через Telegram (команды обрабатываются даже когда бот остановлен):
+
+| Команда | Описание |
+|---|---|
+| `/status` | Сводка: капитал, PnL, позиции по всем парам |
+| `/stop` | Остановить торговлю (halted=true) |
+| `/run` | Возобновить торговлю (сбрасывает halt, cooldown, consecutiveSL) |
+| `/sellall` | Продать все позиции + отменить ордера + halt |
+| `/buy SUI 10` | Купить 10 токенов SUI за USDT (market order) |
+| `/buy SUI/BTC 10` | Купить 10 токенов SUI за BTC (market order) |
+| `/orders` | Показать все открытые ордера |
+
+Ручные покупки через `/buy` не входящих в конфиг пар отслеживаются отдельно (`manualPairs`), отображаются в `/status` и `/orders`, продаются по `/sellall`.
+
+**Регистрация меню команд** (одноразово):
+```bash
+npx ts-node register-commands.ts
+```
+После этого в Telegram при нажатии `/` появится меню с описанием всех команд.
 
 ## Торговая стратегия
 
@@ -291,16 +316,28 @@ npm start
 
 ## Остановка
 
+- **`/stop` в Telegram** — остановить торговлю (процесс продолжает работать, ордера на бирже)
 - **Ctrl+C** (1 раз) — soft shutdown, grid-ордера остаются на бирже
 - **Ctrl+C** (2 раза) — hard shutdown, все ордера отменяются
 - **Автоматически** — при SL/TP/drawdown/portfolio TP
 
 ### Возобновление после halt
 
-1. Проанализировать логи
-2. `bot-state.json`: поставить `"halted": false` или удалить файл (чистый старт)
-3. Для per-pair halt: в `pairStates` → `"halted": false`, `"consecutiveSL": 0`
-4. Перезапустить
+**Вариант 1 — через Telegram (рекомендуется):**
+
+Отправить `/run` в Telegram-чат с ботом. Без перезапуска процесса.
+
+**Вариант 2 — вручную:**
+
+1. Остановить процесс бота
+2. В `bot-state.json` поставить `"halted": false`:
+   ```json
+   {
+     "halted": false
+   }
+   ```
+3. Для per-pair halt: в `pairs` → нужная пара → `"halted": false`, `"consecutiveSL": 0`
+4. Перезапустить бот
 
 ## Логи
 
@@ -433,6 +470,31 @@ Summary каждые 10 тиков: капитал, PnL, drawdown, trades, posit
 - **grid.ts: orphan-sell бесконечный рост levels** — `existsAtPrice` проверял только уровни с `orderId`, отменённые биржей ордера создавали дубли каждый тик
 - **grid.ts: double sell (counter + orphan)** — counter-sell + orphan-sell на одну крипту в одном тике (API не отражает залоченный баланс мгновенно). Трекинг `counterSellCommittedThisTick`
 - **grid.ts: partial fill теряет объём** — уровень переключался на counter-side, оставшаяся часть buy забывалась. Теперь создаётся retry-level для оставшегося объёма
+
+### v1.2.0 (2026-04-15)
+
+Управление ботом через Telegram-команды.
+
+**Telegram-команды (`telegram.ts` + `combo-manager.ts`):**
+- 6 команд: `/status`, `/stop`, `/run`, `/sellall`, `/buy`, `/orders`
+- Non-blocking polling через `getUpdates` с `timeout=0`
+- Безопасность: команды принимаются только от настроенного `chatId`
+- Команды обрабатываются до проверки `halted` — `/buy` и `/run` работают при остановленном боте
+- Hot-reload сохраняет `lastUpdateId` (нет повторной обработки команд)
+- `commandPollIntervalTicks` — частота опроса Telegram (по умолчанию 3 тика)
+
+**Ручные покупки (`/buy`):**
+- Два формата: `/buy SUI 10` (за USDT) и `/buy SUI/BTC 10` (за BTC)
+- Market order с проверкой баланса, precision, minAmount/minCost
+- Пары не из конфига сохраняются в `manualPairs` (state.ts)
+- Ручные пары отображаются в `/status`, `/orders` и продаются по `/sellall`
+
+**Меню команд Telegram:**
+- `register-commands.ts` — одноразовый скрипт для `setMyCommands` API
+- Меню с описанием всех команд при нажатии `/` в чате с ботом
+
+**Утилиты:**
+- `check-bybit.ts` — диагностический скрипт: балансы, открытые ордера, тикеры, последние закрытые ордера
 
 ### v1.1.0 — `958b19e` (2026-04-14)
 
