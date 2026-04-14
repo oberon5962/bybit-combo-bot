@@ -367,12 +367,14 @@ export class ComboManager {
     ticker: Ticker,
     allocationUSDT: number,
   ): StrategyDecision | null {
+    if (!this.config.metaSignal.enabled) return null;
     const { rsi, emaCrossover, pricePosition } = indicators;
     const sym = ticker.symbol;
 
-    // Meta-signal order size: 5% of pair allocation for regular, 8% for strong
-    const regularAmount = (allocationUSDT * 0.05) / ticker.last;
-    const strongAmount = (allocationUSDT * 0.08) / ticker.last;
+    const ms = this.config.metaSignal;
+    const gridOrderPct = this.config.grid.orderSizePercent;
+    const regularAmount = (allocationUSDT * gridOrderPct * ms.orderSizeMultiplier / 100) / ticker.last;
+    const strongAmount = (allocationUSDT * gridOrderPct * ms.strongOrderSizeMultiplier / 100) / ticker.last;
 
     const cached = this.marketPrecisionCache.get(sym);
     const minAmount = cached?.minAmount ?? 0;
@@ -391,7 +393,7 @@ export class ComboManager {
       return true;
     };
 
-    if (rsi < 25 && emaCrossover === 'bullish' && pricePosition === 'below_lower') {
+    if (rsi < ms.strongBuyRsiThreshold && emaCrossover === 'bullish' && pricePosition === 'below_lower') {
       const amount = this.roundAmountForSymbol(strongAmount, sym);
       if (!isViableOrder(amount)) return null;
       return {
@@ -403,7 +405,7 @@ export class ComboManager {
       };
     }
 
-    if (rsi > 75 && emaCrossover === 'bearish' && pricePosition === 'above_upper') {
+    if (rsi > ms.strongSellRsiThreshold && emaCrossover === 'bearish' && pricePosition === 'above_upper') {
       const pos = this.state.getPosition(sym);
       const sellAmount = pos.amount > 0 ? Math.min(this.roundAmountForSymbol(strongAmount, sym), pos.amount) : 0;
       if (sellAmount <= 0 || !isViableOrder(sellAmount)) return null;
@@ -416,7 +418,7 @@ export class ComboManager {
       };
     }
 
-    if (rsi < 35 && pricePosition === 'below_middle') {
+    if (rsi < ms.buyRsiThreshold && pricePosition === 'below_middle') {
       const amount = this.roundAmountForSymbol(regularAmount, sym);
       if (!isViableOrder(amount)) return null;
       return {
@@ -428,7 +430,7 @@ export class ComboManager {
       };
     }
 
-    if (rsi > 65 && pricePosition === 'above_upper') {
+    if (rsi > ms.sellRsiThreshold && pricePosition === 'above_upper') {
       const pos2 = this.state.getPosition(sym);
       const sellAmt = pos2.amount > 0 ? Math.min(this.roundAmountForSymbol(regularAmount, sym), pos2.amount) : 0;
       if (sellAmt <= 0 || !isViableOrder(sellAmt)) return null;

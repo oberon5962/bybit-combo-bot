@@ -19,6 +19,9 @@ export interface BotConfig {
   dca: DCAConfig;
   indicators: IndicatorConfig;
 
+  // Meta-signal (combo indicator signals)
+  metaSignal: MetaSignalConfig;
+
   // Market protection
   marketProtection: MarketProtectionConfig;
 
@@ -81,6 +84,16 @@ export interface IndicatorConfig {
   emaSlowPeriod: number;        // default 21
   bollingerPeriod: number;      // default 20
   bollingerStdDev: number;      // default 2
+}
+
+export interface MetaSignalConfig {
+  enabled: boolean;                 // false = disable meta-signal entirely
+  buyRsiThreshold: number;          // regular buy when RSI < this (default 35)
+  strongBuyRsiThreshold: number;    // strong buy when RSI < this (default 25)
+  sellRsiThreshold: number;         // regular sell when RSI > this (default 70)
+  strongSellRsiThreshold: number;   // strong sell when RSI > this (default 80)
+  orderSizeMultiplier: number;      // regular order = grid.orderSizePercent * this (e.g. 0.5)
+  strongOrderSizeMultiplier: number; // strong order = grid.orderSizePercent * this (e.g. 0.8)
 }
 
 export interface MarketProtectionConfig {

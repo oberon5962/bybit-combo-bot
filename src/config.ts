@@ -72,16 +72,16 @@ export function loadConfig(): BotConfig {
       enabled: true,
       gridLevels,                    // 10 buy + 10 sell (покрытие ±5% от центра)
       gridSpacingPercent: 0.5,       // 0.5% между уровнями (покрытие 5% в каждую сторону)
-      orderSizePercent: 14,          // Каждый ордер = 14% от аллокации пары
+      orderSizePercent: 10,          // Каждый ордер = 10% от аллокации пары
       rebalancePercent: 2,           // Перестроить сетку если цена ушла >2% от центра (вверх или вниз)
       rsiOverboughtThreshold: 70,    // Пропускаем grid-buy при RSI > 70 (100 = отключить)
-      useEmaFilter: true,            // Пропускаем grid-buy при медвежьем EMA кроссовере (false = отключить)
+      useEmaFilter: false,           // Отключен: grid торгует всегда, RSI overbought (70) остаётся как защита
 
       // Bollinger Bands адаптивный grid (false = отключить)
       // Когда цена у нижней полосы — больше buy уровней + увеличенный orderSize
       // Когда цена у верхней полосы + EMA bearish — больше sell уровней + увеличенный orderSize
       // Когда цена у верхней полосы + EMA bullish — не усиливаем sell (тренд сильный)
-      useBollingerAdaptive: true,
+      useBollingerAdaptive: false,
       bollingerBuyMultiplier: 1.5,   // orderSize * 1.5 при покупке у нижней полосы
       bollingerSellMultiplier: 1.5,  // orderSize * 1.5 при продаже у верхней полосы (только EMA bearish)
       bollingerShiftLevels: 2,       // перекинуть 2 уровня: напр. 7/7 → 9/5 buy/sell (или 5/9)
@@ -121,10 +121,23 @@ export function loadConfig(): BotConfig {
     },
 
     // -------------------------------------------------------
+    // Meta-Signal — комбинированные сигналы индикаторов
+    // -------------------------------------------------------
+    metaSignal: {
+      enabled: false,                // false = отключить meta-signal (рыночные ордера по RSI+BB+EMA)
+      buyRsiThreshold: 35,           // покупка при RSI < 35 + цена ниже BB middle
+      strongBuyRsiThreshold: 25,     // сильная покупка при RSI < 25 + bullish EMA + ниже BB lower
+      sellRsiThreshold: 75,          // продажа при RSI > 70 + цена выше BB upper
+      strongSellRsiThreshold: 80,    // сильная продажа при RSI > 80 + bearish EMA + выше BB upper
+      orderSizeMultiplier: 1.0,      // обычный ордер = grid.orderSizePercent * 1.0 (сейчас 10%*1.0=10%)
+      strongOrderSizeMultiplier: 1.5, // сильный ордер = grid.orderSizePercent * 1.5 (сейчас 10%*1.5=15%)
+    },
+
+    // -------------------------------------------------------
     // Market Protection — защита от рыночной паники
     // -------------------------------------------------------
     marketProtection: {
-      panicBearishPairsThreshold: 2,   // 2 из 3 пар bearish → паника (999 = отключить)
+      panicBearishPairsThreshold: 3,   // 3 из 3 пар bearish → паника (999 = отключить)
       btcWatchdogEnabled: true,         // следить за BTC как индикатором рынка (false = отключить)
       btcDropThresholdPercent: 3,       // BTC упал на 3% за час → пауза покупок
       btcCheckIntervalSec: 300,         // проверять BTC каждые 5 минут

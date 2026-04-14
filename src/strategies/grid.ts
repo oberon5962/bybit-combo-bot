@@ -147,6 +147,13 @@ export class GridStrategy {
     if (this.state.isGridInitialized(symbol)) {
       const savedLevels = this.state.getGridLevels(symbol);
       if (savedLevels.length > 0) {
+        // If saved levels are significantly fewer than configured, reinitialize
+        // (e.g. sync adopted only 2 orders but gridLevels=14)
+        if (savedLevels.length < this.config.gridLevels * 0.5) {
+          this.log.warn(`Grid for ${symbol}: only ${savedLevels.length}/${this.config.gridLevels} levels — reinitializing full grid`);
+          await this.cancelAll(symbol);
+          // Fall through to reinitialize below
+        } else {
         // Check if price has drifted far from grid center — rebalance if needed
         const lowestPrice = savedLevels[0].price;
         const highestPrice = savedLevels[savedLevels.length - 1].price;
@@ -179,6 +186,7 @@ export class GridStrategy {
           }
           return false;
         }
+        } // end of level count check else
       }
     }
 
@@ -267,11 +275,17 @@ export class GridStrategy {
     const maxNewOrders = Math.max(0, this.maxOpenOrdersPerPair - currentOpenOrders);
     let ordersPlaced = 0;
 
+    // Sort levels by proximity to current price (closest first).
+    // This ensures the most important orders get placed when balance is limited.
+    const sortedLevels = [...levels].sort((a, b) =>
+      Math.abs(a.price - currentPrice) - Math.abs(b.price - currentPrice),
+    );
+
     // Track skip reasons for summary log (generic keys — no volatile values like RSI or balance)
     const skipReasons: Set<string> = new Set();
     const addSkip = (reason: string) => { skipReasons.add(reason); };
 
-    for (const level of levels) {
+    for (const level of sortedLevels) {
       if (level.orderId || level.filled) continue;
       if (ordersPlaced >= maxNewOrders) { addSkip('max orders'); break; }
 

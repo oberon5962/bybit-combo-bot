@@ -217,13 +217,20 @@ export class StateManager {
       const json = JSON.stringify(this.state, null, 2);
       const tmpFile = STATE_FILE + '.tmp';
       const bakFile = STATE_FILE + '.bak';
-      fs.writeFileSync(tmpFile, json, 'utf-8');
-      // Windows: fs.renameSync is NOT atomic when target exists (deletes then renames).
-      // Keep a .bak so we can recover if crash happens between delete and rename.
-      if (fs.existsSync(STATE_FILE)) {
-        try { fs.copyFileSync(STATE_FILE, bakFile); } catch { /* best effort */ }
+      // Windows: rename can fail with EPERM if antivirus/indexer holds a handle.
+      // Strategy: try rename first (faster), fallback to direct write (always works).
+      try {
+        fs.writeFileSync(tmpFile, json, 'utf-8');
+        if (fs.existsSync(STATE_FILE)) {
+          try { fs.copyFileSync(STATE_FILE, bakFile); } catch { /* best effort */ }
+        }
+        fs.renameSync(tmpFile, STATE_FILE);
+      } catch {
+        // Fallback: write directly to the state file (not atomic but reliable on Windows)
+        fs.writeFileSync(STATE_FILE, json, 'utf-8');
+        // Clean up .tmp if it exists
+        try { if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile); } catch { /* ignore */ }
       }
-      fs.renameSync(tmpFile, STATE_FILE);
       this.dirty = false;
       this.log.debug('State saved to disk');
     } catch (err) {
