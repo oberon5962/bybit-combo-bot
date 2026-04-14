@@ -471,7 +471,7 @@ Summary каждые 10 тиков: капитал, PnL, drawdown, trades, posit
 - **grid.ts: double sell (counter + orphan)** — counter-sell + orphan-sell на одну крипту в одном тике (API не отражает залоченный баланс мгновенно). Трекинг `counterSellCommittedThisTick`
 - **grid.ts: partial fill теряет объём** — уровень переключался на counter-side, оставшаяся часть buy забывалась. Теперь создаётся retry-level для оставшегося объёма
 
-### v1.2.0 (2026-04-15)
+### v1.2.0 — `5af78b9` (2026-04-15)
 
 Управление ботом через Telegram-команды.
 
