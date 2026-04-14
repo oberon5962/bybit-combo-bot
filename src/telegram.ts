@@ -133,6 +133,16 @@ export class TelegramNotifier {
             continue;
           }
           if (data.startsWith('confirm:')) {
+            // Check confirmation timeout
+            const msgDate = cb.message?.date ?? 0; // unix seconds
+            const timeoutSec = this.config.confirmationTimeoutSec;
+            if (timeoutSec > 0 && msgDate > 0) {
+              const ageSec = Math.floor(Date.now() / 1000) - msgDate;
+              if (ageSec > timeoutSec) {
+                this.sendReply(`⏰ Подтверждение устарело (${ageSec}с > ${timeoutSec}с). Повторите команду.`);
+                continue;
+              }
+            }
             // Parse "confirm:command:args"
             const payload = data.substring('confirm:'.length);
             const colonIdx = payload.indexOf(':');
@@ -199,6 +209,7 @@ export class TelegramNotifier {
       { command: 'sellall', description: 'Продать всё + отменить ордера' },
       { command: 'buy', description: '/buy SUI 10 (buy 10 tokens SUI за USDT) или /buy SUI/BTC 10 (buy 10 tokens SUI за BTC)' },
       { command: 'orders', description: 'Открытые ордера' },
+      { command: 'cancelorders', description: 'Отменить все ордера + остановить бота' },
     ];
 
     const payload = JSON.stringify({ commands });

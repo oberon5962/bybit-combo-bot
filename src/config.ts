@@ -117,6 +117,7 @@ export function loadConfig(): BotConfig {
       sendAlerts: json.telegram?.sendAlerts ?? defaultBool,
       summaryIntervalTicks: json.telegram?.summaryIntervalTicks ?? defaultNum,
       commandPollIntervalTicks: json.telegram?.commandPollIntervalTicks ?? 0,
+      confirmationTimeoutSec: json.telegram?.confirmationTimeoutSec ?? 60,
     },
 
     tickIntervalSec: json.tickIntervalSec ?? defaultNum,

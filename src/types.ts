@@ -122,6 +122,7 @@ export interface TelegramConfig {
   sendAlerts: boolean;            // SL/TP/halt/panic/cooldown
   summaryIntervalTicks: number;   // summary раз в N тиков (60 = ~10 мин при 10s tick)
   commandPollIntervalTicks: number; // polling Telegram commands раз в N тиков (0 = выкл)
+  confirmationTimeoutSec: number;   // таймаут подтверждения команды в секундах (0 = без таймаута)
 }
 
 // ============================================================

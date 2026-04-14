@@ -3,9 +3,12 @@
   // Trading Pairs & Allocation (сумма <= 100%)
   // ============================================================
   "pairs": [
-    { "symbol": "SUI/USDT", "allocationPercent": 25 },  // 25% капитала на SUI
-    { "symbol": "SOL/USDT", "allocationPercent": 40 },  // 40% капитала на SOL
-    { "symbol": "XRP/USDT", "allocationPercent": 35 }   // 35% капитала на XRP
+    // { "symbol": "SUI/USDT", "allocationPercent": 25 },  // 25% капитала на SUI
+    // { "symbol": "SOL/USDT", "allocationPercent": 40 },  // 40% капитала на SOL
+    // { "symbol": "XRP/USDT", "allocationPercent": 35 },  // 35% капитала на XRP
+    { "symbol": "DOT/USDT", "allocationPercent": 35 },   // 35% капитала на DOT
+    { "symbol": "NEAR/USDT", "allocationPercent": 35 }, // 35% капитала на NEAR
+    { "symbol": "ADA/USDT", "allocationPercent": 30 }   // 30% капитала на ADA
   ],
 
   // ============================================================
@@ -94,7 +97,8 @@
     "sendFills": true,                  // Уведомления о сделках
     "sendAlerts": true,                 // Алерты: SL/TP/halt/panic
     "summaryIntervalTicks": 60,         // Summary раз в 60 тиков (~10 мин)
-    "commandPollIntervalTicks": 1       // Проверять Telegram-команды каждый тик (0 = выкл)
+    "commandPollIntervalTicks": 1,      // Проверять Telegram-команды каждый тик (0 = выкл)
+    "confirmationTimeoutSec": 60        // Таймаут подтверждения команды в секундах (0 = без таймаута)
   },
 
   // ============================================================

@@ -17,6 +17,8 @@ import { createHash } from 'crypto';
 import { readFileSync } from 'fs';
 import { resolve } from 'path';
 
+const HALT_HINT = 'Для возобновления: /run или halted→false в bot-state.json';
+
 export class ComboManager {
   private config: BotConfig;
   private exchange: BybitExchange;
@@ -240,7 +242,7 @@ export class ComboManager {
       if (drawdown > this.config.risk.maxDrawdownPercent) {
         this.log.error(`MAX DRAWDOWN EXCEEDED: ${drawdown.toFixed(1)}% > ${this.config.risk.maxDrawdownPercent}%`);
         this.log.error('HALTING ALL TRADING.');
-        this.tg.sendAlert(`🚨 <b>MAX DRAWDOWN ${drawdown.toFixed(1)}%</b>\nPeak: ${this.state.peakCapital.toFixed(2)} → ${totalPortfolioUSDT.toFixed(2)} USDT\nBot HALTED!`);
+        this.tg.sendAlert(`🚨 <b>MAX DRAWDOWN ${drawdown.toFixed(1)}%</b>\nPeak: ${this.state.peakCapital.toFixed(2)} → ${totalPortfolioUSDT.toFixed(2)} USDT\nBot HALTED!\n${HALT_HINT}`);
         this.state.halted = true;
         return;
       }
@@ -264,7 +266,7 @@ export class ComboManager {
 
       await this.sellEverything();
       this.state.halted = true;
-      this.tg.sendAlert(`🎉 <b>PORTFOLIO TAKE-PROFIT!</b>\nStart: ${this.state.startingCapital.toFixed(2)} → ${totalPortfolioUSDT.toFixed(2)} USDT (+${profitPercent.toFixed(1)}%)\nAll sold. Bot halted.`);
+      this.tg.sendAlert(`🎉 <b>PORTFOLIO TAKE-PROFIT!</b>\nStart: ${this.state.startingCapital.toFixed(2)} → ${totalPortfolioUSDT.toFixed(2)} USDT (+${profitPercent.toFixed(1)}%)\nAll sold. Bot halted.\n${HALT_HINT}`);
       this.log.info('All positions sold. Bot halted. Congratulations!');
       return;
     }
@@ -556,7 +558,7 @@ export class ComboManager {
         this.log.warn(`${symbol} SL: closePosition failed — keeping position in state`);
         return false;
       }
-      this.tg.sendAlert(`🔴 <b>STOP-LOSS ${symbol}</b>\nEntry: ${position.avgEntryPrice.toFixed(2)} → ${currentPrice.toFixed(2)}\nPnL: ${pnlPercent.toFixed(1)}%`);
+      this.tg.sendAlert(`🔴 <b>STOP-LOSS ${symbol}</b>\nEntry: ${position.avgEntryPrice.toFixed(2)} → ${currentPrice.toFixed(2)}\nPnL: ${pnlPercent.toFixed(1)}%\n${HALT_HINT}`);
       await this.handlePostSL(symbol, position.avgEntryPrice, currentPrice, pnlPercent, cooldownAfterSLSec, cooldownMaxSL);
       return true;
     }
@@ -583,7 +585,7 @@ export class ComboManager {
           this.log.warn(`${symbol} trailing SL: closePosition failed — keeping position in state`);
           return false;
         }
-        this.tg.sendAlert(`🟡 <b>TRAILING SL ${symbol}</b>\nEntry: ${position.avgEntryPrice.toFixed(2)} | Peak: ${trailingPeak.toFixed(2)} → ${currentPrice.toFixed(2)}\nDrop: -${dropFromPeak.toFixed(1)}% | PnL: ${trailingPnl >= 0 ? '+' : ''}${trailingPnl.toFixed(1)}%`);
+        this.tg.sendAlert(`🟡 <b>TRAILING SL ${symbol}</b>\nEntry: ${position.avgEntryPrice.toFixed(2)} | Peak: ${trailingPeak.toFixed(2)} → ${currentPrice.toFixed(2)}\nDrop: -${dropFromPeak.toFixed(1)}% | PnL: ${trailingPnl >= 0 ? '+' : ''}${trailingPnl.toFixed(1)}%\n${HALT_HINT}`);
         // closePosition already called reducePosition — only reset if fully sold
         const trailRemaining = this.state.getPosition(symbol);
         if (trailRemaining.amount < 1e-12) {
@@ -660,6 +662,7 @@ export class ComboManager {
       // Too many SL in a row — full halt
       this.state.haltPair(symbol, `${reason} [${count}x SL — halted]`);
       this.log.warn(`${symbol} HALTED — ${count} consecutive stop-losses. Edit bot-state.json to resume.`);
+      this.tg.sendAlert(`🛑 <b>${symbol} HALTED</b>\n${count}x SL подряд — пара остановлена.\n${HALT_HINT}`);
     } else if (cooldownSec > 0) {
       // Cooldown — pause and resume later
       const until = Date.now() + cooldownSec * 1000;
@@ -670,6 +673,7 @@ export class ComboManager {
       // cooldownSec = 0 — halt forever (old behavior)
       this.state.haltPair(symbol, reason);
       this.log.warn(`${symbol} HALTED after stop-loss. Edit bot-state.json to resume.`);
+      this.tg.sendAlert(`🛑 <b>${symbol} HALTED</b>\nSL сработал, cooldown=0 — пара остановлена навсегда.\n${HALT_HINT}`);
     }
   }
 
@@ -1212,12 +1216,13 @@ export class ComboManager {
       this.log.info(`Telegram command: /${cmd.command} ${cmd.args}${cmd.confirmed ? ' [confirmed]' : ''}`);
       try {
         // Commands requiring confirmation: stop, sellall, buy
-        const needsConfirm = ['stop', 'sellall', 'buy'].includes(cmd.command);
+        const needsConfirm = ['stop', 'sellall', 'buy', 'cancelorders'].includes(cmd.command);
         if (needsConfirm && !cmd.confirmed) {
           const descriptions: Record<string, string> = {
             stop: '⏸ Остановить торговлю?',
-            sellall: '🔴 Продать ВСЁ + отменить все ордера?',
+            sellall: '❌ Продать ВСЁ + отменить все ордера?',
             buy: `🛒 Купить: ${cmd.args}?`,
+            cancelorders: '⚠️ Отменить ВСЕ открытые ордера?',
           };
           const label = descriptions[cmd.command] ?? `/${cmd.command}`;
           const callbackData = cmd.args ? `${cmd.command}:${cmd.args}` : cmd.command;
@@ -1244,8 +1249,11 @@ export class ComboManager {
           case 'orders':
             await this.cmdOrders();
             break;
+          case 'cancelorders':
+            await this.cmdCancelOrders();
+            break;
           default:
-            this.tg.sendReply(`Неизвестная команда /${cmd.command}\nДоступные: /status /stop /run /sellall /buy /orders`);
+            this.tg.sendReply(`Неизвестная команда /${cmd.command}\nДоступные: /status /stop /run /sellall /buy /orders /cancelorders`);
         }
       } catch (err) {
         this.log.error(`Telegram command /${cmd.command} failed: ${sanitizeError(err)}`);
@@ -1344,7 +1352,7 @@ export class ComboManager {
   private async cmdStop(): Promise<void> {
     this.state.halted = true;
     this.log.info('Telegram /stop: bot halted');
-    this.tg.sendReply('Бот остановлен (/stop). Ордера остаются на бирже.\nДля возобновления: /run');
+    this.tg.sendReply(`Бот остановлен (/stop). Ордера остаются на бирже.\n${HALT_HINT}`);
   }
 
   private async cmdStart(): Promise<void> {
@@ -1366,7 +1374,7 @@ export class ComboManager {
     this.log.info('Telegram /sellall: all positions sold, bot halted');
 
     const balance = await this.exchange.fetchBalance('USDT');
-    this.tg.sendReply(`/sellall выполнен. USDT: ${balance.total.toFixed(2)}. Бот остановлен.`);
+    this.tg.sendReply(`/sellall выполнен. USDT: ${balance.total.toFixed(2)}. Бот остановлен.\n${HALT_HINT}`);
   }
 
   private async cmdBuy(args: string): Promise<void> {
@@ -1530,6 +1538,32 @@ export class ComboManager {
 
     lines.push(`\nВсего: ${totalOrders} ордеров`);
     this.tg.sendReply(lines.join('\n'));
+  }
+
+  private async cmdCancelOrders(): Promise<void> {
+    let cancelled = 0;
+
+    for (const pair of this.config.pairs) {
+      try {
+        await this.grid.cancelAll(pair.symbol);
+        const orders = await this.exchange.fetchOpenOrders(pair.symbol);
+        cancelled += orders.length === 0 ? 1 : 0;
+        this.log.info(`Telegram /cancelorders: cancelled all for ${pair.symbol}`);
+      } catch (err) {
+        this.log.error(`Cancel orders failed for ${pair.symbol}: ${sanitizeError(err)}`);
+      }
+    }
+
+    // Cancel manual pairs orders too
+    for (const sym of this.state.getManualPairs()) {
+      if (this.config.pairs.some(p => p.symbol === sym)) continue;
+      try {
+        await this.exchange.cancelAllOrders(sym);
+      } catch { /* skip */ }
+    }
+
+    this.state.halted = true;
+    this.tg.sendReply(`Все ордера отменены, grid сброшен. Бот остановлен.\n${HALT_HINT}`);
   }
 
   // ----------------------------------------------------------
