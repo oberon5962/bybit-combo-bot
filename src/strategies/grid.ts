@@ -155,12 +155,14 @@ export class GridStrategy {
           // Fall through to reinitialize below
         } else {
         // Check if price has drifted far from grid center — rebalance if needed
-        // Always use all planned levels for center (set symmetrically at init time).
-        // Using only placed orders would skew center when sells can't be placed (no crypto).
-        const sortedPrices = savedLevels.map(l => l.price).sort((a, b) => a - b);
-        const lowestPrice = sortedPrices[0];
-        const highestPrice = sortedPrices[sortedPrices.length - 1];
-        const gridCenter = (lowestPrice + highestPrice) / 2;
+        // Use saved center price (set at init time). Fallback to level midpoint for migration.
+        let gridCenter = this.state.getGridCenterPrice(symbol);
+        if (gridCenter <= 0) {
+          // Migration: old state without gridCenterPrice — compute from levels
+          const sortedPrices = savedLevels.map(l => l.price).sort((a, b) => a - b);
+          gridCenter = (sortedPrices[0] + sortedPrices[sortedPrices.length - 1]) / 2;
+          this.state.setGridCenterPrice(symbol, gridCenter);
+        }
         const driftPercent = Math.abs(currentPrice - gridCenter) / gridCenter * 100;
 
         if (driftPercent > this.config.rebalancePercent) {
@@ -194,7 +196,7 @@ export class GridStrategy {
     }
 
     const precision = await this.getPrecision(symbol);
-    const { gridLevels, gridSpacingPercent } = this.config;
+    const { gridLevels, gridSpacingPercent, gridSpacingSellPercent } = this.config;
 
     // Bollinger adaptive: shift buy/sell ratio
     const bbAdaptive = this.getBollingerAdaptive(symbol);
@@ -207,21 +209,22 @@ export class GridStrategy {
       this.log.info(`Grid Bollinger adaptive for ${symbol}: ${buyLevels}B/${sellLevels}S (${bbAdaptive.reason})`);
     }
 
-    const spacing = currentPrice * (gridSpacingPercent / 100);
+    const buySpacing = currentPrice * (gridSpacingPercent / 100);
+    const sellSpacing = currentPrice * (gridSpacingSellPercent / 100);
     const levels: GridLevelState[] = [];
     const usedPrices = new Set<number>();
 
     // Buy levels below price
     for (let i = 1; i <= buyLevels; i++) {
-      const price = this.roundPriceForMarket(currentPrice - spacing * i, precision.pricePrecision);
+      const price = this.roundPriceForMarket(currentPrice - buySpacing * i, precision.pricePrecision);
       if (usedPrices.has(price)) continue; // skip duplicate after rounding
       usedPrices.add(price);
       levels.push({ price, side: 'buy', filled: false });
     }
 
-    // Sell levels above price
+    // Sell levels above price (using separate sell spacing)
     for (let i = 1; i <= sellLevels; i++) {
-      const price = this.roundPriceForMarket(currentPrice + spacing * i, precision.pricePrecision);
+      const price = this.roundPriceForMarket(currentPrice + sellSpacing * i, precision.pricePrecision);
       if (usedPrices.has(price)) continue; // skip duplicate after rounding
       usedPrices.add(price);
       levels.push({ price, side: 'sell', filled: false });
@@ -232,10 +235,12 @@ export class GridStrategy {
     // Save to state
     this.state.setGridLevels(symbol, levels);
     this.state.setGridInitialized(symbol, true);
+    this.state.setGridCenterPrice(symbol, currentPrice);
 
     this.log.info(`Grid initialized for ${symbol}`, {
       levels: gridLevels,
-      spacing: `${gridSpacingPercent}%`,
+      buySpacing: `${gridSpacingPercent}%`,
+      sellSpacing: `${gridSpacingSellPercent}%`,
       range: `${levels[0].price} — ${levels[levels.length - 1].price}`,
       currentPrice,
     });
@@ -494,8 +499,9 @@ export class GridStrategy {
           }
 
           // Calculate counter-order from grid level price (maintains consistent spacing)
+          // buy filled → sell counter uses sellSpacing; sell filled → buy counter uses buySpacing
           const rawCounterPrice = filledSide === 'buy'
-            ? filledPrice * (1 + this.config.gridSpacingPercent / 100)
+            ? filledPrice * (1 + this.config.gridSpacingSellPercent / 100)
             : filledPrice * (1 - this.config.gridSpacingPercent / 100);
           const counterPrice = this.roundPriceForMarket(rawCounterPrice, precision.pricePrecision);
           const counterSide: 'buy' | 'sell' = filledSide === 'buy' ? 'sell' : 'buy';
@@ -657,8 +663,8 @@ export class GridStrategy {
           let orphanPlaced = 0;
 
           while (remaining > 0 && orphanPlaced < orphanOrderBudget) {
-            const entryBased = position.avgEntryPrice * (1 + this.config.gridSpacingPercent * priceStep / 100);
-            const priceBased = ticker.last * (1 + this.config.gridSpacingPercent * priceStep / 100);
+            const entryBased = position.avgEntryPrice * (1 + this.config.gridSpacingSellPercent * priceStep / 100);
+            const priceBased = ticker.last * (1 + this.config.gridSpacingSellPercent * priceStep / 100);
             const sellPrice = this.roundPriceForMarket(
               Math.max(entryBased, priceBased),
               precision.pricePrecision,

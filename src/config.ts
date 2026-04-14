@@ -71,7 +71,8 @@ export function loadConfig(): BotConfig {
     grid: {
       enabled: true,
       gridLevels,                    // 10 buy + 10 sell (покрытие ±5% от центра)
-      gridSpacingPercent: 1.2,       // 0.6% между уровнями (маржа 0.4% после комиссий)
+      gridSpacingPercent: 0.6,       // 0.6% между buy-уровнями
+      gridSpacingSellPercent: 1.0,   // 1.2% между sell-уровнями (выше маржа при продаже)
       orderSizePercent: 10,          // Каждый ордер = 10% от аллокации пары
       rebalancePercent: 3,             // Перестроить сетку если цена ушла >3% от центра (~5 из 7 уровней сработают)
       rsiOverboughtThreshold: 70,    // Пропускаем grid-buy при RSI > 70 (100 = отключить)
@@ -202,7 +203,8 @@ function validateConfig(config: BotConfig): void {
 
   // Grid
   if (config.grid.enabled) {
-    if (config.grid.gridSpacingPercent <= 0) errors.push('gridSpacingPercent must be > 0');
+    if (config.grid.gridSpacingPercent <= 0) errors.push('gridSpacingPercent (buy) must be > 0');
+    if (config.grid.gridSpacingSellPercent <= 0) errors.push('gridSpacingSellPercent must be > 0');
     if (config.grid.gridLevels < 2) errors.push('gridLevels must be >= 2');
     if (config.grid.orderSizePercent <= 0) errors.push('grid.orderSizePercent must be > 0');
     if (config.grid.rebalancePercent <= 0 || config.grid.rebalancePercent > 50) errors.push('grid.rebalancePercent must be between 0 and 50');

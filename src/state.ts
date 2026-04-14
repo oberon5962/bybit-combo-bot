@@ -33,6 +33,7 @@ export interface PairState {
   // Grid
   gridLevels: GridLevelState[];
   gridInitialized: boolean;
+  gridCenterPrice: number;    // цена при инициализации сетки (для расчёта drift)
 
   // Position tracking (for stop-loss / take-profit)
   positionAmount: number;     // total crypto held (accumulated from buys, reduced by sells)
@@ -101,6 +102,7 @@ function createEmptyPairState(): PairState {
     dcaTotalBought: 0,
     gridLevels: [],
     gridInitialized: false,
+    gridCenterPrice: 0,
     positionAmount: 0,
     positionCostBasis: 0,
     halted: false,
@@ -166,6 +168,7 @@ export class StateManager {
               dcaTotalBought: typeof pd.dcaTotalBought === 'number' ? pd.dcaTotalBought : 0,
               gridLevels: Array.isArray(pd.gridLevels) ? pd.gridLevels as GridLevelState[] : [],
               gridInitialized: typeof pd.gridInitialized === 'boolean' ? pd.gridInitialized : false,
+              gridCenterPrice: typeof pd.gridCenterPrice === 'number' ? pd.gridCenterPrice : 0,
               positionAmount: typeof pd.positionAmount === 'number' ? pd.positionAmount : 0,
               positionCostBasis: typeof pd.positionCostBasis === 'number' ? pd.positionCostBasis : 0,
               halted: typeof pd.halted === 'boolean' ? pd.halted : false,
@@ -303,6 +306,16 @@ export class StateManager {
   }
   setGridInitialized(symbol: string, val: boolean): void {
     this.getPairState(symbol).gridInitialized = val;
+    if (!val) {
+      this.getPairState(symbol).gridCenterPrice = 0; // сброс центра при деинициализации
+    }
+    this.save();
+  }
+  getGridCenterPrice(symbol: string): number {
+    return this.getPairState(symbol).gridCenterPrice;
+  }
+  setGridCenterPrice(symbol: string, price: number): void {
+    this.getPairState(symbol).gridCenterPrice = price;
     this.save();
   }
 

@@ -108,7 +108,10 @@ export class ExchangeSync {
           adoptedLevels.sort((a, b) => a.price - b.price);
           this.state.setGridLevels(symbol, adoptedLevels);
           this.state.setGridInitialized(symbol, true);
-          this.log.info(`[sync] ${symbol}: adopted ${adoptedLevels.length} orders as grid levels`);
+          // Set center price from adopted levels midpoint (best estimate without original center)
+          const adoptedCenter = (adoptedLevels[0].price + adoptedLevels[adoptedLevels.length - 1].price) / 2;
+          this.state.setGridCenterPrice(symbol, adoptedCenter);
+          this.log.info(`[sync] ${symbol}: adopted ${adoptedLevels.length} orders as grid levels (center: ${adoptedCenter.toFixed(4)})`);
         } else {
           this.log.info(`[sync] ${symbol}: no saved grid levels, no orders on exchange`);
         }
@@ -148,11 +151,11 @@ export class ExchangeSync {
                   strategy: 'grid-sync',
                 });
                 // Flip level to counter-side so grid places counter-order on next tick
-                const gridSpacingPercent = this.config.grid.gridSpacingPercent;
+                // buy filled → sell counter uses sellSpacing; sell filled → buy counter uses buySpacing
                 const counterSide: 'buy' | 'sell' = level.side === 'buy' ? 'sell' : 'buy';
                 const rawCounterPrice = level.side === 'buy'
-                  ? fillPrice * (1 + gridSpacingPercent / 100)
-                  : fillPrice * (1 - gridSpacingPercent / 100);
+                  ? fillPrice * (1 + this.config.grid.gridSpacingSellPercent / 100)
+                  : fillPrice * (1 - this.config.grid.gridSpacingPercent / 100);
                 // Round to market precision (same as grid.ts) to avoid Bybit rejection
                 const pricePrecision = (await this.exchange.getMarketPrecision(symbol)).pricePrecision;
                 const factor = Math.pow(10, pricePrecision);

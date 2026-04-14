@@ -56,7 +56,8 @@ export interface RiskConfig {
 export interface GridConfig {
   enabled: boolean;
   gridLevels: number;           // number of grid lines
-  gridSpacingPercent: number;   // distance between levels as % of price
+  gridSpacingPercent: number;   // distance between BUY levels as % of price
+  gridSpacingSellPercent: number; // distance between SELL levels as % of price (can differ from buy)
   orderSizePercent: number;     // % of pair allocation per grid order
   rebalancePercent: number;         // rebalance grid when price drifts > X% from center
   rsiOverboughtThreshold: number; // skip grid buy when RSI > this (e.g. 70)
