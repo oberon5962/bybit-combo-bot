@@ -57,7 +57,7 @@ export function loadConfig(): BotConfig {
                                       // Было 200 USDT → стало 400 USDT → продаём все монеты
 
       // Cooldown после StopLess (SL): пауза 2 часа, после 3  подряд — полный halt
-      cooldownAfterSLSec: 2 * 60 * 60,  // 2 часа пауза после SL
+      cooldownAfterSLSec: 30 * 60,       // 30 минут пауза после SL
       cooldownMaxSL: 3,                  // 3 SL подряд → halt до ручного вмешательства
 
       // Trailing SL: SL двигается вверх за ценой
@@ -73,7 +73,7 @@ export function loadConfig(): BotConfig {
       gridLevels,                    // 10 buy + 10 sell (покрытие ±5% от центра)
       gridSpacingPercent: 0.5,       // 0.5% между уровнями (покрытие 5% в каждую сторону)
       orderSizePercent: 10,          // Каждый ордер = 10% от аллокации пары
-      rebalancePercent: 2,           // Перестроить сетку если цена ушла >2% от центра (вверх или вниз)
+      rebalancePercent: 1.5,           // Перестроить сетку если цена ушла >1.5% от центра (вверх или вниз)
       rsiOverboughtThreshold: 70,    // Пропускаем grid-buy при RSI > 70 (100 = отключить)
       useEmaFilter: false,           // Отключен: grid торгует всегда, RSI overbought (70) остаётся как защита
 
@@ -81,7 +81,7 @@ export function loadConfig(): BotConfig {
       // Когда цена у нижней полосы — больше buy уровней + увеличенный orderSize
       // Когда цена у верхней полосы + EMA bearish — больше sell уровней + увеличенный orderSize
       // Когда цена у верхней полосы + EMA bullish — не усиливаем sell (тренд сильный)
-      useBollingerAdaptive: false,
+      useBollingerAdaptive: true,
       bollingerBuyMultiplier: 1.5,   // orderSize * 1.5 при покупке у нижней полосы
       bollingerSellMultiplier: 1.5,  // orderSize * 1.5 при продаже у верхней полосы (только EMA bearish)
       bollingerShiftLevels: 2,       // перекинуть 2 уровня: напр. 7/7 → 9/5 buy/sell (или 5/9)
@@ -124,7 +124,7 @@ export function loadConfig(): BotConfig {
     // Meta-Signal — комбинированные сигналы индикаторов
     // -------------------------------------------------------
     metaSignal: {
-      enabled: false,                // false = отключить meta-signal (рыночные ордера по RSI+BB+EMA)
+      enabled: true,                // false = отключить meta-signal (рыночные ордера по RSI+BB+EMA)
       buyRsiThreshold: 35,           // покупка при RSI < 35 + цена ниже BB middle
       strongBuyRsiThreshold: 25,     // сильная покупка при RSI < 25 + bullish EMA + ниже BB lower
       sellRsiThreshold: 75,          // продажа при RSI > 70 + цена выше BB upper
@@ -137,9 +137,9 @@ export function loadConfig(): BotConfig {
     // Market Protection — защита от рыночной паники
     // -------------------------------------------------------
     marketProtection: {
-      panicBearishPairsThreshold: 3,   // 3 из 3 пар bearish → паника (999 = отключить)
+      panicBearishPairsThreshold: 999,  // У сколько пар должно быть bearish одновременно, при 999 отключено
       btcWatchdogEnabled: true,         // следить за BTC как индикатором рынка (false = отключить)
-      btcDropThresholdPercent: 3,       // BTC упал на 3% за час → пауза покупок
+      btcDropThresholdPercent: 3,       // BTC упал на 3% за час → пауза покупок пока btc не устаканится
       btcCheckIntervalSec: 300,         // проверять BTC каждые 5 минут
     },
 

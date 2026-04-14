@@ -155,8 +155,15 @@ export class GridStrategy {
           // Fall through to reinitialize below
         } else {
         // Check if price has drifted far from grid center — rebalance if needed
-        const lowestPrice = savedLevels[0].price;
-        const highestPrice = savedLevels[savedLevels.length - 1].price;
+        // Use placed orders for center, but only if both sides exist.
+        // If only one side placed (e.g. no crypto for sells), use all planned levels
+        // to avoid infinite rebalance loop.
+        const placedLevels = savedLevels.filter(l => l.orderId && !l.filled);
+        const hasBothSides = placedLevels.some(l => l.side === 'buy') && placedLevels.some(l => l.side === 'sell');
+        const levelsForCenter = (hasBothSides && placedLevels.length >= 2) ? placedLevels : savedLevels;
+        const sortedPrices = levelsForCenter.map(l => l.price).sort((a, b) => a - b);
+        const lowestPrice = sortedPrices[0];
+        const highestPrice = sortedPrices[sortedPrices.length - 1];
         const gridCenter = (lowestPrice + highestPrice) / 2;
         const driftPercent = Math.abs(currentPrice - gridCenter) / gridCenter * 100;
 
