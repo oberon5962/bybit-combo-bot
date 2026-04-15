@@ -140,6 +140,66 @@ npx ts-node register-commands.ts
 ```
 После этого в Telegram при нажатии `/` появится меню с описанием всех команд.
 
+### Telegram через прокси (Custom API URL)
+
+Если `api.telegram.org` недоступен или нестабилен, бот поддерживает custom API endpoint через параметр `telegramApiUrl` в `config.jsonc`:
+
+```jsonc
+"telegram": {
+  "telegramApiUrl": "https://your-worker.your-name.workers.dev",
+  // ...остальные параметры
+}
+```
+
+При пустом значении или отсутствии параметра используется стандартный `api.telegram.org`.
+
+**Бесплатный relay через Cloudflare Worker (рекомендуется):**
+
+1. Зарегистрироваться на [Cloudflare Workers](https://workers.cloudflare.com/) (бесплатно)
+2. Создать новый Worker → вставить код:
+
+```javascript
+export default {
+  async fetch(request) {
+    const url = new URL(request.url);
+    url.hostname = 'api.telegram.org';
+    url.port = '';
+    url.protocol = 'https:';
+    const newRequest = new Request(url.toString(), {
+      method: request.method,
+      headers: request.headers,
+      body: request.body,
+    });
+    return fetch(newRequest);
+  },
+};
+```
+
+3. Deploy → скопировать URL воркера (вида `https://tg-relay.username.workers.dev`)
+4. Вписать URL в `config.jsonc` → `telegram.telegramApiUrl`
+
+**Пошагово (5 минут):**
+
+1. Открыть https://workers.cloudflare.com/
+2. Нажать **Sign Up** → регистрация через email (бесплатно, карта не нужна)
+3. В Dashboard нажать **Workers & Pages** → **Create** → **Create Worker**
+4. Дать имя (например `tg-relay`) → нажать **Deploy**
+5. Нажать **Edit Code** → стереть всё → вставить код выше → нажать **Deploy**
+6. Скопировать URL вида `https://tg-relay.username.workers.dev`
+
+**Лимиты бесплатного тарифа Cloudflare Workers:** 100,000 запросов/день. Боту нужно ~200-500 запросов/день — хватает с огромным запасом.
+
+**Также поддерживается HTTP/SOCKS5 прокси** через параметр `proxyUrl`:
+
+```jsonc
+"telegram": {
+  "proxyUrl": "socks5://host:port",
+  // или "proxyUrl": "http://host:port",
+}
+```
+
+> **Примечание:** MTProxy (`tg://proxy?...`) НЕ совместим с Bot API. MTProxy работает только с клиентами Telegram (мобильные/десктоп приложения) на уровне протокола MTProto. Для Bot API нужен HTTP/SOCKS5 прокси или custom API URL.
+
 ## Торговая стратегия
 
 ### 1. Grid (сеточная торговля)

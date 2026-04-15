@@ -97,7 +97,7 @@
     "sendFills": true,                  // Уведомления о сделках
     "sendAlerts": true,                 // Алерты: SL/TP/halt/panic
     "summaryIntervalTicks": 60,         // Summary раз в 60 тиков (~10 мин)
-    "commandPollIntervalTicks": 1,      // Проверять Telegram-команды каждый тик (0 = выкл)
+    "commandPollIntervalTicks": 3,      // Проверять Telegram-команды каждый тик (0 = выкл)
     "confirmationTimeoutSec": 60        // Таймаут подтверждения команды в секундах (0 = без таймаута)
   },
 
