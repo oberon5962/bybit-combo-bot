@@ -4,12 +4,12 @@
   // ============================================================
   // gridSpacingPercent / gridSpacingSellPercent — опционально для каждой пары (иначе берётся из grid.gridSpacingPercent)
   "pairs": [
-    { "symbol": "DOT/USDT", "allocationPercent": 17, "gridSpacingPercent": 1.0, "gridSpacingSellPercent": 1.4 },
-    { "symbol": "NEAR/USDT", "allocationPercent": 17, "gridSpacingPercent": 1.0, "gridSpacingSellPercent": 1.4 },
-    { "symbol": "ADA/USDT", "allocationPercent": 16, "gridSpacingPercent": 0.8, "gridSpacingSellPercent": 1.2 },
-    { "symbol": "SUI/USDT", "allocationPercent": 17, "gridSpacingPercent": 1.0, "gridSpacingSellPercent": 1.4 },
-    { "symbol": "SOL/USDT", "allocationPercent": 17, "gridSpacingPercent": 0.7, "gridSpacingSellPercent": 1.0 },
-    { "symbol": "XRP/USDT", "allocationPercent": 16, "gridSpacingPercent": 0.6, "gridSpacingSellPercent": 0.9 }
+    { "symbol": "DOT/USDT", "allocationPercent": 17, "gridSpacingPercent": 1.36, "gridSpacingSellPercent": 1.67 },
+    { "symbol": "NEAR/USDT", "allocationPercent": 17, "gridSpacingPercent": 1.2, "gridSpacingSellPercent": 1.5 },
+    { "symbol": "ADA/USDT", "allocationPercent": 16, "gridSpacingPercent": 1.03, "gridSpacingSellPercent": 1.33 },
+    { "symbol": "SUI/USDT", "allocationPercent": 17, "gridSpacingPercent": 1.13, "gridSpacingSellPercent": 1.43 },
+    { "symbol": "SOL/USDT", "allocationPercent": 17, "gridSpacingPercent": 0.77, "gridSpacingSellPercent": 1.08 },
+    { "symbol": "XRP/USDT", "allocationPercent": 16, "gridSpacingPercent": 0.77, "gridSpacingSellPercent": 1.07 }
   ],
 
   // ============================================================
@@ -41,7 +41,15 @@
     "useBollingerAdaptive": true,       // Адаптивный grid по Bollinger Bands
     "bollingerBuyMultiplier": 1.5,      // orderSize * 1.5 при покупке у нижней полосы BB
     "bollingerSellMultiplier": 1.5,     // orderSize * 1.5 при продаже у верхней полосы BB
-    "bollingerShiftLevels": 2           // Перекинуть 2 уровня в пользу buy/sell по BB
+    "bollingerShiftLevels": 2,          // Перекинуть 2 уровня в пользу buy/sell по BB
+
+    // Auto-adaptive spacing (на основе статистики волатильности)
+    "autoSpacingIntervalMin": 360,         // Как часто пересчитывать в минутах (360 = каждые 6ч)
+    "autoSpacingSafetyMarginPercent": 10,  // Коэффициент недоверия — вычитать 10% из расчётных значений статистики волатильности
+    // "off"    — выключено, не считает, не тратит API
+    // "config" — считает и пишет в лог/Telegram для сравнения, торгует по config
+    // "auto"   — считает и применяет к торговле
+    "autoSpacingPriority": "auto"
   },
 
   // ============================================================
@@ -108,6 +116,6 @@
   // Bot Intervals — интервалы работы
   // ============================================================
   "tickIntervalSec": 10,               // Основной цикл бота (10 сек, НЕ hot-reload)
-  "syncIntervalSec": 21600,            // Sync с Bybit каждые 6 часов (НЕ hot-reload)
+  "syncIntervalSec": 21600,            // Sync с Bybit каждые 6 часов ( 0 = выкл)
   "configReloadIntervalTicks": 6        // Перечитывать config.json каждые 6 тиков (0 = выкл, проверка раз в 5 мин)
 }

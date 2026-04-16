@@ -22,6 +22,7 @@ export class GridStrategy {
   private lastSkipSummary: Map<string, string> = new Map(); // suppress repeated skip logs
   private lastRebalanceTime: Map<string, number> = new Map(); // cooldown between rebalances
   private _marketProtectionActive: boolean = false;
+  private autoSpacingMap: Map<string, { buy: number; sell: number }> = new Map();
 
   private maxOpenOrdersPerPair: number;
 
@@ -36,13 +37,50 @@ export class GridStrategy {
 
   /** Hot-reload: обновить конфиг без перестроения сетки. Новые параметры применятся к новым ордерам. */
   updateConfig(config: BotConfig): void {
+    const wasAutoOn = this.config.autoSpacingPriority !== 'off';
     this.config = config.grid;
     this.pairsConfig = config.pairs;
     this.maxOpenOrdersPerPair = config.risk.maxOpenOrdersPerPair;
+    // При отключении autoSpacing — очистить auto-значения, вернуться к config
+    if (wasAutoOn && config.grid.autoSpacingPriority === 'off') {
+      this.autoSpacingMap.clear();
+    }
   }
 
-  /** Get grid spacing for a symbol: per-pair override or global fallback */
+  /** Установить auto-spacing значения из volatility analysis */
+  setAutoSpacing(spacingMap: Map<string, { buy: number; sell: number }>): void {
+    this.autoSpacingMap = spacingMap;
+  }
+
+  /** Очистить auto-spacing (revert к config-значениям) */
+  clearAutoSpacing(): void {
+    this.autoSpacingMap.clear();
+  }
+
+  /** Публичный доступ к spacing для sync.ts */
+  getSpacingPublic(symbol: string): { buySpacingPct: number; sellSpacingPct: number } {
+    return this.getSpacing(symbol);
+  }
+
+  /** Принудительный ребаланс всех пар на следующем тике (сброс center → drift 100%) */
+  forceRebalanceAll(): void {
+    for (const pair of this.pairsConfig) {
+      if (this.state.isGridInitialized(pair.symbol)) {
+        this.state.setGridCenterPrice(pair.symbol, 0);
+      }
+    }
+  }
+
+  /** Get grid spacing for a symbol: auto-spacing → per-pair override → global fallback */
   private getSpacing(symbol: string): { buySpacingPct: number; sellSpacingPct: number } {
+    // Auto-spacing приоритет (если включено и priority=auto и есть данные)
+    if (this.config.autoSpacingPriority === 'auto') {
+      const auto = this.autoSpacingMap.get(symbol);
+      if (auto) {
+        return { buySpacingPct: auto.buy, sellSpacingPct: auto.sell };
+      }
+    }
+    // Fallback: per-pair config → global config
     const pair = this.pairsConfig.find(p => p.symbol === symbol);
     return {
       buySpacingPct: pair?.gridSpacingPercent ?? this.config.gridSpacingPercent,
@@ -176,11 +214,18 @@ export class GridStrategy {
         // Use saved center price (set at init time). Fallback to level midpoint for migration.
         let gridCenter = this.state.getGridCenterPrice(symbol);
         if (gridCenter <= 0) {
-          // Migration: old state without gridCenterPrice — compute from levels
-          const sortedPrices = savedLevels.map(l => l.price).sort((a, b) => a - b);
-          gridCenter = (sortedPrices[0] + sortedPrices[sortedPrices.length - 1]) / 2;
-          this.state.setGridCenterPrice(symbol, gridCenter);
-        }
+          // center=0: либо forceRebalanceAll(), либо миграция старого state
+          if (savedLevels.length > 0) {
+            const sortedPrices = savedLevels.map(l => l.price).sort((a, b) => a - b);
+            gridCenter = (sortedPrices[0] + sortedPrices[sortedPrices.length - 1]) / 2;
+          }
+          if (gridCenter <= 0) gridCenter = currentPrice;
+          // Принудительный ребаланс — отменить все и перестроить
+          this.log.info(`Grid force-rebalance for ${symbol}: center was reset`);
+          this.lastRebalanceTime.set(symbol, Date.now());
+          await this.cancelAll(symbol);
+          // Fall through to reinitialize below
+        } else {
         const driftPercent = Math.abs(currentPrice - gridCenter) / gridCenter * 100;
 
         if (driftPercent > this.config.rebalancePercent) {
@@ -209,6 +254,7 @@ export class GridStrategy {
           }
           return false;
         }
+        } // end of drift check else
         } // end of level count check else
       }
     }
@@ -238,7 +284,7 @@ export class GridStrategy {
       const price = this.roundPriceForMarket(currentPrice - buySpacing * i, precision.pricePrecision);
       if (usedPrices.has(price)) continue; // skip duplicate after rounding
       usedPrices.add(price);
-      levels.push({ price, side: 'buy', filled: false });
+      levels.push({ price, amount: 0, side: 'buy', filled: false }); // amount заполнится в placeGridOrders()
     }
 
     // Sell levels above price (using separate sell spacing)
@@ -246,7 +292,7 @@ export class GridStrategy {
       const price = this.roundPriceForMarket(currentPrice + sellSpacing * i, precision.pricePrecision);
       if (usedPrices.has(price)) continue; // skip duplicate after rounding
       usedPrices.add(price);
-      levels.push({ price, side: 'sell', filled: false });
+      levels.push({ price, amount: 0, side: 'sell', filled: false }); // amount заполнится в placeGridOrders()
     }
 
     levels.sort((a, b) => a.price - b.price);
@@ -361,6 +407,7 @@ export class GridStrategy {
             `Grid buy ${symbol} @ ${level.price}`,
           );
           level.orderId = order.id;
+          level.amount = amount;
           freeUSDT -= orderCost;
           ordersPlaced++;
         } else if (level.side === 'sell' && level.price > currentPrice) {
@@ -374,6 +421,7 @@ export class GridStrategy {
             `Grid sell ${symbol} @ ${level.price}`,
           );
           level.orderId = order.id;
+          level.amount = amount;
           // Subtract placed amount from tracked free balance (for subsequent sell levels)
           freeCrypto -= amount;
           ordersPlaced++;
@@ -602,6 +650,7 @@ export class GridStrategy {
 
             // Only update level state AFTER counter-order confirmed placed
             level.orderId = counterOrderId;
+            level.amount = counterAmount;
             level.filled = false;
             level.side = counterSide;
             level.price = counterPrice;
@@ -626,6 +675,7 @@ export class GridStrategy {
           if (isPartialFill) {
             const remainingLevel: GridLevelState = {
               price: filledPrice,
+              amount: orderInfo.remaining ?? 0,
               side: filledSide,
               orderId: undefined,
               filled: false,
@@ -710,7 +760,7 @@ export class GridStrategy {
               () => this.exchange.createLimitSell(symbol, sellAmount, sellPrice, 'grid'),
               `Grid orphan-sell ${symbol} @ ${sellPrice}`,
             );
-            levels.push({ price: sellPrice, side: 'sell', orderId: order.id, filled: false });
+            levels.push({ price: sellPrice, amount: sellAmount, side: 'sell', orderId: order.id, filled: false });
             orphanPlaced++;
             this.log.info(`Grid orphan-sell placed for ${symbol}: ${sellAmount} @ ${sellPrice} (uncovered position)`);
             remaining -= sellAmount;

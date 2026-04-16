@@ -57,6 +57,13 @@ export class ExchangeSync {
     this.config = config;
   }
 
+  /** Callback для получения актуального spacing (учитывает auto-spacing) */
+  private spacingResolver?: (symbol: string) => { buySpacingPct: number; sellSpacingPct: number };
+
+  setSpacingResolver(fn: (symbol: string) => { buySpacingPct: number; sellSpacingPct: number }): void {
+    this.spacingResolver = fn;
+  }
+
   // ----------------------------------------------------------
   // Full sync on startup
   // ----------------------------------------------------------
@@ -106,6 +113,7 @@ export class ExchangeSync {
           this.log.info(`[sync] ${symbol}: no saved grid levels, adopting ${exchangeOrders.length} orders from Bybit`);
           const adoptedLevels = exchangeOrders.map((o) => ({
             price: o.price,
+            amount: o.amount ?? 0,
             side: o.side as 'buy' | 'sell',
             orderId: o.id,
             filled: false,
@@ -158,9 +166,21 @@ export class ExchangeSync {
                 // Flip level to counter-side so grid places counter-order on next tick
                 // buy filled → sell counter uses sellSpacing; sell filled → buy counter uses buySpacing
                 const counterSide: 'buy' | 'sell' = level.side === 'buy' ? 'sell' : 'buy';
+                // Spacing: через resolver (учитывает auto-spacing) или fallback на config
                 const pairCfg = this.config.pairs.find(p => p.symbol === symbol);
-                const syncBuyPct = pairCfg?.gridSpacingPercent ?? this.config.grid.gridSpacingPercent;
-                const syncSellPct = pairCfg?.gridSpacingSellPercent ?? this.config.grid.gridSpacingSellPercent;
+                const fallbackBuy = pairCfg?.gridSpacingPercent ?? this.config.grid.gridSpacingPercent;
+                const fallbackSell = pairCfg?.gridSpacingSellPercent ?? this.config.grid.gridSpacingSellPercent;
+                let syncBuyPct = fallbackBuy;
+                let syncSellPct = fallbackSell;
+                if (this.spacingResolver) {
+                  try {
+                    const spacing = this.spacingResolver(symbol);
+                    if (spacing && spacing.buySpacingPct > 0 && spacing.sellSpacingPct > 0) {
+                      syncBuyPct = spacing.buySpacingPct;
+                      syncSellPct = spacing.sellSpacingPct;
+                    }
+                  } catch { /* fallback to config values */ }
+                }
                 const rawCounterPrice = level.side === 'buy'
                   ? fillPrice * (1 + syncSellPct / 100)
                   : fillPrice * (1 - syncBuyPct / 100);
@@ -207,6 +227,7 @@ export class ExchangeSync {
             // No matching level — add as new level
             savedLevels.push({
               price: o.price,
+              amount: o.amount ?? 0,
               side: o.side as 'buy' | 'sell',
               orderId: o.id,
               filled: false,

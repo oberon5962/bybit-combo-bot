@@ -77,6 +77,9 @@ export function loadConfig(): BotConfig {
       bollingerBuyMultiplier: json.grid?.bollingerBuyMultiplier ?? defaultNum,
       bollingerSellMultiplier: json.grid?.bollingerSellMultiplier ?? defaultNum,
       bollingerShiftLevels: json.grid?.bollingerShiftLevels ?? defaultNum,
+      autoSpacingIntervalMin: json.grid?.autoSpacingIntervalMin ?? defaultNum,
+      autoSpacingSafetyMarginPercent: json.grid?.autoSpacingSafetyMarginPercent ?? defaultNum,
+      autoSpacingPriority: json.grid?.autoSpacingPriority ?? 'off',
     },
 
     dca: {
@@ -208,6 +211,18 @@ function validateConfig(config: BotConfig): void {
       }
       if (config.grid.bollingerShiftLevels < 0 || config.grid.bollingerShiftLevels > Math.floor(config.grid.gridLevels / 2)) {
         errors.push(`bollingerShiftLevels must be between 0 and ${Math.floor(config.grid.gridLevels / 2)}`);
+      }
+    }
+    // Auto-spacing validation (always, even when off — user may switch to auto via hot-reload)
+    if (!['off', 'config', 'auto'].includes(config.grid.autoSpacingPriority)) {
+      errors.push('autoSpacingPriority must be "off", "config" or "auto"');
+    }
+    if (config.grid.autoSpacingPriority !== 'off') {
+      if (config.grid.autoSpacingIntervalMin <= 0 || config.grid.autoSpacingIntervalMin > 2880) {
+        errors.push('autoSpacingIntervalMin must be between 1 and 2880 (48h)');
+      }
+      if (config.grid.autoSpacingSafetyMarginPercent < 0 || config.grid.autoSpacingSafetyMarginPercent > 50) {
+        errors.push('autoSpacingSafetyMarginPercent must be between 0 and 50');
       }
     }
   }

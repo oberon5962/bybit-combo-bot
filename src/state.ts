@@ -19,6 +19,7 @@ const STATE_FILE = path.join(process.cwd(), 'bot-state.json');
 
 export interface GridLevelState {
   price: number;
+  amount: number;        // количество монет в ордере
   side: 'buy' | 'sell';
   orderId?: string;
   filled: boolean;

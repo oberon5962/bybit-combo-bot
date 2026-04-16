@@ -101,10 +101,11 @@ async function main(): Promise<void> {
     const tickStart = Date.now();
 
     try {
-      // Periodic sync with exchange
-      if (config.syncIntervalSec > 0) {
+      // Periodic sync with exchange (reads hot-reloaded config)
+      const currentSyncInterval = manager.getConfig().syncIntervalSec;
+      if (currentSyncInterval > 0) {
         const timeSinceSync = (Date.now() - lastSyncTime) / 1000;
-        if (timeSinceSync >= config.syncIntervalSec) {
+        if (timeSinceSync >= currentSyncInterval) {
           log.info('Periodic sync with Bybit...');
           await sync.syncOnStartup();
           lastSyncTime = Date.now();

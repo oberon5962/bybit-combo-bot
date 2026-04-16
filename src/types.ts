@@ -76,6 +76,11 @@ export interface GridConfig {
   bollingerBuyMultiplier: number;   // множитель orderSize при цене у нижней полосы (напр. 1.5)
   bollingerSellMultiplier: number;  // множитель orderSize при цене у верхней полосы (напр. 1.5)
   bollingerShiftLevels: number;     // сколько уровней перекинуть в пользу buy/sell (напр. 3)
+
+  // Auto-adaptive spacing (на основе волатильности)
+  autoSpacingIntervalMin: number;          // как часто пересчитывать (минуты, напр. 360 = каждые 6ч)
+  autoSpacingSafetyMarginPercent: number; // коэффициент недоверия — вычитать N% из расчётных значений
+  autoSpacingPriority: 'off' | 'config' | 'auto'; // "off" = выключено, "config" = считать но не применять, "auto" = применять
 }
 
 export interface DCAConfig {

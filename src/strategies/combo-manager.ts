@@ -14,6 +14,8 @@ import { DCAStrategy } from './dca';
 import { StateManager } from '../state';
 import { TelegramNotifier, TelegramCommand } from '../telegram';
 import { ExchangeSync } from '../sync';
+import { analyzeAllSymbols, round as volRound, FEE_ROUND_TRIP_PCT as VOL_FEE } from '../volatility';
+import type { CandleFetcher } from '../volatility';
 import { createHash } from 'crypto';
 import { readFileSync } from 'fs';
 import { resolve } from 'path';
@@ -40,6 +42,10 @@ export class ComboManager {
   private ticksSinceConfigReload: number = 0;
   private lastConfigHash: string = '';
   private ticksSinceCommandPoll: number = 0;
+  private lastAutoSpacingRun: number = 0;
+  private autoSpacingRunning: boolean = false;
+  private autoSpacingFirstDone: boolean = false;
+  private autoSpacingMap: Map<string, { buy: number; sell: number }> = new Map();
 
   constructor(config: BotConfig, exchange: BybitExchange, log: Logger, state: StateManager) {
     this.config = config;
@@ -51,8 +57,14 @@ export class ComboManager {
     this.tg = new TelegramNotifier(config.telegram, log);
   }
 
+  /** Get current (hot-reloaded) config */
+  getConfig(): BotConfig { return this.config; }
+
   /** Link ExchangeSync so it gets updated on hot-reload */
-  setSync(sync: ExchangeSync): void { this.sync = sync; }
+  setSync(sync: ExchangeSync): void {
+    this.sync = sync;
+    sync.setSpacingResolver((symbol) => this.grid.getSpacingPublic(symbol));
+  }
 
   // ----------------------------------------------------------
   // Initialize
@@ -129,6 +141,82 @@ export class ComboManager {
   }
 
   // ----------------------------------------------------------
+  // Auto-spacing: volatility-based grid spacing recalculation
+  // ----------------------------------------------------------
+
+  private async runAutoSpacing(): Promise<void> {
+    if (this.autoSpacingRunning) return;
+    this.autoSpacingRunning = true;
+    this.lastAutoSpacingRun = Date.now();
+
+    this.log.info('Auto-spacing: starting volatility analysis...');
+
+    try {
+      const symbols = this.config.pairs.map(p => p.symbol);
+      const fetcher: CandleFetcher = (symbol, tf, since, limit) =>
+        this.exchange.fetchOHLCVRaw(symbol, tf, since, limit);
+
+      const results = await analyzeAllSymbols(fetcher, symbols, (sym, done, total) => {
+        this.log.debug(`Auto-spacing: ${sym} (${done}/${total})`);
+      });
+
+      const safetyMultiplier = 1 - (this.config.grid.autoSpacingSafetyMarginPercent / 100);
+      const newMap = new Map<string, { buy: number; sell: number }>();
+      const logLines: string[] = [];
+      const tgLines: string[] = [];
+
+      for (const r of results) {
+        let buy = volRound(r.buySpacing * safetyMultiplier, 2);
+        let sell = volRound(r.sellSpacing * safetyMultiplier, 2);
+
+        // Floor: never below fee round-trip
+        buy = Math.max(buy, VOL_FEE);
+        sell = volRound(Math.max(sell, buy + VOL_FEE), 2);
+
+        newMap.set(r.symbol, { buy, sell });
+
+        const pair = this.config.pairs.find(p => p.symbol === r.symbol);
+        const cfgBuy = pair?.gridSpacingPercent ?? this.config.grid.gridSpacingPercent;
+        const cfgSell = pair?.gridSpacingSellPercent ?? this.config.grid.gridSpacingSellPercent;
+        const active = this.config.grid.autoSpacingPriority === 'auto' ? 'AUTO' : 'CFG';
+
+        logLines.push(`  ${r.symbol}: auto=${buy}%/${sell}% cfg=${cfgBuy}%/${cfgSell}% regime=${r.regime} [${active}]`);
+        tgLines.push(`${r.symbol}: ${buy}%/${sell}% (${r.regime})`);
+      }
+
+      this.autoSpacingMap = newMap;
+      // Если auto-spacing был отключён во время анализа — не применяем результат
+      if (this.config.grid.autoSpacingPriority === 'off') {
+        this.log.info('Auto-spacing completed but was disabled during analysis — result not applied');
+        return;
+      }
+      this.grid.setAutoSpacing(newMap);
+
+      // Первый расчёт после старта + priority=auto → принудительный ребаланс всех пар
+      if (!this.autoSpacingFirstDone && this.config.grid.autoSpacingPriority === 'auto') {
+        this.grid.forceRebalanceAll();
+        this.log.info('Auto-spacing: force-rebalancing all pairs with new values');
+      }
+      this.autoSpacingFirstDone = true;
+
+      const margin = this.config.grid.autoSpacingSafetyMarginPercent;
+      this.log.info(`Auto-spacing done (${results.length} pairs, margin=${margin}%):\n${logLines.join('\n')}`);
+
+      // Telegram
+      const priority = this.config.grid.autoSpacingPriority.toUpperCase();
+      this.tg.sendAlert(
+        `📊 <b>Auto-spacing</b> (margin=${margin}%)\n` +
+        tgLines.join('\n') +
+        `\nPriority: <b>${priority}</b>`,
+      );
+    } catch (err) {
+      this.log.error(`Auto-spacing error (keeping previous values): ${sanitizeError(err)}`);
+    } finally {
+      this.autoSpacingRunning = false;
+    }
+  }
+
+  // ----------------------------------------------------------
   // Main tick
   // ----------------------------------------------------------
 
@@ -168,10 +256,33 @@ export class ComboManager {
           this.dca.updateConfig(newConfig);
           this.tg.updateConfig(newConfig.telegram);
           if (this.sync) this.sync.updateConfig(newConfig);
+
+          // Hot-reload: обработка auto-spacing изменений
+          if (newConfig.grid.autoSpacingPriority === 'off' && this.autoSpacingMap.size > 0) {
+            this.autoSpacingMap.clear();
+            this.grid.clearAutoSpacing();
+            this.log.info('Auto-spacing disabled — reverting to config values');
+          }
+          if (newConfig.grid.autoSpacingPriority !== 'off' && this.autoSpacingMap.size > 0) {
+            this.grid.setAutoSpacing(this.autoSpacingMap);
+            this.log.info(`Auto-spacing map applied to grid (${this.autoSpacingMap.size} pairs, priority=${newConfig.grid.autoSpacingPriority})`);
+          }
+
           this.log.info('Config reloaded from config.jsonc');
         }
       } catch (err) {
         this.log.error(`Config reload failed (keeping previous config): ${sanitizeError(err)}`);
+      }
+    }
+
+    // Auto-spacing: всегда fire-and-forget (не блокирует торговлю)
+    if (this.config.grid.autoSpacingPriority !== 'off' && !this.autoSpacingRunning) {
+      const intervalMs = this.config.grid.autoSpacingIntervalMin * 60 * 1000;
+      if (this.lastAutoSpacingRun === 0 || Date.now() - this.lastAutoSpacingRun >= intervalMs) {
+        this.runAutoSpacing().catch(err => {
+          this.log.error(`Auto-spacing background error: ${sanitizeError(err)}`);
+          this.autoSpacingRunning = false;
+        });
       }
     }
 
@@ -1205,15 +1316,21 @@ export class ComboManager {
       // Telegram per-pair
       const tgPairParts: string[] = [];
       tgPairParts.push(`<b>${sym}</b> (${pairBuys.length}B/${pairSells.length}S)`);
-      if (buyPrices.length > 0) {
-        tgPairParts.push(`${activeBuys.length}B [${buyPrices[0].toFixed(4)}-${buyPrices[buyPrices.length - 1].toFixed(4)}]`);
+      if (activeBuys.length > 0) {
+        const buyCost = activeBuys.reduce((s, l) => s + l.price * l.amount, 0).toFixed(2);
+        tgPairParts.push(`${activeBuys.length}B [${buyCost}$]`);
       }
       if (activeSells.length > 0 || pendingSells.length > 0) {
-        const sellParts: string[] = [];
-        if (activeSells.length > 0) sellParts.push(`${activeSells.length}S`);
-        if (pendingSells.length > 0) sellParts.push(`${pendingSells.length}Pend`);
-        const priceRange = sellPrices.length > 0 ? ` [${sellPrices[0].toFixed(4)}-${sellPrices[sellPrices.length - 1].toFixed(4)}]` : '';
-        tgPairParts.push(`${sellParts.join(' + ')}${priceRange}`);
+        const parts: string[] = [];
+        if (activeSells.length > 0) {
+          const activeCost = activeSells.reduce((s, l) => s + l.price * l.amount, 0).toFixed(2);
+          parts.push(`${activeSells.length}S [${activeCost}$]`);
+        }
+        if (pendingSells.length > 0) {
+          const pendCost = pendingSells.reduce((s, l) => s + l.price * l.amount, 0).toFixed(2);
+          parts.push(`${pendingSells.length}Pend [${pendCost}$]`);
+        }
+        tgPairParts.push(parts.join(' + '));
       }
       // center removed from telegram per user request
       if (slTrades.length > 0) tgPairParts.push(`SL: ${slTrades.length}x`);

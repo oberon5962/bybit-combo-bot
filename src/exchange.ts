@@ -64,6 +64,17 @@ export class BybitExchange {
     }));
   }
 
+  // Raw OHLCV for volatility analysis (returns number[][] for CandleFetcher compatibility)
+  async fetchOHLCVRaw(
+    symbol: string,
+    timeframe: string,
+    since: number,
+    limit: number,
+  ): Promise<number[][]> {
+    const raw = await this.exchange.fetchOHLCV(symbol, timeframe, since, limit);
+    return raw as unknown as number[][];
+  }
+
   // ----------------------------------------------------------
   // Account
   // ----------------------------------------------------------
