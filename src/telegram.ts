@@ -25,15 +25,35 @@ export class TelegramNotifier {
   private sending = false;
   private lastSummaryTick = 0;
   private lastUpdateId = 0;
+  private apiHostname: string;
+  private apiPort: number;
 
   constructor(config: TelegramConfig, log: Logger) {
     this.config = config;
     this.log = log;
+    const parsed = this.parseApiUrl(config.telegramApiUrl);
+    this.apiHostname = parsed.hostname;
+    this.apiPort = parsed.port;
   }
 
   getLastUpdateId(): number { return this.lastUpdateId; }
   setLastUpdateId(id: number): void { this.lastUpdateId = id; }
-  updateConfig(config: TelegramConfig): void { this.config = config; }
+  updateConfig(config: TelegramConfig): void {
+    this.config = config;
+    const parsed = this.parseApiUrl(config.telegramApiUrl);
+    this.apiHostname = parsed.hostname;
+    this.apiPort = parsed.port;
+  }
+
+  private parseApiUrl(url: string): { hostname: string; port: number } {
+    if (!url) return { hostname: 'api.telegram.org', port: 443 };
+    try {
+      const u = new URL(url.startsWith('http') ? url : `https://${url}`);
+      return { hostname: u.hostname, port: u.port ? Number(u.port) : 443 };
+    } catch {
+      return { hostname: 'api.telegram.org', port: 443 };
+    }
+  }
 
   // ----------------------------------------------------------
   // Public API — Notifications
@@ -41,7 +61,7 @@ export class TelegramNotifier {
 
   /** Send startup message with legend */
   sendStartup(mode: string, pairs: string): void {
-    this.log.info(`Telegram: enabled=${this.config.enabled}, token=${this.config.botToken ? 'set' : 'empty'}, chatId=${this.config.chatId || 'empty'}`);
+    this.log.info(`Telegram: enabled=${this.config.enabled}, token=${this.config.botToken ? 'set' : 'empty'}, chatId=${this.config.chatId || 'empty'}, api=${this.apiHostname}`);
     if (!this.config.enabled) return;
     const text = [
       `🤖 <b>Bybit Combo Bot запущен</b>`,
@@ -204,18 +224,18 @@ export class TelegramNotifier {
   registerCommands(): void {
     const commands = [
       { command: 'status', description: 'Сводка: капитал, PnL, позиции' },
-      { command: 'stop', description: 'Остановить торговлю' },
-      { command: 'run', description: 'Возобновить торговлю' },
-      { command: 'sellall', description: 'Продать всё + отменить ордера' },
-      { command: 'buy', description: '/buy SUI 10 (buy 10 tokens SUI за USDT) или /buy SUI/BTC 10 (buy 10 tokens SUI за BTC)' },
       { command: 'orders', description: 'Открытые ордера' },
+      { command: 'run', description: 'Возобновить торговлю' },
+      { command: 'stop', description: 'Остановить торговлю' },
       { command: 'cancelorders', description: 'Отменить все ордера + остановить бота' },
+      { command: 'buy', description: '/buy SUI 10 (buy 10 tokens SUI за USDT) или /buy SUI/BTC 10 (buy 10 tokens SUI за BTC)' },
+      { command: 'sellall', description: 'Продать всё + отменить ордера' },
     ];
 
     const payload = JSON.stringify({ commands });
     const options = {
-      hostname: 'api.telegram.org',
-      port: 443,
+      hostname: this.apiHostname,
+      port: this.apiPort,
       path: `/bot${this.config.botToken}/setMyCommands`,
       method: 'POST',
       headers: {
@@ -258,8 +278,8 @@ export class TelegramNotifier {
       }
 
       const options = {
-        hostname: 'api.telegram.org',
-        port: 443,
+        hostname: this.apiHostname,
+        port: this.apiPort,
         path: `/bot${this.config.botToken}/getUpdates?${params.toString()}`,
         method: 'GET',
         timeout: 5000,
@@ -329,8 +349,8 @@ export class TelegramNotifier {
       });
 
       const options = {
-        hostname: 'api.telegram.org',
-        port: 443,
+        hostname: this.apiHostname,
+        port: this.apiPort,
         path: `/bot${this.config.botToken}/sendMessage`,
         method: 'POST',
         headers: {
@@ -362,8 +382,8 @@ export class TelegramNotifier {
   /** Send raw JSON payload to sendMessage (for inline keyboards etc.) */
   private sendRaw(payload: string): void {
     const options = {
-      hostname: 'api.telegram.org',
-      port: 443,
+      hostname: this.apiHostname,
+      port: this.apiPort,
       path: `/bot${this.config.botToken}/sendMessage`,
       method: 'POST',
       headers: {
@@ -393,8 +413,8 @@ export class TelegramNotifier {
   private answerCallbackQuery(callbackQueryId: string): void {
     const payload = JSON.stringify({ callback_query_id: callbackQueryId });
     const options = {
-      hostname: 'api.telegram.org',
-      port: 443,
+      hostname: this.apiHostname,
+      port: this.apiPort,
       path: `/bot${this.config.botToken}/answerCallbackQuery`,
       method: 'POST',
       headers: {

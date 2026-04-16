@@ -3,12 +3,12 @@
   // Trading Pairs & Allocation (сумма <= 100%)
   // ============================================================
   "pairs": [
-    // { "symbol": "SUI/USDT", "allocationPercent": 25 },  // 25% капитала на SUI
-    // { "symbol": "SOL/USDT", "allocationPercent": 40 },  // 40% капитала на SOL
-    // { "symbol": "XRP/USDT", "allocationPercent": 35 },  // 35% капитала на XRP
-    { "symbol": "DOT/USDT", "allocationPercent": 35 },   // 35% капитала на DOT
-    { "symbol": "NEAR/USDT", "allocationPercent": 35 }, // 35% капитала на NEAR
-    { "symbol": "ADA/USDT", "allocationPercent": 30 }   // 30% капитала на ADA
+    { "symbol": "DOT/USDT", "allocationPercent": 17 },
+    { "symbol": "NEAR/USDT", "allocationPercent": 17 },
+    { "symbol": "ADA/USDT", "allocationPercent": 16 },
+    { "symbol": "SUI/USDT", "allocationPercent": 17 },
+    { "symbol": "SOL/USDT", "allocationPercent": 17 },
+    { "symbol": "XRP/USDT", "allocationPercent": 16 }
   ],
 
   // ============================================================
@@ -30,10 +30,10 @@
   // ============================================================
   "grid": {
     "enabled": true,                    // true = grid включен, false = выключить grid
-    "gridLevels": 10,                   // Кол-во уровней (делятся на buy/sell)
-    "gridSpacingPercent": 0.8,          // Расстояние между BUY-уровнями (% от цены)
+    "gridLevels": 6,                    // Кол-во уровней (делятся на buy/sell)
+    "gridSpacingPercent": 1.0,          // Расстояние между BUY-уровнями (% от цены)
     "gridSpacingSellPercent": 1.4,      // Расстояние между SELL-уровнями (% от цены)
-    "orderSizePercent": 12,             // Размер ордера (% от аллокации пары)
+    "orderSizePercent": 15,             // Размер ордера (% от аллокации пары)
     "rebalancePercent": 3,              // Перестроить сетку если цена ушла >3% от центра
     "rsiOverboughtThreshold": 70,       // Пропускаем grid-buy при RSI > 70 (100 = отключить)
     "useEmaFilter": false,              // true = блокировать buy при bearish EMA crossover
@@ -93,11 +93,13 @@
   // Telegram — настройки уведомлений (токен/chatId в .env)
   // ============================================================
   "telegram": {
+    // Custom API relay (чтобы выключить оставь строку пустой и будет работать первичный api.telegram.org)
+    "telegramApiUrl": "https://tg-relay.bulbasavr5962.workers.dev",
     "sendSummary": true,                // Отправлять summary в Telegram
     "sendFills": true,                  // Уведомления о сделках
     "sendAlerts": true,                 // Алерты: SL/TP/halt/panic
     "summaryIntervalTicks": 60,         // Summary раз в 60 тиков (~10 мин)
-    "commandPollIntervalTicks": 3,      // Проверять Telegram-команды каждый тик (0 = выкл)
+    "commandPollIntervalTicks": 1,      // Проверять Telegram-команды каждый тик (0 = выкл)
     "confirmationTimeoutSec": 60        // Таймаут подтверждения команды в секундах (0 = без таймаута)
   },
 

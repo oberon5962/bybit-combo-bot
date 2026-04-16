@@ -32,7 +32,7 @@ export function loadConfig(): BotConfig {
   // --- config.jsonc: all tunable parameters (hot-reloaded) ---
   // Supports // line comments in JSON
   const raw = fs.readFileSync(CONFIG_PATH, 'utf-8');
-  const stripped = raw.replace(/\/\/.*$/gm, '');
+  const stripped = raw.replace(/"(?:[^"\\]|\\.)*"|\/\/.*$/gm, (m) => m.startsWith('"') ? m : '');
   const json = JSON.parse(stripped);
 
   const gridLevels = json.grid?.gridLevels ?? -1;
@@ -112,6 +112,7 @@ export function loadConfig(): BotConfig {
       enabled: !!telegramToken && !!telegramChatId,
       botToken: telegramToken,
       chatId: telegramChatId,
+      telegramApiUrl: json.telegram?.telegramApiUrl ?? '',
       sendSummary: json.telegram?.sendSummary ?? defaultBool,
       sendFills: json.telegram?.sendFills ?? defaultBool,
       sendAlerts: json.telegram?.sendAlerts ?? defaultBool,

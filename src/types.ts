@@ -117,6 +117,7 @@ export interface TelegramConfig {
   enabled: boolean;
   botToken: string;
   chatId: string;
+  telegramApiUrl: string;         // custom API endpoint (пусто = api.telegram.org)
   sendSummary: boolean;           // отправлять summary
   sendFills: boolean;             // уведомления о сделках
   sendAlerts: boolean;            // SL/TP/halt/panic/cooldown
