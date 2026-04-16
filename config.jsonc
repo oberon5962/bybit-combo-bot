@@ -45,7 +45,7 @@
 
     // Auto-adaptive spacing (на основе статистики волатильности)
     "autoSpacingIntervalMin": 180,       // Как часто пересчитывать в минутах (180 = каждые 3ч)
-    "autoSpacingSafetyMarginPercent": 10,  // Коэффициент недоверия — вычитать 15% из расчётных значений статистики волатильности
+    "autoSpacingSafetyMarginPercent": 10,  // Коэффициент недоверия — вычитать 10% из расчётных значений статистики волатильности
     // "off"    — выключено, не считает, не тратит API
     // "config" — считает и пишет в лог/Telegram для сравнения, торгует по config
     // "auto"   — считает и применяет к торговле
@@ -107,8 +107,9 @@
     "sendSummary": true,                // Отправлять summary в Telegram
     "sendFills": true,                  // Уведомления о сделках
     "sendAlerts": true,                 // Алерты: SL/TP/halt/panic
-    "summaryIntervalTicks": 90,         // Summary раз в 60 тиков (~10 мин)
-    "commandPollIntervalTicks": 2,      // Проверять Telegram-команды каждый тик (0 = выкл)
+    "summaryIntervalTicks": 180,         // Summary в Telegram раз в 180 тиков (~30 мин)
+    "logSummaryIntervalTicks": 15,      // Summary в bot.log раз в 15 тиков (~2,5 мин)
+    "commandPollIntervalTicks": 3,      // Проверять Telegram-команды каждые 3 тика (0 = выкл)
     "confirmationTimeoutSec": 60        // Таймаут подтверждения команды в секундах (0 = без таймаута)
   },
 
@@ -117,5 +118,6 @@
   // ============================================================
   "tickIntervalSec": 10,               // Основной цикл бота (10 сек, НЕ hot-reload)
   "syncIntervalSec": 21600,            // Sync с Bybit каждые 6 часов ( 0 = выкл)
-  "configReloadIntervalTicks": 6        // Перечитывать config.json каждые 6 тиков (0 = выкл, проверка раз в 5 мин)
+  "configReloadIntervalTicks": 0,       // Перечитывать config.json каждые 6 тиков (0 = выкл, проверка раз в 5 мин)
+  "parallelPairs": 2                    // Обработка пар параллельно (1 = последовательно, 2 = по 2, 3 = по 3)
 }

@@ -160,7 +160,7 @@ export class ExchangeSync {
                   amount: fillAmount,
                   price: fillPrice,
                   cost: fillCost,
-                  fee: fillCost * 0.001,
+                  fee: orderInfo.fee > 0 ? orderInfo.fee : fillCost * 0.001,
                   strategy: 'grid-sync',
                 });
                 // Flip level to counter-side so grid places counter-order on next tick

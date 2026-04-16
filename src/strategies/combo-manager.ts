@@ -398,25 +398,29 @@ export class ComboManager {
     // Record tick
     this.state.recordTick();
 
-    // Process each trading pair
-    // Use TOTAL PORTFOLIO value (USDT + crypto) for allocation — not just USDT balance.
-    // Using only USDT would shrink allocations as crypto accumulates (e.g. $100 USDT + $200 crypto = $300 portfolio,
-    // but allocation from $100 would be 3x too small).
-    for (const pair of this.config.pairs) {
-      // Re-check global halted state (drawdown / portfolio TP)
+    // Process trading pairs in parallel batches
+    // parallelPairs=1 → sequential (safe), 2+ → parallel (faster, more API load)
+    const batchSize = Math.max(1, this.config.parallelPairs || 1);
+    const pairs = this.config.pairs;
+    for (let i = 0; i < pairs.length; i += batchSize) {
       if (this.state.halted) {
         this.log.warn(`Bot halted mid-tick (global), skipping remaining pairs`);
         break;
       }
-      try {
-        await this.processPair(pair, totalPortfolioUSDT);
-      } catch (err) {
-        this.log.error(`Error processing ${pair.symbol}: ${sanitizeError(err)}`);
-      }
+      const batch = pairs.slice(i, i + batchSize);
+      await Promise.all(batch.map(async (pair) => {
+        if (this.state.halted) return;
+        try {
+          await this.processPair(pair, totalPortfolioUSDT);
+        } catch (err) {
+          this.log.error(`Error processing ${pair.symbol}: ${sanitizeError(err)}`);
+        }
+      }));
     }
 
-    // Log summary every 10 ticks
-    if (this.state.totalTicks % 10 === 0) {
+    // Log summary every N ticks (configurable, default 10)
+    const logInterval = this.config.logSummaryIntervalTicks || 10;
+    if (this.state.totalTicks % logInterval === 0) {
       this.logSummary(totalPortfolioUSDT);
     }
   }
@@ -1276,7 +1280,8 @@ export class ComboManager {
       logParts.push(`${pairBuys.length}B/${pairSells.length}S`);
 
       if (buyPrices.length > 0) {
-        logParts.push(`buys: ${activeBuys.length} [${buyPrices[0].toFixed(4)}-${buyPrices[buyPrices.length - 1].toFixed(4)}]`);
+        const buyCost = activeBuys.reduce((s, l) => s + l.price * l.amount, 0).toFixed(0);
+        logParts.push(`buys: ${activeBuys.length} [${buyPrices[0].toFixed(4)}-${buyPrices[buyPrices.length - 1].toFixed(4)}] ${buyCost}$`);
       } else {
         logParts.push('buys: 0');
       }
@@ -1286,7 +1291,10 @@ export class ComboManager {
         const pendInfo = pendingSells.length > 0 ? `${pendingSells.length} pending` : '';
         const sellStr = [sellInfo, pendInfo].filter(Boolean).join('+');
         if (sellPrices.length > 0) {
-          logParts.push(`sells: ${sellStr} [${sellPrices[0].toFixed(4)}-${sellPrices[sellPrices.length - 1].toFixed(4)}]`);
+          const activeSellCost = activeSells.reduce((s, l) => s + l.price * l.amount, 0).toFixed(0);
+          const pendSellCost = pendingSells.reduce((s, l) => s + l.price * l.amount, 0).toFixed(0);
+          const costStr = pendingSells.length > 0 ? `${activeSellCost}$+${pendSellCost}$` : `${activeSellCost}$`;
+          logParts.push(`sells: ${sellStr} [${sellPrices[0].toFixed(4)}-${sellPrices[sellPrices.length - 1].toFixed(4)}] ${costStr}`);
         } else {
           logParts.push(`sells: ${sellStr}`);
         }
@@ -1314,6 +1322,12 @@ export class ComboManager {
 
       const level = (isHalted || cooldownUntil > Date.now()) ? 'warn' : 'info';
       this.log[level](`  ${sym}: ${logParts.join(' | ')}`);
+      // Compact stats line under each pair
+      const st = this.state.getPairStats(sym);
+      if (st.buys > 0 || st.sells > 0) {
+        const stPnl = st.pnl >= 0 ? `+${st.pnl.toFixed(2)}` : st.pnl.toFixed(2);
+        this.log[level](`    ↳ spent: ${st.spent.toFixed(2)} | earned: ${st.earned.toFixed(2)} | fees: ${st.totalFees.toFixed(3)} | PnL: ${stPnl}`);
+      }
       pairLogLines.push(`${sym}: ${logParts.join(' | ')}`);
 
       // Telegram per-pair
@@ -1347,6 +1361,9 @@ export class ComboManager {
       pairTgLines.push(tgPairParts.join('\n'));
     }
 
+    // Join pairs with blank line separator
+    const pairTgBlock = pairTgLines.join('\n\n');
+
     // Telegram summary
     const sign = pnl >= 0 ? '+' : '';
     const panicStr = this.marketPanic ? '⚠️ PANIC' : 'no';
@@ -1356,7 +1373,7 @@ export class ComboManager {
       `${currentCapital.toFixed(2)} USDT | PnL ${sign}${pnl.toFixed(2)} (${sign}${pnlPct.toFixed(1)}%) | DD ${drawdown.toFixed(1)}% | peak ${this.state.peakCapital.toFixed(2)} | Trades: ${trades.length} (${buys.length}B/${sells.length}S)`,
       `Panic: ${panicStr} | BTC: ${btcStr}`,
       '',
-      ...pairTgLines,
+      pairTgBlock,
     ].join('\n');
     this.tg.sendSummary(this.state.totalTicks, tgText);
   }
@@ -1741,7 +1758,7 @@ export class ComboManager {
 
   private cmdStats(): void {
     const lines: string[] = ['<b>📊 Trade Statistics</b>', ''];
-    let totalSpent = 0, totalEarned = 0, totalFees = 0;
+    let totalSpent = 0, totalEarned = 0, totalBuyFees = 0, totalSellFees = 0;
 
     for (const pair of this.config.pairs) {
       const s = this.state.getPairStats(pair.symbol);
@@ -1750,20 +1767,25 @@ export class ComboManager {
         `<b>${pair.symbol}</b>`,
         `  ${s.buys}B / ${s.sells}S`,
         `  Spent: ${s.spent.toFixed(2)} | Earned: ${s.earned.toFixed(2)}`,
+        `  Fees: ${s.buyFees.toFixed(3)} (buy) + ${s.sellFees.toFixed(3)} (sell)`,
         `  PnL: ${pnlSign}${s.pnl.toFixed(2)} USDT`,
         '',
       );
       totalSpent += s.spent;
       totalEarned += s.earned;
-      totalFees += s.fees;
+      totalBuyFees += s.buyFees;
+      totalSellFees += s.sellFees;
     }
 
+    const totalFees = totalBuyFees + totalSellFees;
     const totalPnl = totalEarned - totalSpent - totalFees;
     const sign = totalPnl >= 0 ? '+' : '';
+    const capital = this.lastTickPortfolioValue > 0 ? this.lastTickPortfolioValue : this.state.peakCapital;
     lines.push(
-      '<b>TOTAL</b>',
+      `<b>TOTAL</b> (${capital.toFixed(2)} USDT)`,
       `Spent: ${totalSpent.toFixed(2)} | Earned: ${totalEarned.toFixed(2)}`,
-      `Fees: ${totalFees.toFixed(2)} | PnL: ${sign}${totalPnl.toFixed(2)} USDT`,
+      `Fees: ${totalBuyFees.toFixed(3)} (buy) + ${totalSellFees.toFixed(3)} (sell) = ${totalFees.toFixed(3)}`,
+      `PnL: ${sign}${totalPnl.toFixed(2)} USDT`,
     );
 
     this.tg.sendReply(lines.join('\n'));

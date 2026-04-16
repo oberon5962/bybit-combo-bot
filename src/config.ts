@@ -132,6 +132,8 @@ export function loadConfig(): BotConfig {
     tickIntervalSec: json.tickIntervalSec ?? defaultNum,
     syncIntervalSec: json.syncIntervalSec ?? defaultNum,
     configReloadIntervalTicks: json.configReloadIntervalTicks ?? defaultNum,
+    logSummaryIntervalTicks: json.telegram?.logSummaryIntervalTicks ?? json.logSummaryIntervalTicks ?? 10,
+    parallelPairs: json.parallelPairs ?? 1,
   };
 
   validateConfig(config);

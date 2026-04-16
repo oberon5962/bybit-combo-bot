@@ -56,7 +56,8 @@ export interface PairState {
   statSells: number;        // total sell trades count
   statSpent: number;        // total USDT spent on buys
   statEarned: number;       // total USDT earned from sells
-  statFees: number;         // total fees paid
+  statBuyFees: number;      // fees paid on buys
+  statSellFees: number;     // fees paid on sells
 }
 
 export interface BotState {
@@ -129,7 +130,8 @@ function createEmptyPairState(): PairState {
     statSells: 0,
     statSpent: 0,
     statEarned: 0,
-    statFees: 0,
+    statBuyFees: 0,
+    statSellFees: 0,
   };
 }
 
@@ -203,7 +205,8 @@ export class StateManager {
               statSells: typeof pd.statSells === 'number' ? pd.statSells : 0,
               statSpent: typeof pd.statSpent === 'number' ? pd.statSpent : 0,
               statEarned: typeof pd.statEarned === 'number' ? pd.statEarned : 0,
-              statFees: typeof pd.statFees === 'number' ? pd.statFees : 0,
+              statBuyFees: typeof pd.statBuyFees === 'number' ? pd.statBuyFees : 0,
+              statSellFees: typeof pd.statSellFees === 'number' ? pd.statSellFees : 0,
             };
           }
         }
@@ -395,22 +398,26 @@ export class StateManager {
     if (side === 'buy') {
       ps.statBuys++;
       ps.statSpent += cost;
+      ps.statBuyFees += fee;
     } else {
       ps.statSells++;
       ps.statEarned += cost;
+      ps.statSellFees += fee;
     }
-    ps.statFees += fee;
     this.save();
   }
-  getPairStats(symbol: string): { buys: number; sells: number; spent: number; earned: number; fees: number; pnl: number } {
+  getPairStats(symbol: string): { buys: number; sells: number; spent: number; earned: number; buyFees: number; sellFees: number; totalFees: number; pnl: number } {
     const ps = this.getPairState(symbol);
+    const totalFees = ps.statBuyFees + ps.statSellFees;
     return {
       buys: ps.statBuys,
       sells: ps.statSells,
       spent: ps.statSpent,
       earned: ps.statEarned,
-      fees: ps.statFees,
-      pnl: ps.statEarned - ps.statSpent - ps.statFees,
+      buyFees: ps.statBuyFees,
+      sellFees: ps.statSellFees,
+      totalFees,
+      pnl: ps.statEarned - ps.statSpent - totalFees,
     };
   }
 

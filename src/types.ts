@@ -36,6 +36,12 @@ export interface BotConfig {
 
   // How often to hot-reload config from disk (in ticks). 0 = disabled.
   configReloadIntervalTicks: number;
+
+  // How often to log summary to bot.log (in ticks). 10 = ~100 sec.
+  logSummaryIntervalTicks: number;
+
+  // Number of pairs to process in parallel per tick. 1 = sequential, 2+ = parallel batches.
+  parallelPairs: number;
 }
 
 export interface PairConfig {

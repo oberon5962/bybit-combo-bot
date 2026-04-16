@@ -80,6 +80,11 @@ async function main() {
   }
 
   fs.writeFileSync(STATE_PATH, JSON.stringify(state, null, 2), 'utf-8');
+
+  // Remove lock file so bot can start
+  const lockFile = path.resolve(__dirname, 'bot.lock');
+  try { fs.unlinkSync(lockFile); console.log('Removed bot.lock'); } catch { /* no lock */ }
+
   console.log(`\nGrid reset for ${symbols.length} pairs. State saved.`);
   console.log('Kept: peakCapital, startingCapital, recentTrades, totalTicks, telegramUpdateId');
 }

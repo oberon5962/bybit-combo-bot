@@ -545,7 +545,7 @@ export class GridStrategy {
             amount: filledAmount,
             price: actualPrice,
             cost: tradeCost,
-            fee: tradeCost * 0.001,  // Bybit spot fee ~0.1%
+            fee: orderInfo.fee > 0 ? orderInfo.fee : tradeCost * 0.001,
             strategy: 'grid',
           });
 

@@ -46,6 +46,10 @@ try {
   } catch { /* no processes */ }
 }
 
+// Remove lock file (bot.lock) so new instance can start
+const lockFile = path.resolve(BOT_DIR, 'bot.lock');
+try { require('fs').unlinkSync(lockFile); console.log('  Removed bot.lock'); } catch { /* no lock */ }
+
 // Small delay to let ports/files release
 Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000);
 

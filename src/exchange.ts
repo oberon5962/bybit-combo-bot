@@ -183,7 +183,7 @@ export class BybitExchange {
 
   // BUG #14: fetch a specific order to check fill status (partial fills)
   // BUG #audit-3: fallback to closedOrders when order is purged from active history
-  async fetchOrder(orderId: string, symbol: string): Promise<{ filled: number; remaining: number; status: string; price: number }> {
+  async fetchOrder(orderId: string, symbol: string): Promise<{ filled: number; remaining: number; status: string; price: number; fee: number }> {
     try {
       const order = await this.exchange.fetchOrder(orderId, symbol);
       return {
@@ -191,6 +191,7 @@ export class BybitExchange {
         remaining: order.remaining ?? 0,
         status: order.status ?? 'unknown',
         price: order.average ?? order.price ?? 0,
+        fee: (order.fee?.cost as number) ?? 0,
       };
     } catch (err) {
       // Order not found — try closed orders as fallback (Bybit purges old orders from active query)
@@ -204,13 +205,14 @@ export class BybitExchange {
             remaining: match.remaining ?? 0,
             status: match.status ?? 'closed',
             price: match.average ?? match.price ?? 0,
+            fee: (match.fee?.cost as number) ?? 0,
           };
         }
       } catch (err2) {
         this.log.debug(`fetchClosedOrders fallback also failed: ${sanitizeError(err2)}`);
       }
       // Neither found — return purged status so caller can handle safely
-      return { filled: 0, remaining: 0, status: 'purged', price: 0 };
+      return { filled: 0, remaining: 0, status: 'purged', price: 0, fee: 0 };
     }
   }
 
