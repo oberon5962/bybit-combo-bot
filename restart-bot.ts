@@ -1,12 +1,16 @@
 // Запуск: npx ts-node restart-bot.ts
 // Убивает все node-процессы бота (кроме себя), затем запускает бота заново.
-//Скрипт restart-bot.ts:
-//Находит все node.exe процессы (кроме себя и своего ts-node родителя)
-//Убивает их по PID
-//Ждёт 1 секунду
-//Запускает бота detached (в фоне)
-//Выходит
-//Запуск: npx ts-node restart-bot.ts
+//
+// Поиск работающего бота:
+//   tasklist /FI "IMAGENAME eq node.exe" /FO TABLE
+//   wmic process where "name='node.exe'" get ProcessId,CommandLine
+//
+// Скрипт restart-bot.ts:
+// Находит все node.exe процессы (кроме себя и своего ts-node родителя)
+// Убивает их по PID
+// Ждёт 1 секунду
+// Запускает бота detached (в фоне)
+// Выходит
 
 import { execSync, spawn } from 'child_process';
 import path from 'path';

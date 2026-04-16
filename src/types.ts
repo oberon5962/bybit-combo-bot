@@ -41,6 +41,8 @@ export interface BotConfig {
 export interface PairConfig {
   symbol: string;           // e.g. "BTC/USDT"
   allocationPercent: number; // % of total capital for this pair
+  gridSpacingPercent?: number;     // per-pair override for buy grid spacing (% от цены)
+  gridSpacingSellPercent?: number; // per-pair override for sell grid spacing (% от цены)
 }
 
 export interface RiskConfig {

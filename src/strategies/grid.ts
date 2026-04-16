@@ -3,7 +3,7 @@
 // ============================================================
 
 import {
-  BotConfig, GridConfig, Ticker, IndicatorSnapshot,
+  BotConfig, GridConfig, PairConfig, Ticker, IndicatorSnapshot,
   StrategyDecision, Logger, sanitizeError,
 } from '../types';
 import { BybitExchange } from '../exchange';
@@ -11,6 +11,7 @@ import { StateManager, GridLevelState } from '../state';
 
 export class GridStrategy {
   private config: GridConfig;
+  private pairsConfig: PairConfig[];
   private exchange: BybitExchange;
   private log: Logger;
   private lastIndicators: Map<string, IndicatorSnapshot> = new Map();
@@ -26,6 +27,7 @@ export class GridStrategy {
 
   constructor(config: BotConfig, exchange: BybitExchange, log: Logger, state: StateManager) {
     this.config = config.grid;
+    this.pairsConfig = config.pairs;
     this.maxOpenOrdersPerPair = config.risk.maxOpenOrdersPerPair;
     this.exchange = exchange;
     this.log = log;
@@ -35,7 +37,17 @@ export class GridStrategy {
   /** Hot-reload: обновить конфиг без перестроения сетки. Новые параметры применятся к новым ордерам. */
   updateConfig(config: BotConfig): void {
     this.config = config.grid;
+    this.pairsConfig = config.pairs;
     this.maxOpenOrdersPerPair = config.risk.maxOpenOrdersPerPair;
+  }
+
+  /** Get grid spacing for a symbol: per-pair override or global fallback */
+  private getSpacing(symbol: string): { buySpacingPct: number; sellSpacingPct: number } {
+    const pair = this.pairsConfig.find(p => p.symbol === symbol);
+    return {
+      buySpacingPct: pair?.gridSpacingPercent ?? this.config.gridSpacingPercent,
+      sellSpacingPct: pair?.gridSpacingSellPercent ?? this.config.gridSpacingSellPercent,
+    };
   }
 
   private async getPrecision(symbol: string) {
@@ -202,7 +214,8 @@ export class GridStrategy {
     }
 
     const precision = await this.getPrecision(symbol);
-    const { gridLevels, gridSpacingPercent, gridSpacingSellPercent } = this.config;
+    const { gridLevels } = this.config;
+    const { buySpacingPct, sellSpacingPct } = this.getSpacing(symbol);
 
     // Bollinger adaptive: shift buy/sell ratio
     const bbAdaptive = this.getBollingerAdaptive(symbol);
@@ -215,8 +228,8 @@ export class GridStrategy {
       this.log.info(`Grid Bollinger adaptive for ${symbol}: ${buyLevels}B/${sellLevels}S (${bbAdaptive.reason})`);
     }
 
-    const buySpacing = currentPrice * (gridSpacingPercent / 100);
-    const sellSpacing = currentPrice * (gridSpacingSellPercent / 100);
+    const buySpacing = currentPrice * (buySpacingPct / 100);
+    const sellSpacing = currentPrice * (sellSpacingPct / 100);
     const levels: GridLevelState[] = [];
     const usedPrices = new Set<number>();
 
@@ -245,8 +258,8 @@ export class GridStrategy {
 
     this.log.info(`Grid initialized for ${symbol}`, {
       levels: gridLevels,
-      buySpacing: `${gridSpacingPercent}%`,
-      sellSpacing: `${gridSpacingSellPercent}%`,
+      buySpacing: `${buySpacingPct}%`,
+      sellSpacing: `${sellSpacingPct}%`,
       range: `${levels[0].price} — ${levels[levels.length - 1].price}`,
       currentPrice,
     });
@@ -506,9 +519,10 @@ export class GridStrategy {
 
           // Calculate counter-order from grid level price (maintains consistent spacing)
           // buy filled → sell counter uses sellSpacing; sell filled → buy counter uses buySpacing
+          const { buySpacingPct: counterBuyPct, sellSpacingPct: counterSellPct } = this.getSpacing(symbol);
           const rawCounterPrice = filledSide === 'buy'
-            ? filledPrice * (1 + this.config.gridSpacingSellPercent / 100)
-            : filledPrice * (1 - this.config.gridSpacingPercent / 100);
+            ? filledPrice * (1 + counterSellPct / 100)
+            : filledPrice * (1 - counterBuyPct / 100);
           const counterPrice = this.roundPriceForMarket(rawCounterPrice, precision.pricePrecision);
           const counterSide: 'buy' | 'sell' = filledSide === 'buy' ? 'sell' : 'buy';
 
@@ -669,8 +683,9 @@ export class GridStrategy {
           let orphanPlaced = 0;
 
           while (remaining > 0 && orphanPlaced < orphanOrderBudget) {
-            const entryBased = position.avgEntryPrice * (1 + this.config.gridSpacingSellPercent * priceStep / 100);
-            const priceBased = ticker.last * (1 + this.config.gridSpacingSellPercent * priceStep / 100);
+            const { sellSpacingPct: orphanSellPct } = this.getSpacing(symbol);
+            const entryBased = position.avgEntryPrice * (1 + orphanSellPct * priceStep / 100);
+            const priceBased = ticker.last * (1 + orphanSellPct * priceStep / 100);
             const sellPrice = this.roundPriceForMarket(
               Math.max(entryBased, priceBased),
               precision.pricePrecision,

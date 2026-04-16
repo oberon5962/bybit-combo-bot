@@ -52,6 +52,11 @@ export class ExchangeSync {
     this.log = log;
   }
 
+  /** Hot-reload: обновить конфиг (per-pair spacing и т.д.) */
+  updateConfig(config: BotConfig): void {
+    this.config = config;
+  }
+
   // ----------------------------------------------------------
   // Full sync on startup
   // ----------------------------------------------------------
@@ -153,9 +158,12 @@ export class ExchangeSync {
                 // Flip level to counter-side so grid places counter-order on next tick
                 // buy filled → sell counter uses sellSpacing; sell filled → buy counter uses buySpacing
                 const counterSide: 'buy' | 'sell' = level.side === 'buy' ? 'sell' : 'buy';
+                const pairCfg = this.config.pairs.find(p => p.symbol === symbol);
+                const syncBuyPct = pairCfg?.gridSpacingPercent ?? this.config.grid.gridSpacingPercent;
+                const syncSellPct = pairCfg?.gridSpacingSellPercent ?? this.config.grid.gridSpacingSellPercent;
                 const rawCounterPrice = level.side === 'buy'
-                  ? fillPrice * (1 + this.config.grid.gridSpacingSellPercent / 100)
-                  : fillPrice * (1 - this.config.grid.gridSpacingPercent / 100);
+                  ? fillPrice * (1 + syncSellPct / 100)
+                  : fillPrice * (1 - syncBuyPct / 100);
                 // Round to market precision (same as grid.ts) to avoid Bybit rejection
                 const pricePrecision = (await this.exchange.getMarketPrecision(symbol)).pricePrecision;
                 const factor = Math.pow(10, pricePrecision);

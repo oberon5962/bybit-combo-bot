@@ -13,6 +13,7 @@ import { GridStrategy } from './grid';
 import { DCAStrategy } from './dca';
 import { StateManager } from '../state';
 import { TelegramNotifier, TelegramCommand } from '../telegram';
+import { ExchangeSync } from '../sync';
 import { createHash } from 'crypto';
 import { readFileSync } from 'fs';
 import { resolve } from 'path';
@@ -35,6 +36,7 @@ export class ComboManager {
   private lastIndicatorsPerPair: Map<string, IndicatorSnapshot> = new Map();
   private lastTickPortfolioValue: number = 0;
   private tg: TelegramNotifier;
+  private sync: ExchangeSync | null = null;
   private ticksSinceConfigReload: number = 0;
   private lastConfigHash: string = '';
   private ticksSinceCommandPoll: number = 0;
@@ -48,6 +50,9 @@ export class ComboManager {
     this.dca = new DCAStrategy(config, exchange, log, state);
     this.tg = new TelegramNotifier(config.telegram, log);
   }
+
+  /** Link ExchangeSync so it gets updated on hot-reload */
+  setSync(sync: ExchangeSync): void { this.sync = sync; }
 
   // ----------------------------------------------------------
   // Initialize
@@ -162,6 +167,7 @@ export class ComboManager {
           this.grid.updateConfig(newConfig);
           this.dca.updateConfig(newConfig);
           this.tg.updateConfig(newConfig.telegram);
+          if (this.sync) this.sync.updateConfig(newConfig);
           this.log.info('Config reloaded from config.jsonc');
         }
       } catch (err) {
@@ -1205,7 +1211,7 @@ export class ComboManager {
       if (activeSells.length > 0 || pendingSells.length > 0) {
         const sellParts: string[] = [];
         if (activeSells.length > 0) sellParts.push(`${activeSells.length}S`);
-        if (pendingSells.length > 0) sellParts.push(`${pendingSells.length}S pend`);
+        if (pendingSells.length > 0) sellParts.push(`${pendingSells.length}Pend`);
         const priceRange = sellPrices.length > 0 ? ` [${sellPrices[0].toFixed(4)}-${sellPrices[sellPrices.length - 1].toFixed(4)}]` : '';
         tgPairParts.push(`${sellParts.join(' + ')}${priceRange}`);
       }
@@ -1223,9 +1229,12 @@ export class ComboManager {
 
     // Telegram summary
     const sign = pnl >= 0 ? '+' : '';
+    const panicStr = this.marketPanic ? '⚠️ PANIC' : 'no';
+    const btcStr = this.btcPaused ? '⚠️ PAUSED' : 'ok';
     const tgText = [
       `<b>BOT SUMMARY</b> (tick ${this.state.totalTicks})`,
       `${currentCapital.toFixed(2)} USDT | PnL ${sign}${pnl.toFixed(2)} (${sign}${pnlPct.toFixed(1)}%) | DD ${drawdown.toFixed(1)}% | peak ${this.state.peakCapital.toFixed(2)} | Trades: ${trades.length} (${buys.length}B/${sells.length}S)`,
+      `Panic: ${panicStr} | BTC: ${btcStr}`,
       '',
       ...pairTgLines,
     ].join('\n');

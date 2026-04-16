@@ -1,4 +1,38 @@
-// Запуск: taskkill //F //IM node.exe && npx ts-node reset-grid.ts && npx ts-node src/index.ts
+// ============================================================
+// Reset Grid — сброс сетки ордеров и перестроение с нуля
+// ============================================================
+//
+// Запуск (из директории bybit-combo-bot):
+//   1. Остановить бота:  taskkill //F //IM node.exe
+//   2. Сбросить сетку:   npx ts-node reset-grid.ts
+//   3. Запустить бота:   npx ts-node src/index.ts
+//   Или одной командой:  taskkill //F //IM node.exe && npx ts-node reset-grid.ts && npx ts-node src/index.ts
+//
+// Что делает:
+//   1. Подключается к Bybit API (ключи из .env)
+//   2. Читает bot-state.json — берёт список торгуемых пар
+//   3. Для каждой пары отменяет ВСЕ открытые ордера на бирже (fetchOpenOrders → cancelAllOrders)
+//   4. Обнуляет grid-состояние в bot-state.json:
+//      - gridLevels = []           — удаляет все уровни сетки
+//      - gridInitialized = false   — бот заново построит сетку при старте
+//      - gridCenterPrice = 0       — центр сетки пересчитается по текущей цене
+//      - lastDcaBuyTime = 0        — сбрасывает таймер DCA
+//      - dcaTotalInvested = 0      — обнуляет DCA-счётчики
+//      - dcaTotalBought = 0
+//   5. Сохраняет обновлённый state на диск
+//
+// Что НЕ трогает (сохраняется между сбросами):
+//   - peakCapital, startingCapital — для расчёта drawdown и PnL
+//   - recentTrades — история сделок
+//   - totalTicks — счётчик тиков
+//   - telegramUpdateId — чтобы не обрабатывать старые команды повторно
+//
+// Когда использовать:
+//   - После изменения gridSpacingPercent / gridSpacingSellPercent в config.jsonc
+//   - Если ордера рассинхронизировались с биржей
+//   - Если нужно перестроить сетку вокруг новой цены
+//   - После добавления/удаления торговых пар
+// ============================================================
 
 import fs from 'fs';
 import path from 'path';

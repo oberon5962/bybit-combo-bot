@@ -44,8 +44,13 @@ export function loadConfig(): BotConfig {
     apiSecret,
     testnet,
 
-    pairs: json.pairs ?? [{ "symbol": "BTC/USDT", "allocationPercent": 50 },
-                          { "symbol": "ETH/USDT", "allocationPercent": 50 }],
+    pairs: (json.pairs ?? [{ "symbol": "BTC/USDT", "allocationPercent": 50 },
+                           { "symbol": "ETH/USDT", "allocationPercent": 50 }]).map((p: any) => ({
+      symbol: p.symbol,
+      allocationPercent: p.allocationPercent,
+      ...(p.gridSpacingPercent != null && { gridSpacingPercent: p.gridSpacingPercent }),
+      ...(p.gridSpacingSellPercent != null && { gridSpacingSellPercent: p.gridSpacingSellPercent }),
+    })),
 
     risk: {
       maxDrawdownPercent: json.risk?.maxDrawdownPercent ?? defaultNum,
@@ -145,6 +150,14 @@ function validateConfig(config: BotConfig): void {
   }
   if (config.pairs.length === 0) {
     errors.push('No trading pairs configured');
+  }
+  for (const p of config.pairs) {
+    if (p.gridSpacingPercent != null && p.gridSpacingPercent <= 0) {
+      errors.push(`${p.symbol}: gridSpacingPercent must be > 0`);
+    }
+    if (p.gridSpacingSellPercent != null && p.gridSpacingSellPercent <= 0) {
+      errors.push(`${p.symbol}: gridSpacingSellPercent must be > 0`);
+    }
   }
 
   // Risk

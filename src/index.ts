@@ -11,6 +11,8 @@
 // IMPORTANT: Start with USE_TESTNET=true in your .env file!
 // ============================================================
 
+import fs from 'fs';
+import path from 'path';
 import { loadConfig } from './config';
 import { createLogger } from './logger';
 import { BybitExchange } from './exchange';
@@ -18,7 +20,30 @@ import { ComboManager } from './strategies/combo-manager';
 import { StateManager } from './state';
 import { ExchangeSync } from './sync';
 
+// Lock-file: предотвращает запуск двух экземпляров бота одновременно
+const LOCK_FILE = path.resolve(__dirname, '..', 'bot.lock');
+
+function acquireLock(): void {
+  if (fs.existsSync(LOCK_FILE)) {
+    const pid = parseInt(fs.readFileSync(LOCK_FILE, 'utf-8').trim(), 10);
+    // Проверяем жив ли процесс
+    try {
+      process.kill(pid, 0); // signal 0 = проверка без убийства
+      console.error(`Bot already running (PID ${pid}). Kill it first or delete bot.lock`);
+      process.exit(1);
+    } catch {
+      // Процесс мёртв — stale lock, перезаписываем
+    }
+  }
+  fs.writeFileSync(LOCK_FILE, String(process.pid), 'utf-8');
+}
+
+function releaseLock(): void {
+  try { fs.unlinkSync(LOCK_FILE); } catch { /* ignore */ }
+}
+
 async function main(): Promise<void> {
+  acquireLock();
   const log = createLogger('info');
 
   log.info('='.repeat(60));
@@ -51,6 +76,7 @@ async function main(): Promise<void> {
 
   // Initialize combo manager
   const manager = new ComboManager(config, exchange, log, state);
+  manager.setSync(sync);
   await manager.init();
 
   // ----------------------------------------------------------
@@ -136,15 +162,18 @@ async function main(): Promise<void> {
 
       await manager.shutdown(false); // soft: keep orders alive
       log.info('Bot stopped. Goodbye!');
+      releaseLock();
       process.exit(0);
     } else if (shutdownCount === 2) {
       // Second Ctrl+C = hard shutdown: cancel all orders
       log.info(`Received ${signal} again. Hard shutdown — cancelling all orders...`);
       await manager.shutdown(true).catch(() => {});
       log.info('All orders cancelled. Bot stopped.');
+      releaseLock();
       process.exit(1);
     } else {
       // Third+ Ctrl+C = force exit immediately
+      releaseLock();
       process.exit(2);
     }
   };
@@ -162,5 +191,6 @@ async function main(): Promise<void> {
 
 main().catch((err) => {
   console.error('Fatal error:', err);
+  releaseLock();
   process.exit(1);
 });
