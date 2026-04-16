@@ -12,6 +12,13 @@ export class BybitExchange {
   private log: Logger;
   private marketsLoaded: boolean = false;
 
+  // Balance cache: fetched once per tick, deducted locally after each order.
+  // Avoids 10+ redundant fetchBalance API calls per tick.
+  // Balances are slightly conservative (0.2% fee buffer) to prevent InsufficientFunds.
+  private balanceCache: Record<string, Balance> = {};
+  private balanceCacheTime: number = 0;
+  private balanceCacheTTL: number = 8000; // 8s — expires within one tick (10s)
+
   constructor(config: BotConfig, log: Logger) {
     this.log = log;
 
@@ -79,32 +86,49 @@ export class BybitExchange {
   // Account
   // ----------------------------------------------------------
 
-  async fetchBalance(currency: string = 'USDT'): Promise<Balance> {
+  /** Force-refresh balance cache (call once at start of tick) */
+  invalidateBalanceCache(): void {
+    this.balanceCacheTime = 0;
+  }
+
+  /** Deduct from cached balance after placing an order.
+   *  Adds 0.1% fee estimate — standard Bybit spot fee.
+   *  Slightly conservative to avoid InsufficientFunds on parallel pairs. */
+  deductCachedBalance(currency: string, amount: number): void {
+    const entry = this.balanceCache[currency];
+    if (entry) {
+      const withFee = amount * 1.001; // 0.1% fee estimate
+      entry.free = Math.max(0, entry.free - withFee);
+      entry.total = Math.max(0, entry.total - withFee);
+    }
+  }
+
+  private async fetchBalanceRaw(): Promise<Record<string, Balance>> {
+    const now = Date.now();
+    if (now - this.balanceCacheTime < this.balanceCacheTTL && Object.keys(this.balanceCache).length > 0) {
+      return this.balanceCache; // return cached
+    }
     const bal = await this.exchange.fetchBalance();
-    const entry = bal[currency] ?? { free: 0, used: 0, total: 0 };
-    return {
-      free: entry.free ?? 0,
-      used: entry.used ?? 0,
-      total: entry.total ?? 0,
-    };
+    this.balanceCache = this.parseBalances(bal);
+    this.balanceCacheTime = now;
+    return this.balanceCache;
+  }
+
+  async fetchBalance(currency: string = 'USDT'): Promise<Balance> {
+    const all = await this.fetchBalanceRaw();
+    return all[currency] ?? { free: 0, used: 0, total: 0 };
   }
 
   async fetchAllBalances(): Promise<Record<string, Balance>> {
-    const bal = await this.exchange.fetchBalance();
-    return this.parseBalances(bal);
+    return this.fetchBalanceRaw();
   }
 
   // Fetch both USDT balance and all balances in a single API call
   async fetchBalanceAndAll(currency: string = 'USDT'): Promise<{ single: Balance; all: Record<string, Balance> }> {
-    const bal = await this.exchange.fetchBalance();
-    const entry = bal[currency] ?? { free: 0, used: 0, total: 0 };
+    const all = await this.fetchBalanceRaw();
     return {
-      single: {
-        free: entry.free ?? 0,
-        used: entry.used ?? 0,
-        total: entry.total ?? 0,
-      },
-      all: this.parseBalances(bal),
+      single: all[currency] ?? { free: 0, used: 0, total: 0 },
+      all,
     };
   }
 

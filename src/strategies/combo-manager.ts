@@ -289,7 +289,10 @@ export class ComboManager {
       }
     }
 
-    // Fetch USDT + all balances in ONE API call (instead of two)
+    // Invalidate balance cache at start of tick — forces fresh fetch, then cached for rest of tick
+    this.exchange.invalidateBalanceCache();
+
+    // Fetch USDT + all balances in ONE API call (cached for subsequent calls within this tick)
     const { single: currentBalance, all: allBalances } = await this.exchange.fetchBalanceAndAll('USDT');
     let totalPortfolioUSDT = currentBalance.total;
 
@@ -847,6 +850,7 @@ export class ComboManager {
       }
 
       const order = await this.exchange.createMarketSell(symbol, sellAmount, 'risk');
+      this.exchange.deductCachedBalance(symbol.split('/')[0], sellAmount);
       const filledAmount = order.filled > 0 ? order.filled : sellAmount;
       const fillPrice = order.price || currentPrice;
 
@@ -926,6 +930,7 @@ export class ComboManager {
           return;
         }
         const order = await this.exchange.createMarketBuy(symbol, suggestedAmount, strategy as any);
+        this.exchange.deductCachedBalance('USDT', suggestedAmount * fallbackPrice);
         const filledAmount = order.filled > 0 ? order.filled : suggestedAmount;
         const buyPrice = order.price || fallbackPrice;
         const buyCost = filledAmount * buyPrice;
@@ -953,6 +958,7 @@ export class ComboManager {
         // Use actual free balance if less than suggested (partial sell)
         const sellAmount = Math.min(suggestedAmount, freeCrypto);
         const order = await this.exchange.createMarketSell(symbol, sellAmount, strategy as any);
+        this.exchange.deductCachedBalance(base, sellAmount);
         const filledAmount = order.filled > 0 ? order.filled : suggestedAmount;
         const sellPrice = order.price || fallbackPrice;
         const sellCost = filledAmount * sellPrice;
@@ -1027,6 +1033,7 @@ export class ComboManager {
           this.log.info(`Selling ${roundedSellAmount} ${base} (~${valueUSDT.toFixed(2)} USDT)`);
 
           const order = await this.exchange.createMarketSell(pair.symbol, roundedSellAmount, 'risk');
+          this.exchange.deductCachedBalance(base, roundedSellAmount);
           const filledAmount = order.filled > 0 ? order.filled : roundedSellAmount;
           const tpPrice = order.price || ticker.last;
           const tpCost = filledAmount * tpPrice;
@@ -1084,6 +1091,7 @@ export class ComboManager {
           if (sellAmount * ticker.last < mp.minCost) continue;
 
           const order = await this.exchange.createMarketSell(sym, sellAmount, 'manual');
+          this.exchange.deductCachedBalance(sym.split('/')[0], sellAmount);
           const filledAmount = order.filled > 0 ? order.filled : sellAmount;
           const sellPrice = order.price || ticker.last;
           this.state.addTrade({
@@ -1326,7 +1334,7 @@ export class ComboManager {
       const st = this.state.getPairStats(sym);
       if (st.buys > 0 || st.sells > 0) {
         const stPnl = st.pnl >= 0 ? `+${st.pnl.toFixed(2)}` : st.pnl.toFixed(2);
-        this.log[level](`    ↳ spent: ${st.spent.toFixed(2)} | earned: ${st.earned.toFixed(2)} | fees: ${st.totalFees.toFixed(3)} | PnL: ${stPnl}`);
+        this.log[level](`         spent: ${st.spent.toFixed(2)} | earned: ${st.earned.toFixed(2)} | fees: ${st.totalFees.toFixed(3)} | PnL: ${stPnl}`);
       }
       pairLogLines.push(`${sym}: ${logParts.join(' | ')}`);
 
@@ -1637,6 +1645,7 @@ export class ComboManager {
     // Execute market buy
     try {
       const order = await this.exchange.createMarketBuy(symbol, roundedAmount, 'manual');
+      this.exchange.deductCachedBalance(quote, roundedAmount * ticker.last);
       const filledAmount = order.filled > 0 ? order.filled : roundedAmount;
       const fillPrice = order.price || ticker.last;
       const cost = filledAmount * fillPrice;

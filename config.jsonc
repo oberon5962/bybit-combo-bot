@@ -4,12 +4,14 @@
   // ============================================================
   // gridSpacingPercent / gridSpacingSellPercent — опционально для каждой пары (иначе берётся из grid.gridSpacingPercent)
   "pairs": [
-    { "symbol": "DOT/USDT", "allocationPercent": 17, "gridSpacingPercent": 1.36, "gridSpacingSellPercent": 1.67 },
-    { "symbol": "NEAR/USDT", "allocationPercent": 17, "gridSpacingPercent": 1.2, "gridSpacingSellPercent": 1.5 },
-    { "symbol": "ADA/USDT", "allocationPercent": 16, "gridSpacingPercent": 1.03, "gridSpacingSellPercent": 1.33 },
-    { "symbol": "SUI/USDT", "allocationPercent": 17, "gridSpacingPercent": 1.13, "gridSpacingSellPercent": 1.43 },
-    { "symbol": "SOL/USDT", "allocationPercent": 17, "gridSpacingPercent": 0.77, "gridSpacingSellPercent": 1.08 },
-    { "symbol": "XRP/USDT", "allocationPercent": 16, "gridSpacingPercent": 0.77, "gridSpacingSellPercent": 1.07 }
+    { "symbol": "DOT/USDT", "allocationPercent": 13, "gridSpacingPercent": 1.45, "gridSpacingSellPercent": 1.75 },
+    { "symbol": "NEAR/USDT", "allocationPercent": 12, "gridSpacingPercent": 1.22, "gridSpacingSellPercent": 1.53 },
+    { "symbol": "ADA/USDT", "allocationPercent": 12, "gridSpacingPercent": 1.03, "gridSpacingSellPercent": 1.35 },
+    { "symbol": "SUI/USDT", "allocationPercent": 13, "gridSpacingPercent": 1.18, "gridSpacingSellPercent": 1.48 },
+    { "symbol": "SOL/USDT", "allocationPercent": 13, "gridSpacingPercent": 0.78, "gridSpacingSellPercent": 1.16 },
+    { "symbol": "XRP/USDT", "allocationPercent": 12, "gridSpacingPercent": 0.81, "gridSpacingSellPercent": 1.13 },
+    { "symbol": "AAVE/USDT", "allocationPercent": 13, "gridSpacingPercent": 1.43, "gridSpacingSellPercent": 1.87 },
+    { "symbol": "RENDER/USDT", "allocationPercent": 12, "gridSpacingPercent": 1.27, "gridSpacingSellPercent": 1.64 }
   ],
 
   // ============================================================
@@ -31,7 +33,7 @@
   // ============================================================
   "grid": {
     "enabled": true,                    // true = grid включен, false = выключить grid
-    "gridLevels": 6,                    // Кол-во уровней (делятся на buy/sell)
+    "gridLevels": 4,                    // Кол-во уровней (делятся на buy/sell)
     "gridSpacingPercent": 1.0,          // DEFAULT расстояние между BUY-уровнями (% от текущей цены при построении сетки). Fallback если пара не задаёт свой
     "gridSpacingSellPercent": 1.4,      // DEFAULT расстояние между SELL-уровнями (% от текущей цены при построении сетки). Fallback если пара не задаёт свой
     "orderSizePercent": 15,             // Размер ордера (% от аллокации пары)

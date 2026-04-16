@@ -409,6 +409,8 @@ export class GridStrategy {
           level.orderId = order.id;
           level.amount = amount;
           freeUSDT -= orderCost;
+          // Deduct from balance cache (with ~0.2% fee buffer) for parallel pair accuracy
+          this.exchange.deductCachedBalance('USDT', orderCost);
           ordersPlaced++;
         } else if (level.side === 'sell' && level.price > currentPrice) {
           // Check if we have enough free crypto to place this sell
@@ -424,6 +426,7 @@ export class GridStrategy {
           level.amount = amount;
           // Subtract placed amount from tracked free balance (for subsequent sell levels)
           freeCrypto -= amount;
+          this.exchange.deductCachedBalance(base, amount);
           ordersPlaced++;
         }
       } catch (err) {
@@ -623,6 +626,7 @@ export class GridStrategy {
               );
               counterOrderId = order.id;
               counterSellCommittedThisTick += counterAmount;
+              this.exchange.deductCachedBalance(symbol.split('/')[0], counterAmount);
             } else {
               // Counter-buy is part of grid cycle — no RSI/EMA filter (only initial buys are filtered)
               // Check free USDT before placing buy counter-order
@@ -644,6 +648,7 @@ export class GridStrategy {
                 `Grid counter-buy ${symbol} @ ${counterPrice}`,
               );
               counterOrderId = order.id;
+              this.exchange.deductCachedBalance('USDT', counterCost);
             }
 
             this.log.info(`Grid counter-order placed: ${counterSide} ${counterAmount} @ ${counterPrice}`, { symbol });
@@ -761,6 +766,7 @@ export class GridStrategy {
               `Grid orphan-sell ${symbol} @ ${sellPrice}`,
             );
             levels.push({ price: sellPrice, amount: sellAmount, side: 'sell', orderId: order.id, filled: false });
+            this.exchange.deductCachedBalance(base, sellAmount);
             orphanPlaced++;
             this.log.info(`Grid orphan-sell placed for ${symbol}: ${sellAmount} @ ${sellPrice} (uncovered position)`);
             remaining -= sellAmount;
