@@ -134,6 +134,9 @@ export class ComboManager {
     const cfgPath = resolve(__dirname, '../../config.jsonc');
     this.lastConfigHash = createHash('md5').update(readFileSync(cfgPath, 'utf-8')).digest('hex');
 
+    // Register Telegram menu commands (updates /command list in Telegram UI)
+    this.tg.registerCommands();
+
     // Telegram startup message
     const mode = this.config.testnet ? 'TESTNET' : 'LIVE';
     const pairs = this.config.pairs.map(p => `${p.symbol} (${p.allocationPercent}%)`).join(', ');
@@ -1380,7 +1383,7 @@ export class ComboManager {
       this.log.info(`Telegram command: /${cmd.command} ${cmd.args}${cmd.confirmed ? ' [confirmed]' : ''}`);
       try {
         // Commands requiring confirmation: stop, sellall, buy
-        const needsConfirm = ['stop', 'sellall', 'buy', 'cancelorders'].includes(cmd.command);
+        const needsConfirm = ['stop', 'sellall', 'buy', 'cancelorders', 'regrid'].includes(cmd.command);
         if (needsConfirm && !cmd.confirmed) {
           const descriptions: Record<string, string> = {
             stop: '⏸ Остановить торговлю?',
@@ -1416,8 +1419,14 @@ export class ComboManager {
           case 'cancelorders':
             await this.cmdCancelOrders();
             break;
+          case 'stats':
+            this.cmdStats();
+            break;
+          case 'regrid':
+            await this.cmdResetGrid();
+            break;
           default:
-            this.tg.sendReply(`Неизвестная команда /${cmd.command}\nДоступные: /status /stop /run /sellall /buy /orders /cancelorders`);
+            this.tg.sendReply(`Неизвестная команда /${cmd.command}\nДоступные: /status /stop /run /sellall /buy /orders /cancelorders /stats /regrid`);
         }
       } catch (err) {
         this.log.error(`Telegram command /${cmd.command} failed: ${sanitizeError(err)}`);
@@ -1728,6 +1737,60 @@ export class ComboManager {
 
     this.state.halted = true;
     this.tg.sendReply(`Все ордера отменены, grid сброшен. Бот остановлен.\n${HALT_HINT}`);
+  }
+
+  private cmdStats(): void {
+    const lines: string[] = ['<b>📊 Trade Statistics</b>', ''];
+    let totalSpent = 0, totalEarned = 0, totalFees = 0;
+
+    for (const pair of this.config.pairs) {
+      const s = this.state.getPairStats(pair.symbol);
+      const pnlSign = s.pnl >= 0 ? '+' : '';
+      lines.push(
+        `<b>${pair.symbol}</b>`,
+        `  ${s.buys}B / ${s.sells}S`,
+        `  Spent: ${s.spent.toFixed(2)} | Earned: ${s.earned.toFixed(2)}`,
+        `  PnL: ${pnlSign}${s.pnl.toFixed(2)} USDT`,
+        '',
+      );
+      totalSpent += s.spent;
+      totalEarned += s.earned;
+      totalFees += s.fees;
+    }
+
+    const totalPnl = totalEarned - totalSpent - totalFees;
+    const sign = totalPnl >= 0 ? '+' : '';
+    lines.push(
+      '<b>TOTAL</b>',
+      `Spent: ${totalSpent.toFixed(2)} | Earned: ${totalEarned.toFixed(2)}`,
+      `Fees: ${totalFees.toFixed(2)} | PnL: ${sign}${totalPnl.toFixed(2)} USDT`,
+    );
+
+    this.tg.sendReply(lines.join('\n'));
+  }
+
+  private async cmdResetGrid(): Promise<void> {
+    this.log.info('Telegram /regrid: cancelling all orders and resetting grid...');
+    let cancelled = 0;
+
+    for (const pair of this.config.pairs) {
+      const sym = pair.symbol;
+      try {
+        await this.grid.cancelAll(sym);
+        this.state.setGridLevels(sym, []);
+        this.state.setGridInitialized(sym, false);
+        this.state.setGridCenterPrice(sym, 0);
+        cancelled++;
+        this.log.info(`  ${sym}: orders cancelled, grid reset`);
+      } catch (err) {
+        this.log.error(`  ${sym}: reset failed — ${sanitizeError(err)}`);
+      }
+    }
+
+    this.tg.sendReply(
+      `✅ Grid reset for ${cancelled}/${this.config.pairs.length} pairs\n` +
+      `Orders cancelled, grid will rebuild on next tick with current spacing.`,
+    );
   }
 
   // ----------------------------------------------------------

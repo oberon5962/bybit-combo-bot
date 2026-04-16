@@ -224,12 +224,14 @@ export class TelegramNotifier {
   registerCommands(): void {
     const commands = [
       { command: 'status', description: 'Сводка: капитал, PnL, позиции' },
+      { command: 'stats', description: 'Статистика торговли по парам' },
       { command: 'orders', description: 'Открытые ордера' },
-      { command: 'run', description: 'Возобновить торговлю' },
       { command: 'stop', description: 'Остановить торговлю' },
+      { command: 'run', description: 'Возобновить торговлю' },
+      { command: 'regrid', description: 'Перестройка торговой сетки со сбросом ордеров' },
       { command: 'cancelorders', description: 'Отменить все ордера + остановить бота' },
-      { command: 'buy', description: '/buy SUI 10 (buy 10 tokens SUI за USDT) или /buy SUI/BTC 10 (buy 10 tokens SUI за BTC)' },
-      { command: 'sellall', description: 'Продать всё + отменить ордера' },
+      { command: 'buy', description: '/buy SUI 10 (buy 10 tokens SUI за USDT) или /buy SUI/BTC 10' },
+      { command: 'sellall', description: 'Продать всё + /cancelorders' },
     ];
 
     const payload = JSON.stringify({ commands });

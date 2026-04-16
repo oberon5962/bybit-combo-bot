@@ -25,6 +25,9 @@ bybit-combo-bot/
 ├── bot-state.json            # Состояние бота (создаётся автоматически)
 ├── check-bybit.ts            # Диагностика: балансы, ордера, тикеры, последние сделки
 ├── register-commands.ts      # Одноразовая регистрация меню команд в Telegram
+├── analyze-volatility.ts     # Скрипт анализа волатильности (standalone CLI)
+├── reset-grid.ts             # Сброс сетки ордеров (standalone, для ручного запуска)
+├── restart-bot.ts            # Перезапуск бота (kill + start)
 ├── bot.log                   # Лог работы (создаётся автоматически)
 ├── errors.log                # Только ошибки
 └── src/
@@ -37,6 +40,7 @@ bybit-combo-bot/
     ├── state.ts              # Персистентное состояние (JSON, debounced atomic write)
     ├── sync.ts               # Синхронизация с биржей при старте + каждые 6ч
     ├── telegram.ts           # Telegram уведомления (queue, rate-limit, HTML)
+    ├── volatility.ts         # Общий модуль анализа волатильности (ATR, percentiles, weighted spacing)
     └── strategies/
         ├── grid.ts           # Grid-стратегия (сетка лимитных ордеров + counter-orders)
         ├── dca.ts            # DCA-стратегия с RSI-фильтром (отключена)
@@ -47,9 +51,9 @@ bybit-combo-bot/
 
 | Параметр | Значение | Описание |
 |---|---|---|
-| **Пары** | SUI/USDT 25%, SOL/USDT 40%, XRP/USDT 35% | 3 пары, суммарная аллокация 100% |
+| **Пары** | DOT 17%, NEAR 17%, ADA 16%, SUI 17%, SOL 17%, XRP 16% | 6 пар, суммарная аллокация 100% |
 | **Режим** | USE_TESTNET=false | Mainnet Bybit |
-| **Капитал** | ~$304 USDT | На реальном Bybit |
+| **Капитал** | ~$307 USDT | На реальном Bybit |
 | **Tick интервал** | 10 сек | Проверка рынка каждые 10 секунд |
 | **Sync интервал** | 6 часов | Полная синхронизация с Bybit |
 
@@ -57,11 +61,14 @@ bybit-combo-bot/
 
 | Параметр | Значение |
 |---|---|
-| gridLevels | 10 (5 buy + 5 sell) |
-| gridSpacingPercent | 0.8% (buy) |
-| gridSpacingSellPercent | 1.4% (sell) |
-| orderSizePercent | 12% от аллокации пары |
-| rebalancePercent | 3% (вверх или вниз от центра) |
+| gridLevels | 6 (3 buy + 3 sell) |
+| gridSpacingPercent | per-pair (fallback 1.0%) |
+| gridSpacingSellPercent | per-pair (fallback 1.4%) |
+| autoSpacingPriority | "auto" (статистика применяется) |
+| autoSpacingIntervalMin | 360 (каждые 6ч) |
+| autoSpacingSafetyMarginPercent | 10% |
+| orderSizePercent | 15% от аллокации пары |
+| rebalancePercent | 2% (вверх или вниз от центра) |
 | rsiOverboughtThreshold | 70 (100 = отключить) |
 | useEmaFilter | false (отключён) |
 | useBollingerAdaptive | true |
@@ -131,14 +138,12 @@ bybit-combo-bot/
 | `/buy SUI/BTC 10` | Купить 10 токенов SUI за BTC (market order) |
 | `/orders` | Показать все открытые ордера |
 | `/cancelorders` | Отменить все ордера + сбросить grid + halt |
+| `/stats` | Статистика торговли по парам (buys/sells/spent/earned/PnL) |
+| `/regrid` | Сброс сетки (cancel orders) + перестройка с текущим spacing |
 
 Ручные покупки через `/buy` не входящих в конфиг пар отслеживаются отдельно (`manualPairs`), отображаются в `/status` и `/orders`, продаются по `/sellall`.
 
-**Регистрация меню команд** (одноразово):
-```bash
-npx ts-node register-commands.ts
-```
-После этого в Telegram при нажатии `/` появится меню с описанием всех команд.
+**Меню команд** регистрируется автоматически при каждом запуске бота через `setMyCommands` API.
 
 ### Telegram через прокси (Custom API URL)
 
@@ -212,7 +217,38 @@ export default {
 - RSI > rsiOverboughtThreshold (70) — grid buy пропускается
 - EMA фильтр отключён (useEmaFilter=false)
 
-**Rebalance:** если цена ушла >3% от центра сетки (вверх или вниз) — все ордера отменяются и сетка пересоздаётся.
+**Rebalance:** если цена ушла >2% от центра сетки (вверх или вниз) — все ордера отменяются и сетка пересоздаётся.
+
+**Per-pair spacing:** каждая пара может иметь свой `gridSpacingPercent` / `gridSpacingSellPercent` в секции `pairs`. Если не указан — берётся глобальный из секции `grid`.
+
+**Auto-adaptive spacing:** бот автоматически пересчитывает оптимальный spacing на основе статистики волатильности (ATR%, перцентили размаха свечей, взвешенное среднее по 4 периодам и 3 таймфреймам). Управляется параметром `autoSpacingPriority`:
+- `"off"` — выключено, не считает, не тратит API
+- `"config"` — считает и пишет в лог/Telegram для сравнения, торгует по config-значениям
+- `"auto"` — считает и **применяет** к торговле (перекрывает config)
+
+При `"auto"`:
+1. При старте бота — запускается анализ (~40 сек), сетки строятся на config-значениях, затем force-rebalance с auto-значениями
+2. Каждые `autoSpacingIntervalMin` минут — пересчёт в фоне (fire-and-forget, не блокирует торговлю)
+3. `autoSpacingSafetyMarginPercent` — коэффициент недоверия, вычитает N% из расчётных значений (например 10% = spacing * 0.9)
+4. Floor: buySpacing >= 0.3%, sellSpacing >= buySpacing + 0.3% (гарантия прибыли после комиссий)
+5. Результат логируется и отправляется в Telegram с пометкой `[AUTO]` / `[CFG]`
+
+**Что происходит каждые `autoSpacingIntervalMin` минут:**
+1. Запускается `runAutoSpacing()` в фоне (fire-and-forget)
+2. Загружает свечи с Bybit (72 API вызова, ~40 сек)
+3. Считает новый ATR%, перцентили, weighted spacing
+4. Применяет safetyMargin → получает новые buySpacing/sellSpacing
+5. Обновляет `autoSpacingMap` в памяти → `grid.setAutoSpacing()`
+6. Логирует результат + отправляет в Telegram
+
+**Что НЕ происходит:** сетки не перестраиваются. Новые значения spacing применяются только при:
+- Следующем ребалансе (drift >2%)
+- Counter-ордерах (fill → встречный ордер)
+- Orphan-sell
+
+Существующие ордера на бирже остаются со старым spacing. Новый spacing "просачивается" постепенно через новые ордера.
+
+Принудительный ребаланс (`forceRebalanceAll`) делается только при **первом** расчёте после старта бота.
 
 **Counter-orders:** при fill buy ордера ставится sell counter на цену + spacing%; при fill sell ордера — buy counter на цену - spacing%. Counter-orders проверяют баланс перед размещением.
 
@@ -409,6 +445,68 @@ npm start
 Summary каждые 10 тиков: капитал, PnL, drawdown, trades, positions, market panic/BTC watchdog.
 
 ## Changelog
+
+### v2.0.0 (2026-04-16–17)
+
+Крупное обновление: auto-adaptive grid spacing, volatility analyzer, lock-file, новые Telegram-команды.
+
+**Auto-adaptive spacing (главная фича):**
+- Новый общий модуль `src/volatility.ts` — анализ волатильности (ATR%, перцентили размаха, weighted spacing)
+- Бот автоматически пересчитывает оптимальный spacing каждые N минут (`autoSpacingIntervalMin`)
+- `autoSpacingPriority`: `"off"` / `"config"` (лог) / `"auto"` (применять)
+- `autoSpacingSafetyMarginPercent` — коэффициент недоверия (вычитать N% из расчёта)
+- Fire-and-forget выполнение — не блокирует торговлю
+- Force-rebalance всех пар после первого расчёта при старте
+- Floor: buySpacing >= 0.3%, sellSpacing >= buySpacing + 0.3%
+- Результат в лог + Telegram с `[AUTO]` / `[CFG]` пометкой
+
+**Per-pair grid spacing:**
+- Каждая пара может иметь свой `gridSpacingPercent` / `gridSpacingSellPercent`
+- Fallback на глобальные значения из секции `grid`
+- Применяется в initGrid, counter-orders, orphan-sell, sync
+
+**Volatility Analyzer (standalone скрипт):**
+- `analyze-volatility.ts` — CLI скрипт для ручного анализа волатильности
+- 6 символов × 4 периода (24h/3d/7d/14d) × 3 таймфрейма (15m/1h/4h)
+- `--json` для машиночитаемого вывода, `--file <path>` для записи в UTF-8
+- Рефакторинг: использует общий модуль `src/volatility.ts`
+
+**Новые Telegram-команды:**
+- `/stats` — статистика торговли по парам (buys/sells/spent/earned/PnL)
+- `/regrid` — сброс сетки (cancel orders) + перестройка с текущим spacing. Требует подтверждения
+- Меню команд регистрируется автоматически при каждом старте бота
+
+**Telegram summary улучшения:**
+- Стоимость ордеров в USDT (price × amount) вместо диапазона цен
+- GridLevelState теперь хранит `amount`
+- Формат: `2B [15.42$]`, `3S [23.10$] + 2Pend [15.68$]`
+- Panic/BTC watchdog статус в summary
+- Sell-ордера: `3S` для активных, `3Pend` для pending (было `3S pend`)
+
+**Статистика торговли (bot-state.json):**
+- Кумулятивная статистика по каждой паре: buys, sells, spent, earned, fees, PnL
+- Автоматически обновляется при каждой сделке через `addTrade()`
+- Переживает рестарты
+
+**Lock-file:**
+- `bot.lock` предотвращает запуск двух экземпляров бота одновременно
+- Проверяет жив ли процесс по PID, stale lock перезаписывается
+- Удаляется при shutdown (soft/hard/force) и при crash
+
+**Hot-reload:**
+- `syncIntervalSec` теперь hot-reload (было только при рестарте)
+- `manager.getConfig()` — доступ к актуальному config из index.ts
+- ExchangeSync получает spacing через `spacingResolver` callback (учитывает auto-spacing)
+
+**Config:**
+- `autoSpacingEnabled` убран, заменён на `autoSpacingPriority` (off/config/auto)
+- `autoSpacingIntervalHours` переименован в `autoSpacingIntervalMin` (в минутах)
+- `rebalancePercent`: 3% → 2%
+- Лог-сообщения auto-spacing на английском
+
+**Утилиты:**
+- `reset-grid.ts` — подробные комментарии (что делает, что сохраняет, когда использовать)
+- `restart-bot.ts` — команды поиска процесса в комментариях
 
 ### v0.7.0 — `6d59eb2` (2026-04-13)
 

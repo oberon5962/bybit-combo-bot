@@ -50,6 +50,13 @@ export interface PairState {
 
   // Trailing SL
   trailingPeak: number;     // максимальная цена с момента входа (0 = не активирован)
+
+  // Trade statistics (cumulative, persisted)
+  statBuys: number;         // total buy trades count
+  statSells: number;        // total sell trades count
+  statSpent: number;        // total USDT spent on buys
+  statEarned: number;       // total USDT earned from sells
+  statFees: number;         // total fees paid
 }
 
 export interface BotState {
@@ -118,6 +125,11 @@ function createEmptyPairState(): PairState {
     cooldownUntil: 0,
     consecutiveSL: 0,
     trailingPeak: 0,
+    statBuys: 0,
+    statSells: 0,
+    statSpent: 0,
+    statEarned: 0,
+    statFees: 0,
   };
 }
 
@@ -187,6 +199,11 @@ export class StateManager {
               cooldownUntil: typeof pd.cooldownUntil === 'number' ? pd.cooldownUntil : 0,
               consecutiveSL: typeof pd.consecutiveSL === 'number' ? pd.consecutiveSL : 0,
               trailingPeak: typeof pd.trailingPeak === 'number' ? pd.trailingPeak : 0,
+              statBuys: typeof pd.statBuys === 'number' ? pd.statBuys : 0,
+              statSells: typeof pd.statSells === 'number' ? pd.statSells : 0,
+              statSpent: typeof pd.statSpent === 'number' ? pd.statSpent : 0,
+              statEarned: typeof pd.statEarned === 'number' ? pd.statEarned : 0,
+              statFees: typeof pd.statFees === 'number' ? pd.statFees : 0,
             };
           }
         }
@@ -372,6 +389,31 @@ export class StateManager {
     this.saveCritical();
   }
 
+  // Trade statistics
+  recordTradeStat(symbol: string, side: 'buy' | 'sell', cost: number, fee: number): void {
+    const ps = this.getPairState(symbol);
+    if (side === 'buy') {
+      ps.statBuys++;
+      ps.statSpent += cost;
+    } else {
+      ps.statSells++;
+      ps.statEarned += cost;
+    }
+    ps.statFees += fee;
+    this.save();
+  }
+  getPairStats(symbol: string): { buys: number; sells: number; spent: number; earned: number; fees: number; pnl: number } {
+    const ps = this.getPairState(symbol);
+    return {
+      buys: ps.statBuys,
+      sells: ps.statSells,
+      spent: ps.statSpent,
+      earned: ps.statEarned,
+      fees: ps.statFees,
+      pnl: ps.statEarned - ps.statSpent - ps.statFees,
+    };
+  }
+
   // Per-pair halt
   isPairHalted(symbol: string): boolean {
     return this.getPairState(symbol).halted;
@@ -450,6 +492,8 @@ export class StateManager {
     if (this.state.recentTrades.length > 500) {
       this.state.recentTrades = this.state.recentTrades.slice(-500);
     }
+    // Update per-pair cumulative statistics
+    this.recordTradeStat(trade.symbol, trade.side as 'buy' | 'sell', trade.cost, trade.fee);
     this.saveCritical(); // trade records must survive crash
   }
 
