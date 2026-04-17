@@ -4,14 +4,14 @@
   // ============================================================
   // gridSpacingPercent / gridSpacingSellPercent — опционально для каждой пары (иначе берётся из grid.gridSpacingPercent)
   "pairs": [
-    { "symbol": "DOT/USDT", "allocationPercent": 13, "gridSpacingPercent": 1.45, "gridSpacingSellPercent": 1.75 },
-    { "symbol": "NEAR/USDT", "allocationPercent": 12, "gridSpacingPercent": 1.22, "gridSpacingSellPercent": 1.53 },
-    { "symbol": "ADA/USDT", "allocationPercent": 12, "gridSpacingPercent": 1.03, "gridSpacingSellPercent": 1.35 },
+    { "symbol": "DOT/USDT", "allocationPercent": 13, "gridSpacingPercent": 1.32, "gridSpacingSellPercent": 1.62 },
+    { "symbol": "NEAR/USDT", "allocationPercent": 12, "gridSpacingPercent": 1.16, "gridSpacingSellPercent": 1.46 },
+    { "symbol": "ADA/USDT", "allocationPercent": 12, "gridSpacingPercent": 1.05, "gridSpacingSellPercent": 1.35 },
     { "symbol": "SUI/USDT", "allocationPercent": 13, "gridSpacingPercent": 1.18, "gridSpacingSellPercent": 1.48 },
-    { "symbol": "SOL/USDT", "allocationPercent": 13, "gridSpacingPercent": 0.78, "gridSpacingSellPercent": 1.16 },
-    { "symbol": "XRP/USDT", "allocationPercent": 12, "gridSpacingPercent": 0.81, "gridSpacingSellPercent": 1.13 },
-    { "symbol": "AAVE/USDT", "allocationPercent": 13, "gridSpacingPercent": 1.43, "gridSpacingSellPercent": 1.87 },
-    { "symbol": "RENDER/USDT", "allocationPercent": 12, "gridSpacingPercent": 1.27, "gridSpacingSellPercent": 1.64 }
+    { "symbol": "SOL/USDT", "allocationPercent": 13, "gridSpacingPercent": 0.88, "gridSpacingSellPercent": 1.18 },
+    { "symbol": "XRP/USDT", "allocationPercent": 12, "gridSpacingPercent": 0.85, "gridSpacingSellPercent": 1.15 },
+    { "symbol": "AAVE/USDT", "allocationPercent": 13, "gridSpacingPercent": 1.43, "gridSpacingSellPercent": 1.73 },
+    { "symbol": "RENDER/USDT", "allocationPercent": 12, "gridSpacingPercent": 1.28, "gridSpacingSellPercent": 1.67 }
   ],
 
   // ============================================================
@@ -52,10 +52,10 @@
     // maxSellLossPercent% от avgEntry — sell вообще не ставится, бот полагается либо на существующие более
     // высокие sell-ордера, либо orphan-sell механизм автоматически поставит sell на прибыльной цене
     // (max(avgEntry*(1+sellSpacing%), currentPrice*(1+sellSpacing%))) в следующем тике — позиция никогда не остаётся без покрытия.
-    "minSellProfitPercent": 0.5,        // Минимальная прибыль для безубыточного sell (% над avgEntry). Покрывает комиссии round-trip (0.2%) + запас (0.1%)
+    "minSellProfitPercent": 0.5,        // Минимальная прибыль для безубыточного sell (% над avgEntry). Покрывает комиссии round-trip (0.2%) + запас (0.3%)
     "maxSellLossPercent": 1,            // Максимально допустимый убыток в midpoint-режиме (% ниже avgEntry). Если midpoint ниже этого порога — sell не ставится
 
-    "orphanSellMaxPerTick": 5,          // Максимум orphan-sell ордеров за один тик (защита от спама при рассинхроне позиции)
+    "orphanSellMaxPerTick": 10,         // Максимум orphan-sell ордеров за один тик (защита от спама при рассинхроне позиции)
 
     // Auto-adaptive spacing (на основе статистики волатильности)
     "autoSpacingIntervalMin": 180,       // Как часто пересчитывать в минутах (180 = каждые 3ч)

@@ -186,7 +186,9 @@ export class ComboManager {
         const cfgSell = pair?.gridSpacingSellPercent ?? this.config.grid.gridSpacingSellPercent;
         const active = this.config.grid.autoSpacingPriority === 'auto' ? 'AUTO' : 'CFG';
 
-        logLines.push(`  ${r.symbol}: auto=${buy}%/${sell}% cfg=${cfgBuy}%/${cfgSell}% regime=${r.regime} [${active}]`);
+        const symPaddedLog = (r.symbol + ':').padEnd(maxSymLen + 2);
+        const regLog = regimeShort[r.regime] ?? r.regime;
+        logLines.push(`  ${symPaddedLog}auto=${buy}%/${sell}% cfg=${cfgBuy}%/${cfgSell}% regime=${regLog} [${active}]`);
         const symPadded = (r.symbol + ':').padEnd(maxSymLen + 2);
         const reg = regimeShort[r.regime] ?? r.regime;
         tgLines.push(`${symPadded}${buy}%/${sell}% (${reg})`);
@@ -1844,6 +1846,10 @@ export class ComboManager {
       '/freezebuy — заморозить покупки по валюте',
       '/unfreezebuy — разморозить',
       '',
+      '<b>🔻 Распродажа по торговой сетке без покупки новой:</b>',
+      '/sellgrid — продавать по торговой сетке + /freezebuy',
+      '/unsellgrid — отключить sellgrid + /unfreezebuy,
+      '',
       '<b>⚙️ Управление:</b>',
       '/stop — остановить торговлю',
       '/run — возобновить торговлю',
@@ -2213,7 +2219,14 @@ export class ComboManager {
       });
     }
 
-    for (const pair of this.config.pairs) {
+    // Sort pairs by PnL descending (highest profit first, biggest loss last)
+    const pairsSorted = [...this.config.pairs].sort((a, b) => {
+      const pnlA = this.state.getPairStats(a.symbol).pnl;
+      const pnlB = this.state.getPairStats(b.symbol).pnl;
+      return pnlB - pnlA;
+    });
+
+    for (const pair of pairsSorted) {
       const s = this.state.getPairStats(pair.symbol);
       const pnlSign = s.pnl >= 0 ? '+' : '';
       const pnlPct = s.spent > 0 ? (s.pnl / s.spent) * 100 : 0;
