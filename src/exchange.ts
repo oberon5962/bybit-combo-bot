@@ -19,6 +19,10 @@ export class BybitExchange {
   private balanceCacheTime: number = 0;
   private balanceCacheTTL: number = 8000; // 8s — expires within one tick (10s)
 
+  // Ticker cache: populated by every fetchTicker call; reused by /stats and other non-critical paths.
+  // Main tick loop already refreshes tickers every 10s, so cache stays warm.
+  private tickerCache: Map<string, { ticker: Ticker; timestamp: number }> = new Map();
+
   constructor(config: BotConfig, log: Logger) {
     this.log = log;
 
@@ -46,13 +50,24 @@ export class BybitExchange {
 
   async fetchTicker(symbol: string): Promise<Ticker> {
     const t = await this.exchange.fetchTicker(symbol);
-    return {
+    const ticker: Ticker = {
       symbol,
       last: t.last ?? 0,
       bid: t.bid ?? 0,
       ask: t.ask ?? 0,
       volume24h: t.quoteVolume ?? 0,
     };
+    this.tickerCache.set(symbol, { ticker, timestamp: Date.now() });
+    return ticker;
+  }
+
+  /** Get cached ticker if younger than maxAgeMs, else fetch fresh. Used by non-critical paths (/stats). */
+  async getCachedOrFreshTicker(symbol: string, maxAgeMs: number = 15000): Promise<Ticker> {
+    const cached = this.tickerCache.get(symbol);
+    if (cached && Date.now() - cached.timestamp < maxAgeMs) {
+      return cached.ticker;
+    }
+    return this.fetchTicker(symbol);
   }
 
   async fetchOHLCV(

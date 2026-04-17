@@ -85,6 +85,9 @@ export interface GridConfig {
 
   // Auto-adaptive spacing (на основе волатильности)
   sellTrailingDownHours: number;            // через N часов sell сдвигается к break-even (0 = выключено)
+  minSellProfitPercent: number;             // минимальная прибыль для безубыточного sell (% над avgEntry, покрывает комиссии + буфер)
+  maxSellLossPercent: number;               // максимальный убыток в midpoint-режиме (% ниже avgEntry, иначе skip)
+  orphanSellMaxPerTick: number;             // максимум orphan-sell ордеров за один тик
   autoSpacingIntervalMin: number;          // как часто пересчитывать (минуты, напр. 360 = каждые 6ч)
   autoSpacingSafetyMarginPercent: number; // коэффициент недоверия — вычитать N% из расчётных значений
   autoSpacingPriority: 'off' | 'config' | 'auto'; // "off" = выключено, "config" = считать но не применять, "auto" = применять

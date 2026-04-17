@@ -27,6 +27,8 @@ export class TelegramNotifier {
   private lastUpdateId = 0;
   private apiHostname: string;
   private apiPort: number;
+  private processedCallbackIds: Set<string> = new Set(); // dedup against double-click on inline buttons
+  private processedCallbackOrder: string[] = []; // FIFO to cap Set size
 
   constructor(config: TelegramConfig, log: Logger) {
     this.config = config;
@@ -97,6 +99,125 @@ export class TelegramNotifier {
     this.enqueue(text);
   }
 
+  /** Send /buy currency selection menu: buttons with base tickers + [Другая] + [Ввести вручную] */
+  sendBuyMenu(currencies: string[]): void {
+    if (!this.config.enabled) return;
+    const buttons: Array<Array<{ text: string; callback_data: string }>> = [];
+    // 4 per row
+    for (let i = 0; i < currencies.length; i += 4) {
+      buttons.push(currencies.slice(i, i + 4).map(c => ({ text: c, callback_data: `buymenu:${c}` })));
+    }
+    buttons.push([
+      { text: '🔤 Другая', callback_data: 'buyother' },
+      { text: '✏️ Ввести вручную', callback_data: 'buycustom' },
+    ]);
+    buttons.push([{ text: '❌ Отмена', callback_data: 'cancel' }]);
+    const payload = JSON.stringify({
+      chat_id: this.config.chatId,
+      text: '🛒 Выбери валюту для покупки:',
+      reply_markup: { inline_keyboard: buttons },
+    });
+    this.sendRaw(payload);
+  }
+
+  /** Send /freezebuy currency menu. frozen[] marks already-blocked bases with 🧊 icon. */
+  sendFreezeMenu(currencies: string[], frozen: string[]): void {
+    if (!this.config.enabled) return;
+    const fzSet = new Set(frozen.map(c => c.toUpperCase()));
+    const buttons: Array<Array<{ text: string; callback_data: string }>> = [];
+    for (let i = 0; i < currencies.length; i += 4) {
+      buttons.push(currencies.slice(i, i + 4).map(c => ({
+        text: fzSet.has(c.toUpperCase()) ? `${c} 🧊` : c,
+        callback_data: `freezemenu:${c}`,
+      })));
+    }
+    buttons.push([{ text: '❌ Отмена', callback_data: 'cancel' }]);
+    const payload = JSON.stringify({
+      chat_id: this.config.chatId,
+      text: '🧊 Выбери валюту для заморозки покупок:',
+      reply_markup: { inline_keyboard: buttons },
+    });
+    this.sendRaw(payload);
+  }
+
+  /** Send /sellgrid currency menu. active[] marks already-enabled bases with 🔻 icon. */
+  sendSellGridMenu(currencies: string[], active: string[]): void {
+    if (!this.config.enabled) return;
+    const actSet = new Set(active.map(c => c.toUpperCase()));
+    const buttons: Array<Array<{ text: string; callback_data: string }>> = [];
+    for (let i = 0; i < currencies.length; i += 4) {
+      buttons.push(currencies.slice(i, i + 4).map(c => ({
+        text: actSet.has(c.toUpperCase()) ? `${c} 🔻` : c,
+        callback_data: `sellgridmenu:${c}`,
+      })));
+    }
+    buttons.push([{ text: '❌ Отмена', callback_data: 'cancel' }]);
+    const payload = JSON.stringify({
+      chat_id: this.config.chatId,
+      text: '🔻 Выбери валюту для sellgrid-режима (ladder распродажи):',
+      reply_markup: { inline_keyboard: buttons },
+    });
+    this.sendRaw(payload);
+  }
+
+  /** Send /unsellgrid menu — only currencies with active sellgrid. */
+  sendUnsellGridMenu(active: string[]): void {
+    if (!this.config.enabled) return;
+    if (active.length === 0) {
+      this.sendReply('Нет активных sellgrid-режимов.');
+      return;
+    }
+    const buttons: Array<Array<{ text: string; callback_data: string }>> = [];
+    for (let i = 0; i < active.length; i += 4) {
+      buttons.push(active.slice(i, i + 4).map(c => ({ text: c, callback_data: `unsellgridmenu:${c}` })));
+    }
+    buttons.push([{ text: '❌ Отмена', callback_data: 'cancel' }]);
+    const payload = JSON.stringify({
+      chat_id: this.config.chatId,
+      text: '✅ Выбери валюту для отключения sellgrid:',
+      reply_markup: { inline_keyboard: buttons },
+    });
+    this.sendRaw(payload);
+  }
+
+  /** Send /unfreezebuy menu — only frozen currencies. */
+  sendUnfreezeMenu(frozen: string[]): void {
+    if (!this.config.enabled) return;
+    if (frozen.length === 0) {
+      this.sendReply('Нет замороженных валют.');
+      return;
+    }
+    const buttons: Array<Array<{ text: string; callback_data: string }>> = [];
+    for (let i = 0; i < frozen.length; i += 4) {
+      buttons.push(frozen.slice(i, i + 4).map(c => ({ text: c, callback_data: `unfreezemenu:${c}` })));
+    }
+    buttons.push([{ text: '❌ Отмена', callback_data: 'cancel' }]);
+    const payload = JSON.stringify({
+      chat_id: this.config.chatId,
+      text: '✅ Выбери валюту для разморозки:',
+      reply_markup: { inline_keyboard: buttons },
+    });
+    this.sendRaw(payload);
+  }
+
+  /** Send /buy amount selection menu: preset USDT amounts + Отмена */
+  sendBuyAmountMenu(currency: string, presets: number[]): void {
+    if (!this.config.enabled) return;
+    const row = presets.map(n => ({ text: `$${n}`, callback_data: `buysum:${currency}:${n}` }));
+    const payload = JSON.stringify({
+      chat_id: this.config.chatId,
+      text: `🛒 <b>${currency}</b> — сколько USDT потратить?`,
+      parse_mode: 'HTML',
+      reply_markup: {
+        inline_keyboard: [
+          row,
+          [{ text: '❌ Отмена', callback_data: 'cancel' }],
+        ],
+      },
+    });
+    this.sendRaw(payload);
+  }
+
   /** Send reply with inline keyboard [Да] [Нет] for confirmation */
   sendConfirmation(text: string, callbackData: string): void {
     if (!this.config.enabled) return;
@@ -144,12 +265,57 @@ export class TelegramNotifier {
           const cbChatId = String(cb.message?.chat?.id ?? '');
           if (cbChatId !== this.config.chatId) continue;
 
+          // Dedup: guard against double-click producing two identical callbacks
+          if (this.processedCallbackIds.has(cb.id)) {
+            this.answerCallbackQuery(cb.id);
+            continue;
+          }
+          this.processedCallbackIds.add(cb.id);
+          this.processedCallbackOrder.push(cb.id);
+          if (this.processedCallbackOrder.length > 200) {
+            const evicted = this.processedCallbackOrder.shift();
+            if (evicted) this.processedCallbackIds.delete(evicted);
+          }
+
           // Answer callback to remove "loading" spinner
           this.answerCallbackQuery(cb.id);
 
           const data = cb.data ?? '';
           if (data === 'cancel') {
             this.sendReply('❌ Отменено');
+            continue;
+          }
+          // /buy wizard steps — emitted as internal commands (names prefixed with _)
+          if (data.startsWith('buymenu:')) {
+            commands.push({ command: '_buymenu', args: data.substring('buymenu:'.length), chatId: cbChatId, messageId: cb.message?.message_id ?? 0, confirmed: true });
+            continue;
+          }
+          if (data.startsWith('buysum:')) {
+            commands.push({ command: '_buysum', args: data.substring('buysum:'.length), chatId: cbChatId, messageId: cb.message?.message_id ?? 0, confirmed: true });
+            continue;
+          }
+          if (data === 'buycustom') {
+            commands.push({ command: '_buycustom', args: '', chatId: cbChatId, messageId: cb.message?.message_id ?? 0, confirmed: true });
+            continue;
+          }
+          if (data === 'buyother') {
+            commands.push({ command: '_buyother', args: '', chatId: cbChatId, messageId: cb.message?.message_id ?? 0, confirmed: true });
+            continue;
+          }
+          if (data.startsWith('freezemenu:')) {
+            commands.push({ command: '_freezemenu', args: data.substring('freezemenu:'.length), chatId: cbChatId, messageId: cb.message?.message_id ?? 0, confirmed: true });
+            continue;
+          }
+          if (data.startsWith('unfreezemenu:')) {
+            commands.push({ command: '_unfreezemenu', args: data.substring('unfreezemenu:'.length), chatId: cbChatId, messageId: cb.message?.message_id ?? 0, confirmed: true });
+            continue;
+          }
+          if (data.startsWith('sellgridmenu:')) {
+            commands.push({ command: '_sellgridmenu', args: data.substring('sellgridmenu:'.length), chatId: cbChatId, messageId: cb.message?.message_id ?? 0, confirmed: true });
+            continue;
+          }
+          if (data.startsWith('unsellgridmenu:')) {
+            commands.push({ command: '_unsellgridmenu', args: data.substring('unsellgridmenu:'.length), chatId: cbChatId, messageId: cb.message?.message_id ?? 0, confirmed: true });
             continue;
           }
           if (data.startsWith('confirm:')) {
@@ -223,15 +389,20 @@ export class TelegramNotifier {
 
   registerCommands(): void {
     const commands = [
+      { command: 'start', description: 'Приветствие и список команд' },
       { command: 'status', description: 'Сводка: капитал, PnL, позиции' },
       { command: 'stats', description: 'Статистика торговли по парам' },
       { command: 'orders', description: 'Открытые ордера' },
       { command: 'stop', description: 'Остановить торговлю' },
       { command: 'run', description: 'Возобновить торговлю' },
       { command: 'regrid', description: 'Перестройка торговой сетки со сбросом ордеров' },
+      { command: 'freezebuy', description: 'Заморозить покупки по валюте: /freezebuy XRP' },
+      { command: 'unfreezebuy', description: 'Разморозить покупки: /unfreezebuy XRP' },
+      { command: 'sellgrid', description: 'Ladder-распродажа: sell fill → новый sell выше' },
+      { command: 'unsellgrid', description: 'Отключить sellgrid + разморозить buy' },
       { command: 'cancelorders', description: 'Отменить все ордера + остановить бота' },
-      { command: 'buy', description: '/buy SUI 10 (buy 10 tokens SUI за USDT) или /buy SUI/BTC 10' },
-      { command: 'sellall', description: 'Продать всё + /cancelorders' },
+      { command: 'buy', description: 'Купить кол-во валюты (за USDT): /buy SUI 10 или /buy SUI USDT 10' },
+      { command: 'sellall', description: 'Продать всё + /cancelorders' }
     ];
 
     const payload = JSON.stringify({ commands });

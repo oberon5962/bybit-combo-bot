@@ -41,10 +41,21 @@
     "rsiOverboughtThreshold": 70,       // Пропускаем grid-buy при RSI > 70 (100 = отключить)
     "useEmaFilter": false,              // true = блокировать buy при bearish EMA crossover
     "useBollingerAdaptive": true,       // Адаптивный grid по Bollinger Bands
-    "bollingerBuyMultiplier": 1.5,      // orderSize * 1.5 при покупке у нижней полосы BB
-    "bollingerSellMultiplier": 1.5,     // orderSize * 1.5 при продаже у верхней полосы BB
+    "bollingerBuyMultiplier": 1.5,      // orderSize * 1.5 при покупке у нижней полосы BB или все, что есть
+    "bollingerSellMultiplier": 1.5,     // orderSize * 1.5 при продаже у верхней полосы BB или все, что есть
     "bollingerShiftLevels": 2,          // Перекинуть 2 уровня в пользу buy/sell по BB
     "sellTrailingDownHours": 12,        // Через N часов sell без исполнения сдвигается к break-even (0 = выкл)
+
+    // Защита от продажи в убыток (используется в Counter-Sell Guard и Grid Sell Guard).
+    // Если рассчитанная цена sell (по spacing) ниже безубыточной (avgEntry * (1 + minSellProfitPercent/100)) —
+    // бот берёт середину между spacing-ценой и безубыточной (midpoint). Но если midpoint даёт убыток больше
+    // maxSellLossPercent% от avgEntry — sell вообще не ставится, бот полагается либо на существующие более
+    // высокие sell-ордера, либо orphan-sell механизм автоматически поставит sell на прибыльной цене
+    // (max(avgEntry*(1+sellSpacing%), currentPrice*(1+sellSpacing%))) в следующем тике — позиция никогда не остаётся без покрытия.
+    "minSellProfitPercent": 0.5,        // Минимальная прибыль для безубыточного sell (% над avgEntry). Покрывает комиссии round-trip (0.2%) + запас (0.1%)
+    "maxSellLossPercent": 1,            // Максимально допустимый убыток в midpoint-режиме (% ниже avgEntry). Если midpoint ниже этого порога — sell не ставится
+
+    "orphanSellMaxPerTick": 5,          // Максимум orphan-sell ордеров за один тик (защита от спама при рассинхроне позиции)
 
     // Auto-adaptive spacing (на основе статистики волатильности)
     "autoSpacingIntervalMin": 180,       // Как часто пересчитывать в минутах (180 = каждые 3ч)
@@ -112,15 +123,15 @@
     "sendAlerts": true,                 // Алерты: SL/TP/halt/panic
     "summaryIntervalTicks": 120,         // Summary в Telegram раз в 120 тиков (~20 мин)
     "logSummaryIntervalTicks": 15,      // Summary в bot.log раз в 15 тиков (~2,5 мин)
-    "commandPollIntervalTicks": 2,      // Проверять Telegram-команды каждые 3 тика (0 = выкл)
-    "confirmationTimeoutSec": 60        // Таймаут подтверждения команды в секундах (0 = без таймаута)
+    "commandPollIntervalTicks": 1,      // Проверять Telegram-команды каждый тик (~10с) — для плавного /buy wizard
+    "confirmationTimeoutSec": 120        // Таймаут подтверждения команды в секундах (0 = без таймаута)
   },
 
   // ============================================================
   // Bot Intervals — интервалы работы
   // ============================================================
   "tickIntervalSec": 10,               // Основной цикл бота (10 сек, НЕ hot-reload)
-  "syncIntervalSec": 43200,            // Sync с Bybit каждые 6 часов ( 0 = выкл)
-  "configReloadIntervalTicks": 0,       // Перечитывать config.json каждые 6 тиков (0 = выкл, проверка раз в 5 мин)
+  "syncIntervalSec": 43200,            // Sync с Bybit каждые 12 часов ( 0 = выкл)
+  "configReloadIntervalTicks": 3,       // Перечитывать config.jsonc каждые 3 тика (~30с). 0 = выкл (fallback раз в 5 мин)
   "parallelPairs": 4                    // Обработка пар параллельно (1 = последовательно, 2 = по 2, 3 = по 3)
 }

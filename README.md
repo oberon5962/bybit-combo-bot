@@ -135,7 +135,7 @@ bybit-combo-bot/
 | `/run` | Возобновить торговлю (сбрасывает halt, cooldown, consecutiveSL) |
 | `/sellall` | Продать все позиции + отменить ордера + halt |
 | `/buy SUI 10` | Купить 10 токенов SUI за USDT (market order) |
-| `/buy SUI/BTC 10` | Купить 10 токенов SUI за BTC (market order) |
+| `/buy SUI BTC 10` | Купить 10 токенов SUI за BTC (market order) |
 | `/orders` | Показать все открытые ордера |
 | `/cancelorders` | Отменить все ордера + сбросить grid + halt |
 | `/stats` | Статистика торговли по парам (buys/sells/spent/earned/PnL) |
@@ -212,6 +212,16 @@ export default {
 Размещает сетку лимитных ордеров на покупку ниже текущей цены и на продажу выше. Buy-уровни с шагом 0.8%, sell-уровни с шагом 1.4% (раздельные spacing). Когда покупка исполняется — бот ставит контр-ордер на продажу на уровень выше (+ gridSpacingSell%). Когда продажа исполняется — ставит контр-ордер на покупку ниже. Зарабатывает на каждом колебании цены внутри диапазона.
 
 **Bollinger Bands Adaptive Grid:** когда цена у нижней полосы BB — больше buy-уровней (shift +2) и увеличенный orderSize (x1.5). Когда у верхней BB + bearish EMA — больше sell-уровней и увеличенный sell size. При bullish EMA sell не усиливается.
+
+**Fallback при нехватке капитала (Bollinger multiplier):**
+
+Если умноженный размер (1.5x) не помещается в свободный баланс — бот **не пропускает** ордер, а выставляет **столько сколько есть**:
+
+- **Buy:** хотим купить на $7.5 (1.5x), есть $5 USDT → считаем сколько монет можем купить на $5 (с учётом minAmount и minCost) → покупаем это количество. Лог: `Buy reduced (low USDT): 0.06 → 0.04 (67% of target)`.
+- **Sell:** хотим продать 10 SUI (1.5x), есть 7 SUI → продаём все 7 (если >= minAmount и minCost × price). Лог: `Sell reduced (low SUI): 10 → 7 (70% of target)`.
+- **Skip только если** даже минимальный размер (minAmount/minCost) не помещается в баланс.
+
+Это предотвращает "замораживание" торговли когда на 1.5x не хватает — бот всё равно торгует по доступному размеру.
 
 **Фильтры для buy-ордеров:**
 - RSI > rsiOverboughtThreshold (70) — grid buy пропускается
@@ -379,6 +389,49 @@ Grid-ордера — лимитные, исполняются напрямую 
 
 Bybit использует TICK_SIZE precision mode — бот конвертирует tick size в decimal places автоматически. Суммы округляются вниз (`Math.floor`).
 
+## Lock-файл (bot.lock)
+
+Файл `bot.lock` предотвращает запуск двух экземпляров бота одновременно. Содержит PID процесса.
+
+### Жизненный цикл
+
+| Событие | Что происходит с bot.lock |
+|---------|--------------------------|
+| **Запуск бота** | Проверяет bot.lock → если PID жив → отказ; если PID мёртв → перезаписывает; если нет файла → создаёт |
+| **Soft shutdown** (Ctrl+C × 1) | Удаляет bot.lock → process.exit(0) |
+| **Hard shutdown** (Ctrl+C × 2) | Удаляет bot.lock → отменяет все ордера → process.exit(1) |
+| **Force exit** (Ctrl+C × 3) | Удаляет bot.lock → process.exit(2) |
+| **Fatal error** (crash) | Удаляет bot.lock → process.exit(1) |
+| **Telegram /stop** | bot.lock **не удаляется** — процесс жив, просто halted=true. /run возобновит торговлю |
+| **Telegram /run** | bot.lock не меняется — процесс тот же |
+| **Убит через диспетчер задач** | bot.lock **остаётся**, но при следующем запуске бот проверит PID через `process.kill(pid, 0)` — процесс мёртв → stale lock → перезапишет |
+| **taskkill //F //IM node.exe** | bot.lock **остаётся** — аналогично диспетчеру задач, stale lock обрабатывается |
+| **restart-bot.ts** | Удаляет bot.lock перед запуском нового процесса |
+| **reset-grid.ts** | Удаляет bot.lock после сброса сетки |
+| **Отключение питания / BSOD** | bot.lock остаётся — stale lock, бот запустится нормально |
+
+### Ручное удаление
+
+Если бот не запускается из-за lock:
+```bash
+rm bot.lock
+# или
+del bot.lock
+```
+
+### Проверка PID (как работает stale-detection)
+
+```typescript
+try {
+  process.kill(pid, 0); // signal 0 = проверка без убийства
+  // Процесс жив → отказ запуска
+} catch {
+  // Процесс мёртв → stale lock → перезаписываем
+}
+```
+
+`process.kill(pid, 0)` кроссплатформенный — работает на Windows, Linux, macOS.
+
 ## Запуск
 
 ### 1. Установка
@@ -462,6 +515,208 @@ Summary каждые 10 тиков: капитал, PnL, drawdown, trades, posit
 
 ## Changelog
 
+### v0.7.0 — `6d59eb2` (2026-04-13)
+
+Крупное обновление: исправление критических багов, улучшение orphan-sell, skip-логирование, retry.
+
+**Критические фиксы:**
+- **closePosition возвращает boolean** — SL/TP/trailing проверяют результат и не сбрасывают позицию при неудачной продаже
+- **Trailing SL при убытке → cooldown** — раньше trailing SL при убытке не запускал cooldown, теперь запускает (как обычный SL)
+- **Counter-buy без RSI/EMA фильтра** — контр-ордер после sell fill больше не блокируется индикаторами (часть grid-цикла)
+- **Counter-sell корректировка суммы** — если fee съел часть баланса, ордер автоматически уменьшается вместо ошибки
+- **filledAmount fallback** — fallback на expectedAmount только при status=closed, иначе 0 (предотвращает phantom fills)
+- **Обработка 'cancelled' от Bybit** — Bybit возвращает и 'canceled', и 'cancelled', теперь обрабатываются оба варианта
+
+**Orphan-sell покрытие:**
+- Старая логика: "есть ли хоть 1 sell ордер?" → Новая: "покрывают ли sell-ордера всю позицию?"
+- Непокрытая позиция → несколько sell-ордеров на разных ценовых уровнях (+0.5%, +1.0%...)
+- Цена sell = `max(entryBased, priceBased)` — защита от отклонения Bybit по минимальной цене
+- Максимум 5 orphan-sell за тик (safety limit)
+
+**Sync (sync.ts):**
+- При пропаже ордера из open orders — проверяет через `fetchOrder` был ли он filled
+- Filled ордера обновляют позицию и записывают trade
+- Fallback на `fetchClosedOrders` если order purged из истории Bybit
+- Неизвестные ордера на бирже adoptируются в grid (вместо отмены)
+
+**Skip-логирование:**
+- Причины пропуска grid-ордеров выводятся на уровне INFO (было DEBUG)
+- Обобщённые причины: `overbought`, `EMA bearish`, `low USDT`, `low SOL` — без конкретных цифр RSI/баланса
+- Дедупликация: лог появляется только при изменении причин, молчит между тиками
+- `Grid orders resumed` — когда все ордера снова размещены
+
+**Retry и устойчивость:**
+- `RateLimitExceeded` добавлен в transient errors для retry
+- Exponential backoff: 1s → 2s → 4s (было линейное 1s → 2s)
+
+**Конфигурация:**
+- Аллокации: SUI 25%, SOL 40%, XRP 35%
+- orderSizePercent: 20% (было 18%)
+- rebalancePercent: 2% (было 3%)
+- gridLevels: 20 (10 buy + 10 sell)
+- Подробные комментарии для indicators (RSI, EMA, Bollinger)
+
+### v0.8.0 — `8e5b3fa` (2026-04-13)
+
+Два раунда аудита (12 багов), новый механизм Bollinger Bands Adaptive Grid.
+
+**Новый механизм: Bollinger Bands Adaptive Grid (включаемый/отключаемый)**
+
+Адаптирует grid на основе позиции цены относительно полос Боллинджера + EMA фильтр для sell:
+
+| Ситуация | Уровни (при shift=3) | Buy size | Sell size |
+|---|---|---|---|
+| Цена у нижней BB | 13B/7S | x1.5 | x1.0 |
+| Цена ниже середины BB | 11B/9S | x1.0 | x1.0 |
+| Цена нейтрально | 10B/10S | x1.0 | x1.0 |
+| Цена у верхней BB + EMA bearish | 7B/13S | x1.0 | x1.5 |
+| Цена у верхней BB + EMA bullish | 10B/10S | x1.0 | x1.0 |
+
+Конфиг: `useBollingerAdaptive`, `bollingerBuyMultiplier`, `bollingerSellMultiplier`, `bollingerShiftLevels`.
+
+**EMA фильтр — persistent вместо event:**
+- Было: `emaCrossover === 'bearish'` (срабатывает на 1 свечу в момент пересечения)
+- Стало: `emaFast < emaSlow` (постоянно пока fast ниже slow = нисходящий тренд)
+
+**Аудит раунд 1 — 7 багов (коммит `a13b9c4`):**
+- grid.ts: cancelled-check был unreachable (dead branch) — переставлен вверх
+- grid.ts: counter-price использует actualPrice (реальный fill), а не filledPrice (лимитный)
+- grid.ts: orphan-sell использует freeBal напрямую + guard для orderAmount<=0
+- sync.ts: partial-fill-then-cancel detection (filled>0 независимо от статуса)
+- exchange.ts: `tickSizeToDecimalPlaces(1)` возвращает 0 вместо 1
+- combo-manager.ts: не обнуляет позицию после partial closePosition (SL/TP/trailing)
+- state.ts: порог reducePosition унифицирован до 1e-12
+
+**Аудит раунд 2 — 5 багов (коммит `8e5b3fa`):**
+- combo-manager.ts: market panic чистит orderId в grid state после отмены buy-ордеров
+- sync.ts: filled ордера при sync флипают level на counter-side (counter-order на следующем тике)
+- indicators.ts: EMA seed = SMA(period) вместо одного значения (точные сигналы при малом количестве свечей)
+- indicators.ts: NaN forward-fill вместо filter (сохраняет индексы массива для crossover detection)
+- index.ts: shutdown race fix — `shuttingDown` flag блокирует тики при shutdown
+
+### v0.9.0 — `f258112` (2026-04-14)
+
+Аудит раунд 3 — 8 багов (2 critical, 2 high, 4 medium).
+
+**Критические фиксы:**
+- **exchange.ts: retry дублирует ордера** — `withRetry` ретраил размещение ордеров при NetworkError/ECONNRESET (ордер уже на бирже, ответ потерялся). Теперь ВСЕ transient ошибки блокируют retry для order placement, не только timeout
+- **combo-manager.ts: аллокация от USDT вместо портфеля** — `processPair` получал `currentBalance.total` (только USDT), а не `totalPortfolioUSDT`. При $200 в крипте и $100 USDT аллокации были 3x меньше нужного
+
+**Высокий приоритет:**
+- **combo-manager.ts: flash crash = ложный withdrawal** — grid fill ещё не записан в state, скачок портфеля принимался за вывод средств, обнуляя drawdown protection. Окно проверки trades 2→5 тиков + проверка наличия open grid orders
+- **index.ts: shutdown race** — тик мог разместить ордер ПОСЛЕ того как shutdown отменил всё; двойной Ctrl+C запускал два shutdown параллельно. Теперь: ожидание завершения тика + guard `shutdownInProgress` + 3-й Ctrl+C = force exit
+
+**Средний приоритет:**
+- **state.ts: debounced write теряет fills при crash** — новый метод `saveCritical()` для немедленной записи позиций и трейдов; `.bak` файл для crash recovery на Windows (rename не атомарен)
+- **grid.ts: orphan-sell бесконечный рост levels** — `existsAtPrice` проверял только уровни с `orderId`, отменённые биржей ордера создавали дубли каждый тик
+- **grid.ts: double sell (counter + orphan)** — counter-sell + orphan-sell на одну крипту в одном тике (API не отражает залоченный баланс мгновенно). Трекинг `counterSellCommittedThisTick`
+- **grid.ts: partial fill теряет объём** — уровень переключался на counter-side, оставшаяся часть buy забывалась. Теперь создаётся retry-level для оставшегося объёма
+
+### v1.0.0 — `14204bb` (2026-04-14)
+
+Переход на mainnet + Telegram-интеграция + оптимизация grid.
+
+**Telegram-уведомления (`telegram.ts`):**
+- Новый модуль `TelegramNotifier` — очередь сообщений, rate-limit 100ms, timeout 10s
+- Startup message, summary каждые 60 тиков (~10 мин), fill-уведомления, алерты (SL/TP/halt/panic)
+- Native `https` без внешних зависимостей, HTML parse mode
+- Интеграция в `combo-manager.ts` — дублирует ключевые сообщения в Telegram
+
+**Grid-оптимизация:**
+- Раздельные buy/sell spacing: `gridSpacingPercent` (buy), `gridSpacingSellPercent` (sell)
+- gridLevels: 20→14
+- orderSizePercent: 14%→10%
+- rebalancePercent: 2%→3%
+- useEmaFilter: true→false (отключён)
+
+**Аллокации:** SUI 25%→30%, SOL 40%→30%, XRP 35%→40%
+
+**Risk:** stopLossPercent 14%→10%, cooldownAfterSLSec 7200→1800 (30 мин)
+
+**Market Protection:** panicBearishPairsThreshold 2→999 (отключён)
+
+**Mainnet:** USE_TESTNET=false, чистый bot-state.json
+
+### v1.1.0 — `958b19e` (2026-04-14)
+
+Hot-reload конфигурации из config.jsonc, очистка Telegram-логов, улучшение валидации.
+
+**Hot-reload config.jsonc:**
+- Все параметры бота вынесены в `config.jsonc` (JSON с поддержкой `//` комментариев)
+- Бот перечитывает config.jsonc каждые N тиков (`configReloadIntervalTicks`, по умолчанию 3)
+- При `configReloadIntervalTicks=0` — fallback-проверка каждые 30 тиков (для возможности включить обратно)
+- Hot-reload обновляет: grid, dca, risk, metaSignal, marketProtection, indicators, telegram
+- НЕ обновляет: tickIntervalSec, syncIntervalSec, добавление/удаление пар (нужен перезапуск)
+- При ошибке чтения/валидации — сохраняет предыдущий конфиг, логирует ошибку
+
+**Telegram-логи:**
+- Убраны HTML-теги из лога `bot.log` (в Telegram по-прежнему HTML)
+- Укорочено: `Telegram sent: <текст до 50 символов>`
+
+**Валидация конфигурации:**
+- Все default-значения заменены на `defaultNum=-1` / `defaultBool=false`
+- `validateConfig()` ловит пропущенные поля из config.jsonc (вместо молчаливых fallback)
+
+**Grid-тюнинг:**
+- gridLevels: 14→10, gridSpacingPercent: 0.6%→0.8%, gridSpacingSellPercent: 1.0%→1.4%, orderSizePercent: 10%→12%
+- Аллокации: SUI 30%→25%, SOL 30%→40%, XRP 40%→35%
+
+### v1.2.0 — `5af78b9` (2026-04-15)
+
+Управление ботом через Telegram-команды.
+
+**Telegram-команды (`telegram.ts` + `combo-manager.ts`):**
+- 7 команд: `/status`, `/stop`, `/run`, `/sellall`, `/buy`, `/orders`, `/cancelorders`
+- Подтверждение [✅ Да / ❌ Нет] для опасных команд: `/stop`, `/sellall`, `/buy`, `/cancelorders`
+- Non-blocking polling через `getUpdates` с `timeout=0`
+- Безопасность: команды принимаются только от настроенного `chatId`
+- Команды обрабатываются до проверки `halted` — `/buy` и `/run` работают при остановленном боте
+- `lastUpdateId` персистится в state (нет повторной обработки команд при рестарте)
+- `commandPollIntervalTicks` — частота опроса Telegram (по умолчанию каждый тик)
+
+**Ручные покупки (`/buy`):**
+- Два формата: `/buy SUI 10` (за USDT) и `/buy SUI BTC 10` (за BTC)
+- Market order с проверкой баланса, precision, minAmount/minCost
+- Пары не из конфига сохраняются в `manualPairs` (state.ts)
+- Ручные пары отображаются в `/status`, `/orders` и продаются по `/sellall`
+
+**Меню команд Telegram:**
+- `register-commands.ts` — одноразовый скрипт для `setMyCommands` API
+- Меню с описанием всех команд при нажатии `/` в чате с ботом
+
+**Config hot-reload:**
+- Перечитывание config.jsonc по MD5 хэшу — лог "Config reloaded" только при реальном изменении
+
+**Утилиты:**
+- `check-bybit.ts` — диагностический скрипт: балансы, открытые ордера, тикеры, последние закрытые ордера
+
+### v1.2.1 — `5672ae2` (2026-04-15)
+
+Аудит Telegram-команд: 1 high, 4 medium багов.
+
+**Фиксы:**
+- **HIGH: lastUpdateId не сохранялся при рестарте** — рестарт мог повторно выполнить `/sellall` или `/buy`. Теперь `telegramUpdateId` персистится в `bot-state.json`
+- **MEDIUM: `/stop` подсказывал `/start` вместо `/run`** — пользователь не мог возобновить бота по подсказке
+- **MEDIUM: callback_data без проверки длины** — Telegram молча обрезает данные >64 байт, длинные аргументы `/buy` могли исказиться. Добавлена валидация
+- **MEDIUM: ложный reload конфига на первом тике** — hash инициализировался пустой строкой, первая проверка всегда считала конфиг "изменённым". Теперь hash вычисляется в `init()`
+- **MEDIUM: hot-reload пересоздавал TelegramNotifier** — терялась очередь сообщений и сбрасывался `lastSummaryTick` (summary в Telegram приходило чаще 10 мин). Теперь `updateConfig()` вместо `new TelegramNotifier()`
+
+### v1.3.0 — `b5e930a` (2026-04-15)
+
+Новые функции и улучшения Telegram-уведомлений.
+
+**Новое:**
+- **Команда `/cancelorders`** — отменяет все ордера (grid + manual), сбрасывает grid, останавливает бота. Требует подтверждения [✅ Да / ❌ Нет]
+- **Таймаут подтверждения** — кнопки [Да/Нет] устаревают через `confirmationTimeoutSec` (60с по умолчанию). Защита от случайного нажатия старых кнопок
+- **Унифицированная подсказка halt** — все сообщения о halt (drawdown, TP, SL, trailing SL, команды) содержат подсказку `Для возобновления: /run или halted→false в bot-state.json`
+- **Telegram-алерты для pair halt** — consecutive SL и cooldown=0 halt теперь отправляют алерт в Telegram (раньше только в лог)
+- **Константа `HALT_HINT`** — текст подсказки вынесен в глобальную переменную, единая точка изменения
+
+**Конфиг:**
+- `confirmationTimeoutSec: 60` — таймаут подтверждения Telegram-команд (0 = без таймаута)
+- `commandPollIntervalTicks: 1` — проверка команд каждый тик (было 3)
+- Торговые пары: DOT/USDT, NEAR/USDT, ADA/USDT (SUI/SOL/XRP закомментированы)
+
 ### v2.0.0 (2026-04-16–17)
 
 Крупное обновление: auto-adaptive grid spacing, volatility analyzer, lock-file, новые Telegram-команды.
@@ -523,332 +778,6 @@ Summary каждые 10 тиков: капитал, PnL, drawdown, trades, posit
 **Утилиты:**
 - `reset-grid.ts` — подробные комментарии (что делает, что сохраняет, когда использовать)
 - `restart-bot.ts` — команды поиска процесса в комментариях
-
-### v0.7.0 — `6d59eb2` (2026-04-13)
-
-Крупное обновление: исправление критических багов, улучшение orphan-sell, skip-логирование, retry.
-
-**Критические фиксы:**
-- **closePosition возвращает boolean** — SL/TP/trailing проверяют результат и не сбрасывают позицию при неудачной продаже
-- **Trailing SL при убытке → cooldown** — раньше trailing SL при убытке не запускал cooldown, теперь запускает (как обычный SL)
-- **Counter-buy без RSI/EMA фильтра** — контр-ордер после sell fill больше не блокируется индикаторами (часть grid-цикла)
-- **Counter-sell корректировка суммы** — если fee съел часть баланса, ордер автоматически уменьшается вместо ошибки
-- **filledAmount fallback** — fallback на expectedAmount только при status=closed, иначе 0 (предотвращает phantom fills)
-- **Обработка 'cancelled' от Bybit** — Bybit возвращает и 'canceled', и 'cancelled', теперь обрабатываются оба варианта
-
-**Orphan-sell покрытие:**
-- Старая логика: "есть ли хоть 1 sell ордер?" → Новая: "покрывают ли sell-ордера всю позицию?"
-- Непокрытая позиция → несколько sell-ордеров на разных ценовых уровнях (+0.5%, +1.0%...)
-- Цена sell = `max(entryBased, priceBased)` — защита от отклонения Bybit по минимальной цене
-- Максимум 5 orphan-sell за тик (safety limit)
-
-**Sync (sync.ts):**
-- При пропаже ордера из open orders — проверяет через `fetchOrder` был ли он filled
-- Filled ордера обновляют позицию и записывают trade
-- Fallback на `fetchClosedOrders` если order purged из истории Bybit
-- Неизвестные ордера на бирже adoptируются в grid (вместо отмены)
-
-**Skip-логирование:**
-- Причины пропуска grid-ордеров выводятся на уровне INFO (было DEBUG)
-- Обобщённые причины: `overbought`, `EMA bearish`, `low USDT`, `low SOL` — без конкретных цифр RSI/баланса
-- Дедупликация: лог появляется только при изменении причин, молчит между тиками
-- `Grid orders resumed` — когда все ордера снова размещены
-
-**Retry и устойчивость:**
-- `RateLimitExceeded` добавлен в transient errors для retry
-- Exponential backoff: 1s → 2s → 4s (было линейное 1s → 2s)
-
-**Конфигурация:**
-- Аллокации: SUI 25%, SOL 40%, XRP 35%
-- orderSizePercent: 20% (было 18%)
-- rebalancePercent: 2% (было 3%)
-- gridLevels: 20 (10 buy + 10 sell)
-- Подробные комментарии для indicators (RSI, EMA, Bollinger)
-
-### v0.8.0 — `8e5b3fa` (2026-04-14)
-
-Два раунда аудита (12 багов), новый механизм Bollinger Bands Adaptive Grid.
-
-**Новый механизм: Bollinger Bands Adaptive Grid (включаемый/отключаемый)**
-
-Адаптирует grid на основе позиции цены относительно полос Боллинджера + EMA фильтр для sell:
-
-| Ситуация | Уровни (при shift=3) | Buy size | Sell size |
-|---|---|---|---|
-| Цена у нижней BB | 13B/7S | x1.5 | x1.0 |
-| Цена ниже середины BB | 11B/9S | x1.0 | x1.0 |
-| Цена нейтрально | 10B/10S | x1.0 | x1.0 |
-| Цена у верхней BB + EMA bearish | 7B/13S | x1.0 | x1.5 |
-| Цена у верхней BB + EMA bullish | 10B/10S | x1.0 | x1.0 |
-
-Конфиг: `useBollingerAdaptive`, `bollingerBuyMultiplier`, `bollingerSellMultiplier`, `bollingerShiftLevels`.
-
-**EMA фильтр — persistent вместо event:**
-- Было: `emaCrossover === 'bearish'` (срабатывает на 1 свечу в момент пересечения)
-- Стало: `emaFast < emaSlow` (постоянно пока fast ниже slow = нисходящий тренд)
-
-**Аудит раунд 1 — 7 багов (коммит `a13b9c4`):**
-- grid.ts: cancelled-check был unreachable (dead branch) — переставлен вверх
-- grid.ts: counter-price использует actualPrice (реальный fill), а не filledPrice (лимитный)
-- grid.ts: orphan-sell использует freeBal напрямую + guard для orderAmount<=0
-- sync.ts: partial-fill-then-cancel detection (filled>0 независимо от статуса)
-- exchange.ts: `tickSizeToDecimalPlaces(1)` возвращает 0 вместо 1
-- combo-manager.ts: не обнуляет позицию после partial closePosition (SL/TP/trailing)
-- state.ts: порог reducePosition унифицирован до 1e-12
-
-**Аудит раунд 2 — 5 багов (коммит `8e5b3fa`):**
-- combo-manager.ts: market panic чистит orderId в grid state после отмены buy-ордеров
-- sync.ts: filled ордера при sync флипают level на counter-side (counter-order на следующем тике)
-- indicators.ts: EMA seed = SMA(period) вместо одного значения (точные сигналы при малом количестве свечей)
-- indicators.ts: NaN forward-fill вместо filter (сохраняет индексы массива для crossover detection)
-- index.ts: shutdown race fix — `shuttingDown` flag блокирует тики при shutdown
-
-### v1.0.0 — `14204bb` (2026-04-14)
-
-Переход на mainnet + Telegram-интеграция + оптимизация grid.
-
-**Telegram-уведомления (`telegram.ts`):**
-- Новый модуль `TelegramNotifier` — очередь сообщений, rate-limit 100ms, timeout 10s
-- Startup message, summary каждые 60 тиков (~10 мин), fill-уведомления, алерты (SL/TP/halt/panic)
-- Native `https` без внешних зависимостей, HTML parse mode
-- Интеграция в `combo-manager.ts` — дублирует ключевые сообщения в Telegram
-
-**Grid-оптимизация:**
-- Раздельные buy/sell spacing: `gridSpacingPercent` (buy), `gridSpacingSellPercent` (sell)
-- gridLevels: 20→14
-- orderSizePercent: 14%→10%
-- rebalancePercent: 2%→3%
-- useEmaFilter: true→false (отключён)
-
-**Аллокации:** SUI 25%→30%, SOL 40%→30%, XRP 35%→40%
-
-**Risk:** stopLossPercent 14%→10%, cooldownAfterSLSec 7200→1800 (30 мин)
-
-**Market Protection:** panicBearishPairsThreshold 2→999 (отключён)
-
-**Mainnet:** USE_TESTNET=false, чистый bot-state.json
-
-### v0.9.0 — `054afbd` (2026-04-14)
-
-Аудит раунд 3 — 8 багов (2 critical, 2 high, 4 medium).
-
-**Критические фиксы:**
-- **exchange.ts: retry дублирует ордера** — `withRetry` ретраил размещение ордеров при NetworkError/ECONNRESET (ордер уже на бирже, ответ потерялся). Теперь ВСЕ transient ошибки блокируют retry для order placement, не только timeout
-- **combo-manager.ts: аллокация от USDT вместо портфеля** — `processPair` получал `currentBalance.total` (только USDT), а не `totalPortfolioUSDT`. При $200 в крипте и $100 USDT аллокации были 3x меньше нужного
-
-**Высокий приоритет:**
-- **combo-manager.ts: flash crash = ложный withdrawal** — grid fill ещё не записан в state, скачок портфеля принимался за вывод средств, обнуляя drawdown protection. Окно проверки trades 2→5 тиков + проверка наличия open grid orders
-- **index.ts: shutdown race** — тик мог разместить ордер ПОСЛЕ того как shutdown отменил всё; двойной Ctrl+C запускал два shutdown параллельно. Теперь: ожидание завершения тика + guard `shutdownInProgress` + 3-й Ctrl+C = force exit
-
-**Средний приоритет:**
-- **state.ts: debounced write теряет fills при crash** — новый метод `saveCritical()` для немедленной записи позиций и трейдов; `.bak` файл для crash recovery на Windows (rename не атомарен)
-- **grid.ts: orphan-sell бесконечный рост levels** — `existsAtPrice` проверял только уровни с `orderId`, отменённые биржей ордера создавали дубли каждый тик
-- **grid.ts: double sell (counter + orphan)** — counter-sell + orphan-sell на одну крипту в одном тике (API не отражает залоченный баланс мгновенно). Трекинг `counterSellCommittedThisTick`
-- **grid.ts: partial fill теряет объём** — уровень переключался на counter-side, оставшаяся часть buy забывалась. Теперь создаётся retry-level для оставшегося объёма
-
-### v1.3.0 (2026-04-15)
-
-Новые функции и улучшения Telegram-уведомлений.
-
-**Новое:**
-- **Команда `/cancelorders`** — отменяет все ордера (grid + manual), сбрасывает grid, останавливает бота. Требует подтверждения [✅ Да / ❌ Нет]
-- **Таймаут подтверждения** — кнопки [Да/Нет] устаревают через `confirmationTimeoutSec` (60с по умолчанию). Защита от случайного нажатия старых кнопок
-- **Унифицированная подсказка halt** — все сообщения о halt (drawdown, TP, SL, trailing SL, команды) содержат подсказку `Для возобновления: /run или halted→false в bot-state.json`
-- **Telegram-алерты для pair halt** — consecutive SL и cooldown=0 halt теперь отправляют алерт в Telegram (раньше только в лог)
-- **Константа `HALT_HINT`** — текст подсказки вынесен в глобальную переменную, единая точка изменения
-
-**Конфиг:**
-- `confirmationTimeoutSec: 60` — таймаут подтверждения Telegram-команд (0 = без таймаута)
-- `commandPollIntervalTicks: 1` — проверка команд каждый тик (было 3)
-- Торговые пары: DOT/USDT, NEAR/USDT, ADA/USDT (SUI/SOL/XRP закомментированы)
-
-### v1.2.1 — `5672ae2` (2026-04-15)
-
-Аудит Telegram-команд: 1 high, 4 medium багов.
-
-**Фиксы:**
-- **HIGH: lastUpdateId не сохранялся при рестарте** — рестарт мог повторно выполнить `/sellall` или `/buy`. Теперь `telegramUpdateId` персистится в `bot-state.json`
-- **MEDIUM: `/stop` подсказывал `/start` вместо `/run`** — пользователь не мог возобновить бота по подсказке
-- **MEDIUM: callback_data без проверки длины** — Telegram молча обрезает данные >64 байт, длинные аргументы `/buy` могли исказиться. Добавлена валидация
-- **MEDIUM: ложный reload конфига на первом тике** — hash инициализировался пустой строкой, первая проверка всегда считала конфиг "изменённым". Теперь hash вычисляется в `init()`
-- **MEDIUM: hot-reload пересоздавал TelegramNotifier** — терялась очередь сообщений и сбрасывался `lastSummaryTick` (summary в Telegram приходило чаще 10 мин). Теперь `updateConfig()` вместо `new TelegramNotifier()`
-
-### v1.2.0 — `5af78b9` (2026-04-15)
-
-Управление ботом через Telegram-команды.
-
-**Telegram-команды (`telegram.ts` + `combo-manager.ts`):**
-- 7 команд: `/status`, `/stop`, `/run`, `/sellall`, `/buy`, `/orders`, `/cancelorders`
-- Подтверждение [✅ Да / ❌ Нет] для опасных команд: `/stop`, `/sellall`, `/buy`, `/cancelorders`
-- Non-blocking polling через `getUpdates` с `timeout=0`
-- Безопасность: команды принимаются только от настроенного `chatId`
-- Команды обрабатываются до проверки `halted` — `/buy` и `/run` работают при остановленном боте
-- `lastUpdateId` персистится в state (нет повторной обработки команд при рестарте)
-- `commandPollIntervalTicks` — частота опроса Telegram (по умолчанию каждый тик)
-
-**Ручные покупки (`/buy`):**
-- Два формата: `/buy SUI 10` (за USDT) и `/buy SUI/BTC 10` (за BTC)
-- Market order с проверкой баланса, precision, minAmount/minCost
-- Пары не из конфига сохраняются в `manualPairs` (state.ts)
-- Ручные пары отображаются в `/status`, `/orders` и продаются по `/sellall`
-
-**Меню команд Telegram:**
-- `register-commands.ts` — одноразовый скрипт для `setMyCommands` API
-- Меню с описанием всех команд при нажатии `/` в чате с ботом
-
-**Config hot-reload:**
-- Перечитывание config.jsonc по MD5 хэшу — лог "Config reloaded" только при реальном изменении
-
-**Утилиты:**
-- `check-bybit.ts` — диагностический скрипт: балансы, открытые ордера, тикеры, последние закрытые ордера
-
-### v1.1.0 — `958b19e` (2026-04-14)
-
-Hot-reload конфигурации из config.jsonc, очистка Telegram-логов, улучшение валидации.
-
-**Hot-reload config.jsonc:**
-- Все параметры бота вынесены в `config.jsonc` (JSON с поддержкой `//` комментариев)
-- Бот перечитывает config.jsonc каждые N тиков (`configReloadIntervalTicks`, по умолчанию 3)
-- При `configReloadIntervalTicks=0` — fallback-проверка каждые 30 тиков (для возможности включить обратно)
-- Hot-reload обновляет: grid, dca, risk, metaSignal, marketProtection, indicators, telegram
-- НЕ обновляет: tickIntervalSec, syncIntervalSec, добавление/удаление пар (нужен перезапуск)
-- При ошибке чтения/валидации — сохраняет предыдущий конфиг, логирует ошибку
-
-**Telegram-логи:**
-- Убраны HTML-теги из лога `bot.log` (в Telegram по-прежнему HTML)
-- Укорочено: `Telegram sent: <текст до 50 символов>`
-
-**Валидация конфигурации:**
-- Все default-значения заменены на `defaultNum=-1` / `defaultBool=false`
-- `validateConfig()` ловит пропущенные поля из config.jsonc (вместо молчаливых fallback)
-
-**Grid-тюнинг:**
-- gridLevels: 14→10, gridSpacingPercent: 0.6%→0.8%, gridSpacingSellPercent: 1.0%→1.4%, orderSizePercent: 10%→12%
-- Аллокации: SUI 30%→25%, SOL 30%→40%, XRP 40%→35%
-
-## Аудит криптовалют для Grid-бота (апрель 2026)
-
-Анализ монет по критериям: внутридневная волатильность, mean reversion (склонность к "качелям"), надёжность проекта, ликвидность на Bybit spot.
-
-### TOP-5 рекомендаций
-
-| # | Монета | Цена | Оценка | Дн. диапазон | Mean Reversion | Комментарий |
-|---|--------|------|--------|-------------|----------------|-------------|
-| 1 | **DOT/USDT** | $1.18 | 7.2 | **8.72%** | 8/10 | Лидер по волатильности, классический "качающийся", боковики 2-4 мес |
-| 2 | **NEAR/USDT** | $1.37 | 7.2 | **5.62%** | 6/10 | AI+L1 нарратив, хорошие fill'ы, объём $4.3M |
-| 3 | **ARB/USDT** | $0.11 | 7.4 | ~8% | 7/10 | L2 лидер, объём $129M, но цена низкая — мелкие ордера |
-| 4 | **ADA/USDT** | $0.25 | 7.4 | 2.2-2.6% | 8/10 | Mean reversion чемпион, но волатильность ниже ожидаемой |
-| 5 | **AVAX/USDT** | $8.88 | 7.0 | ~3% | 6/10 | Сильный L1, хорошая амплитуда, но волатильность скромная |
-
-### Полный анализ по категориям
-
-**Крупные альткоины:** ETH (6.0 — стабильна, мало fill'ов), BNB (5.0 — ещё стабильнее), ADA (7.2 — идеальна), AVAX (7.0), DOT (7.0), LINK (6.6), POL (6.4), ATOM (6.8 — хорошие качели), NEAR (7.2), FTM/S (6.8 — волатильна, но ребрендинг)
-
-**Новые 2024-2026:** ARB (7.2 — лучший), OP (7.0), SEI (6.6), TIA (6.4 — unlock'и), INJ (7.0), RENDER (7.0 — AI, но трендовая), WLD (5.8 — слишком рискова), JUP (6.4), STRK (6.0)
-
-**Старички:** LTC (6.0 — скучная), ETC (6.4), EOS (5.6 — умирает), ALGO (5.4), DYDX (6.8), FIL (6.4), GRT (6.2)
-
-### Текущие пары (для сравнения)
-
-| Монета | Цена | Волатильность | Проблема для grid |
-|--------|------|---------------|-------------------|
-| SUI/USDT | $0.93 | низкая | После хайпа стабилизировалась |
-| SOL/USDT | $83.77 | низкая | Трендовая, параболические движения |
-| XRP/USDT | $1.36 | низкая | Длинные тренды, EMA bearish — мало fill'ов |
-
-### Рекомендуемый портфель ($300)
-
-| Монета | Аллокация | Стиль |
-|--------|-----------|-------|
-| ADA/USDT | $90 (30%) | Консервативный, стабильный mean reversion |
-| ARB/USDT | $70 (23%) | Средний риск, высокая волатильность |
-| NEAR/USDT | $60 (20%) | Агрессивный, много fill'ов |
-| DOT/USDT | $50 (17%) | Консервативный, широкий range |
-| AVAX/USDT | $30 (10%) | Дополнительная диверсификация |
-
-### Актуальные данные Bybit Spot (апрель 2026)
-
-| Монета | Цена | 24ч объём Bybit | Волатильность | 24ч диапазон |
-|--------|------|----------------|---------------|-------------|
-| **DOT/USDT** | $1.179 | $5.80M | **8.72%** | $1.204-1.281 |
-| **NEAR/USDT** | $1.369 | $4.26M | **5.62%** | — |
-| **ARB/USDT** | $0.113 | $129M | ~8% | $0.1128-0.1220 |
-| **AVAX/USDT** | $8.88 | $129M | ~3% | $8.85-9.12 |
-| **ADA/USDT** | $0.25 | — | 2.2-2.6% | — |
-
-**Вывод:** DOT и NEAR — лучшие кандидаты для grid по соотношению волатильность/надёжность/ликвидность. ARB имеет огромный объём, но цена $0.11 делает ордера мелкими. ADA волатильность ниже ожидаемой.
-
-### Текущий портфель (8 пар, ~$308)
-
-| Монета | Аллокация | ATR% 1h | Кризис | Роль |
-|--------|-----------|---------|--------|------|
-| DOT/USDT | 13% | 1.45% | 3/5 | Высокая волатильность, широкий range |
-| NEAR/USDT | 12% | 1.22% | 3/5 | AI+L1 нарратив |
-| ADA/USDT | 12% | 1.03% | 3/5 | Mean reversion чемпион |
-| SUI/USDT | 13% | 1.18% | 3/5 | Высокая волатильность |
-| SOL/USDT | 13% | 0.78% | 4/5 | Надёжная L1 |
-| XRP/USDT | 12% | 0.81% | 3/5 | Высокая ликвидность |
-| AAVE/USDT | 13% | 1.43% | **4/5** | DeFi blue-chip, лучшая кризисоустойчивость |
-| RENDER/USDT | 12% | 1.27% | 3/5 | AI/GPU, идеальный боковик |
-
-### Кандидаты на добавление (при росте капитала)
-
-**HYPE (Hyperliquid):**
-- ATR% 1.12%, MCap $10.4B, объём $50M/день (самый ликвидный в списке)
-- Кризисоустойчивость 3/5
-- Но короткая история (с ноября 2024) — нет данных по крупным обвалам
-
-**AVAX (Avalanche) — консервативный вариант:**
-- ATR% 1.00%, MCap $4.0B, проверенная L1
-- Кризисоустойчивость 3/5, длинная история
-- Институциональный интерес, всегда восстанавливается
-
-> При капитале $500+ можно добавить 9-ю пару и увеличить gridLevels до 6.
-
-> **Данные актуальны на апрель 2026.** Перед сменой пар проверить 1h-график за 30 дней. Grid ставить только на "качающиеся" монеты, не трендовые.
-
-## Lock-файл (bot.lock)
-
-Файл `bot.lock` предотвращает запуск двух экземпляров бота одновременно. Содержит PID процесса.
-
-### Жизненный цикл
-
-| Событие | Что происходит с bot.lock |
-|---------|--------------------------|
-| **Запуск бота** | Проверяет bot.lock → если PID жив → отказ; если PID мёртв → перезаписывает; если нет файла → создаёт |
-| **Soft shutdown** (Ctrl+C × 1) | Удаляет bot.lock → process.exit(0) |
-| **Hard shutdown** (Ctrl+C × 2) | Удаляет bot.lock → отменяет все ордера → process.exit(1) |
-| **Force exit** (Ctrl+C × 3) | Удаляет bot.lock → process.exit(2) |
-| **Fatal error** (crash) | Удаляет bot.lock → process.exit(1) |
-| **Telegram /stop** | bot.lock **не удаляется** — процесс жив, просто halted=true. /run возобновит торговлю |
-| **Telegram /run** | bot.lock не меняется — процесс тот же |
-| **Убит через диспетчер задач** | bot.lock **остаётся**, но при следующем запуске бот проверит PID через `process.kill(pid, 0)` — процесс мёртв → stale lock → перезапишет |
-| **taskkill //F //IM node.exe** | bot.lock **остаётся** — аналогично диспетчеру задач, stale lock обрабатывается |
-| **restart-bot.ts** | Удаляет bot.lock перед запуском нового процесса |
-| **reset-grid.ts** | Удаляет bot.lock после сброса сетки |
-| **Отключение питания / BSOD** | bot.lock остаётся — stale lock, бот запустится нормально |
-
-### Ручное удаление
-
-Если бот не запускается из-за lock:
-```bash
-rm bot.lock
-# или
-del bot.lock
-```
-
-### Проверка PID (как работает stale-detection)
-
-```typescript
-try {
-  process.kill(pid, 0); // signal 0 = проверка без убийства
-  // Процесс жив → отказ запуска
-} catch {
-  // Процесс мёртв → stale lock → перезаписываем
-}
-```
-
-`process.kill(pid, 0)` кроссплатформенный — работает на Windows, Linux, macOS.
 
 ## Важные замечания
 

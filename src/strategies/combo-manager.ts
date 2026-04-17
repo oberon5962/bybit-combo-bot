@@ -55,6 +55,7 @@ export class ComboManager {
     this.grid = new GridStrategy(config, exchange, log, state);
     this.dca = new DCAStrategy(config, exchange, log, state);
     this.tg = new TelegramNotifier(config.telegram, log);
+    this.grid.setTelegram(this.tg);
   }
 
   /** Get current (hot-reloaded) config */
@@ -167,6 +168,8 @@ export class ComboManager {
       const newMap = new Map<string, { buy: number; sell: number }>();
       const logLines: string[] = [];
       const tgLines: string[] = [];
+      const maxSymLen = Math.max(...results.map(r => r.symbol.length));
+      const regimeShort: Record<string, string> = { low: 'low ', normal: 'norm', high: 'high' };
 
       for (const r of results) {
         let buy = volRound(r.buySpacing * safetyMultiplier, 2);
@@ -184,7 +187,9 @@ export class ComboManager {
         const active = this.config.grid.autoSpacingPriority === 'auto' ? 'AUTO' : 'CFG';
 
         logLines.push(`  ${r.symbol}: auto=${buy}%/${sell}% cfg=${cfgBuy}%/${cfgSell}% regime=${r.regime} [${active}]`);
-        tgLines.push(`${r.symbol}: ${buy}%/${sell}% (${r.regime})`);
+        const symPadded = (r.symbol + ':').padEnd(maxSymLen + 2);
+        const reg = regimeShort[r.regime] ?? r.regime;
+        tgLines.push(`${symPadded}${buy}%/${sell}% (${reg})`);
       }
 
       this.autoSpacingMap = newMap;
@@ -208,9 +213,9 @@ export class ComboManager {
       // Telegram
       const priority = this.config.grid.autoSpacingPriority.toUpperCase();
       this.tg.sendAlert(
-        `📊 <b>Auto-spacing</b> (margin=${margin}%)\n` +
-        tgLines.join('\n') +
-        `\nPriority: <b>${priority}</b>`,
+        `📊 <b>Auto-spacing</b> (margin=${margin}%)\n\n` +
+        `<pre>${tgLines.join('\n')}</pre>\n` +
+        `Priority: <b>${priority}</b>`,
       );
     } catch (err) {
       this.log.error(`Auto-spacing error (keeping previous values): ${sanitizeError(err)}`);
@@ -603,7 +608,7 @@ export class ComboManager {
       const sellAmount = pos.amount > 0 ? Math.min(this.roundAmountForSymbol(strongAmount, sym), pos.amount) : 0;
       if (sellAmount <= 0 || !isViableOrder(sellAmount)) return null;
       // Don't sell below entry + fees (0.1% buy + 0.1% sell + 0.1% margin)
-      const minSellPrice = pos.avgEntryPrice * 1.003;
+      const minSellPrice = pos.avgEntryPrice * (1 + this.config.grid.minSellProfitPercent / 100);
       if (ticker.last < minSellPrice) {
         this.log.info(`[combo-meta] ${sym}: STRONG SELL skipped — price ${ticker.last.toFixed(4)} < minSell ${minSellPrice.toFixed(4)} (entry ${pos.avgEntryPrice.toFixed(4)})`);
         return null;
@@ -634,7 +639,7 @@ export class ComboManager {
       const sellAmt = pos2.amount > 0 ? Math.min(this.roundAmountForSymbol(regularAmount, sym), pos2.amount) : 0;
       if (sellAmt <= 0 || !isViableOrder(sellAmt)) return null;
       // Don't sell below entry + fees (0.1% buy + 0.1% sell + 0.1% margin)
-      const minSellPrice2 = pos2.avgEntryPrice * 1.003;
+      const minSellPrice2 = pos2.avgEntryPrice * (1 + this.config.grid.minSellProfitPercent / 100);
       if (ticker.last < minSellPrice2) {
         this.log.info(`[combo-meta] ${sym}: SELL skipped — price ${ticker.last.toFixed(4)} < minSell ${minSellPrice2.toFixed(4)} (entry ${pos2.avgEntryPrice.toFixed(4)})`);
         return null;
@@ -1340,10 +1345,14 @@ export class ComboManager {
 
       // Telegram per-pair
       const tgPairParts: string[] = [];
-      tgPairParts.push(`<b>${sym}</b> (${pairBuys.length}B/${pairSells.length}S)`);
+      const summaryBase = sym.split('/')[0];
+      const summaryFrozen = this.state.isBuyBlocked(summaryBase);
+      const summarySellgrid = this.state.isSellGridActive(summaryBase);
+      const summaryMarker = (summarySellgrid ? ' 🔻' : '') + (summaryFrozen ? ' 🧊' : '');
+      tgPairParts.push(`<b>${sym}</b> (${pairBuys.length}B/${pairSells.length}S)${summaryMarker}`);
       if (activeBuys.length > 0) {
         const buyCost = activeBuys.reduce((s, l) => s + l.price * l.amount, 0).toFixed(2);
-        tgPairParts.push(`${activeBuys.length}B [${buyCost}$]`);
+        tgPairParts.push(` ${activeBuys.length}B [${buyCost}$]`);
       }
       if (activeSells.length > 0 || pendingSells.length > 0) {
         const parts: string[] = [];
@@ -1352,19 +1361,23 @@ export class ComboManager {
           parts.push(`${activeSells.length}S [${activeCost}$]`);
         }
         if (pendingSells.length > 0) {
-          const pendCost = pendingSells.reduce((s, l) => s + l.price * l.amount, 0).toFixed(2);
-          parts.push(`${pendingSells.length}Pend [${pendCost}$]`);
+          parts.push(`${pendingSells.length}Pend`);
         }
-        tgPairParts.push(parts.join(' + '));
+        tgPairParts.push(` ${parts.join(' + ')}`);
+      }
+      if (st.buys > 0 || st.sells > 0) {
+        const stPnlSign = st.pnl >= 0 ? '+' : '';
+        const stPnlPct = st.spent > 0 ? (st.pnl / st.spent) * 100 : 0;
+        tgPairParts.push(` PnL: ${stPnlSign}${st.pnl.toFixed(2)} USDT (${stPnlSign}${stPnlPct.toFixed(1)}%)`);
       }
       // center removed from telegram per user request
-      if (slTrades.length > 0) tgPairParts.push(`SL: ${slTrades.length}x`);
-      if (tslTrades.length > 0) tgPairParts.push(`TSL: ${tslTrades.length}x`);
-      if (tpTrades.length > 0) tgPairParts.push(`TP: ${tpTrades.length}x`);
-      if (isHalted) tgPairParts.push(`HALTED — ${haltReason ?? 'unknown'}`);
+      if (slTrades.length > 0) tgPairParts.push(` SL: ${slTrades.length}x`);
+      if (tslTrades.length > 0) tgPairParts.push(` TSL: ${tslTrades.length}x`);
+      if (tpTrades.length > 0) tgPairParts.push(` TP: ${tpTrades.length}x`);
+      if (isHalted) tgPairParts.push(` HALTED — ${haltReason ?? 'unknown'}`);
       else if (cooldownUntil > 0 && Date.now() < cooldownUntil) {
         const minLeft = Math.ceil((cooldownUntil - Date.now()) / 60000);
-        tgPairParts.push(`COOLDOWN — ${minLeft} min`);
+        tgPairParts.push(` COOLDOWN — ${minLeft} min`);
       }
       pairTgLines.push(tgPairParts.join('\n'));
     }
@@ -1374,10 +1387,12 @@ export class ComboManager {
 
     // Telegram summary
     const sign = pnl >= 0 ? '+' : '';
+    const trendIcon = pnl >= 0 ? '⬆️' : '⬇️';
     const panicStr = this.marketPanic ? '⚠️ PANIC' : 'no';
     const btcStr = this.btcPaused ? '⚠️ PAUSED' : 'ok';
     const tgText = [
-      `<b>BOT SUMMARY</b> (tick ${this.state.totalTicks})`,
+      `${trendIcon} <b>BOT SUMMARY</b> (tick ${this.state.totalTicks})`,
+      '',
       `${currentCapital.toFixed(2)} USDT | PnL ${sign}${pnl.toFixed(2)} (${sign}${pnlPct.toFixed(1)}%) | DD ${drawdown.toFixed(1)}% | peak ${this.state.peakCapital.toFixed(2)} | Trades: ${trades.length} (${buys.length}B/${sells.length}S)`,
       `Panic: ${panicStr} | BTC: ${btcStr}`,
       '',
@@ -1408,13 +1423,95 @@ export class ComboManager {
       this.log.info(`Telegram command: /${cmd.command} ${cmd.args}${cmd.confirmed ? ' [confirmed]' : ''}`);
       try {
         // Commands requiring confirmation: stop, sellall, buy
-        const needsConfirm = ['stop', 'sellall', 'buy', 'cancelorders', 'regrid'].includes(cmd.command);
+        const needsConfirm = ['stop', 'sellall', 'buy', 'cancelorders', 'regrid', 'freezebuy', 'unfreezebuy', 'sellgrid', 'unsellgrid'].includes(cmd.command);
+
+        // /freezebuy: empty args → wizard, unknown currency → reject
+        if (cmd.command === 'freezebuy' && !cmd.confirmed) {
+          const arg = cmd.args.trim().toUpperCase();
+          if (!arg) {
+            const currencies = this.collectBuyMenuCurrencies();
+            this.tg.sendFreezeMenu(currencies, this.state.getBlockedBuyBases());
+            continue;
+          }
+          if (!this.collectBuyMenuCurrencies().includes(arg)) {
+            this.log.warn(`/freezebuy rejected: unknown currency ${arg}`);
+            this.tg.sendReply(`❌ Валюта ${arg} не найдена в торгуемых парах. Доступны: ${this.collectBuyMenuCurrencies().join(', ')}`);
+            continue;
+          }
+        }
+        // /unfreezebuy: empty args → wizard
+        if (cmd.command === 'unfreezebuy' && !cmd.confirmed) {
+          const arg = cmd.args.trim().toUpperCase();
+          if (!arg) {
+            this.tg.sendUnfreezeMenu(this.state.getBlockedBuyBases());
+            continue;
+          }
+          if (!this.state.isBuyBlocked(arg)) {
+            this.tg.sendReply(`Валюта ${arg} не заморожена.`);
+            continue;
+          }
+        }
+        // /sellgrid: empty args → wizard, unknown → reject
+        if (cmd.command === 'sellgrid' && !cmd.confirmed) {
+          const arg = cmd.args.trim().toUpperCase();
+          if (!arg) {
+            this.tg.sendSellGridMenu(this.collectBuyMenuCurrencies(), this.state.getSellGridBases());
+            continue;
+          }
+          if (!this.collectBuyMenuCurrencies().includes(arg)) {
+            this.log.warn(`/sellgrid rejected: unknown currency ${arg}`);
+            this.tg.sendReply(`❌ Валюта ${arg} не найдена в торгуемых парах.`);
+            continue;
+          }
+        }
+        // /unsellgrid: empty args → wizard
+        if (cmd.command === 'unsellgrid' && !cmd.confirmed) {
+          const arg = cmd.args.trim().toUpperCase();
+          if (!arg) {
+            this.tg.sendUnsellGridMenu(this.state.getSellGridBases());
+            continue;
+          }
+          if (!this.state.isSellGridActive(arg)) {
+            this.tg.sendReply(`Валюта ${arg} не в sellgrid-режиме.`);
+            continue;
+          }
+        }
+        // Pre-validate /buy args before showing confirmation dialog; empty args → show wizard
+        if (cmd.command === 'buy' && !cmd.confirmed) {
+          const parts = cmd.args.trim().split(/\s+/).filter(Boolean);
+          if (parts.length === 0) {
+            const currencies = this.collectBuyMenuCurrencies();
+            this.tg.sendBuyMenu(currencies);
+            continue;
+          }
+          if (parts.length < 2 || parts.length > 3) {
+            this.tg.sendReply('Формат: /buy SUI 10 или /buy SUI BTC 10\nПервое — base (что купить), опционально quote (за что), последнее — количество. Quote по умолчанию USDT.');
+            continue;
+          }
+          const lastArg = parts[parts.length - 1];
+          const amt = parseFloat(lastArg);
+          if (isNaN(amt) || amt <= 0) {
+            this.tg.sendReply(`Некорректное количество: ${lastArg}`);
+            continue;
+          }
+        }
         if (needsConfirm && !cmd.confirmed) {
           const descriptions: Record<string, string> = {
             stop: '⏸ Остановить торговлю?',
-            sellall: '❌ Продать ВСЁ + отменить все ордера?',
-            buy: `🛒 Купить: ${cmd.args}?`,
+            sellall: '❌ Продать ВСЁ и отменить все ордера?',
+            buy: (() => {
+              // Extract base from first arg; handles both "SUI 10", "SUI BTC 10", and legacy "SUI/BTC 10"
+              const firstArg = cmd.args.trim().split(/\s+/)[0] ?? '';
+              const buyBase = firstArg.split('/')[0].toUpperCase();
+              const warn = buyBase && this.state.isBuyBlocked(buyBase) ? `🧊 <b>${buyBase} заморожена</b> — покупка пройдёт как ручной ордер, бот НЕ будет автоматически её продавать.\n` : '';
+              return `${warn}🛒 Купить: ${cmd.args}?`;
+            })(),
             cancelorders: '⚠️ Отменить ВСЕ открытые ордера?',
+            regrid: '🔄 Перестроить торговые сетки ордеров?',
+            freezebuy: `🧊 Заморозить покупки по ${cmd.args.toUpperCase()}? Будут отменены все buy-ордера; sell продолжат работать.`,
+            unfreezebuy: `✅ Разморозить покупки по ${cmd.args.toUpperCase()}? Сетки восстановятся в следующем тике.`,
+            sellgrid: `🔻 Включить sellgrid для ${cmd.args.toUpperCase()}? Buy заморозятся, после каждого sell fill ставится новый sell выше (ladder). Завершится автоматически, когда крипта закончится.`,
+            unsellgrid: `✅ Отключить sellgrid для ${cmd.args.toUpperCase()} и разморозить buy?`,
           };
           const label = descriptions[cmd.command] ?? `/${cmd.command}`;
           const callbackData = cmd.args ? `${cmd.command}:${cmd.args}` : cmd.command;
@@ -1423,6 +1520,9 @@ export class ComboManager {
         }
 
         switch (cmd.command) {
+          case 'start':
+            this.cmdStartWelcome();
+            break;
           case 'status':
             await this.cmdStatus();
             break;
@@ -1445,19 +1545,324 @@ export class ComboManager {
             await this.cmdCancelOrders();
             break;
           case 'stats':
-            this.cmdStats();
+            await this.cmdStats();
             break;
           case 'regrid':
             await this.cmdResetGrid();
             break;
+          case '_buymenu':
+            // User picked a currency from the wizard — show preset-amount buttons
+            this.tg.sendBuyAmountMenu(cmd.args.toUpperCase(), [5, 10, 15, 20, 50]);
+            break;
+          case '_buysum': {
+            // args format: "SUI:10" — convert USDT amount to base amount via ticker
+            const [curRaw, usdStr] = cmd.args.split(':');
+            const currency = (curRaw ?? '').toUpperCase();
+            const usd = parseFloat(usdStr ?? '');
+            if (!currency || isNaN(usd) || usd <= 0) {
+              this.tg.sendReply(`Некорректный выбор: ${cmd.args}`);
+              break;
+            }
+            const symbol = `${currency}/USDT`;
+            let ticker;
+            try {
+              ticker = await this.exchange.fetchTicker(symbol);
+            } catch {
+              this.tg.sendReply(`Не удалось получить цену ${symbol}`);
+              break;
+            }
+            const mp = await this.exchange.getMarketPrecision(symbol).catch(() => null);
+            if (!mp) {
+              this.tg.sendReply(`Пара ${symbol} не найдена на бирже`);
+              break;
+            }
+            if (!ticker.last || ticker.last <= 0) {
+              this.tg.sendReply(`Некорректная цена ${symbol}: ${ticker.last}`);
+              break;
+            }
+            const rawAmount = usd / ticker.last;
+            const factor = Math.pow(10, mp.amountPrecision);
+            const amountStr = (Math.floor(rawAmount * factor) / factor).toFixed(mp.amountPrecision);
+            const amount = parseFloat(amountStr);
+            if (amount < mp.minAmount) {
+              this.tg.sendReply(`$${usd} → ${amountStr} ${currency} < minAmount ${mp.minAmount}. Увеличь сумму.`);
+              break;
+            }
+            const frozenWarn = this.state.isBuyBlocked(currency) ? `🧊 <b>${currency} заморожена</b> — это ручная покупка, бот НЕ будет автоматически её продавать.\n` : '';
+            this.tg.sendConfirmation(`${frozenWarn}🛒 Купить ${amountStr} ${currency} (~$${usd} @ ${ticker.last.toFixed(4)})?`, `buy:${currency} ${amountStr}`);
+            break;
+          }
+          case '_buycustom':
+            this.tg.sendReply('✏️ Напиши: /buy валюта количество\nПример: /buy SUI 10');
+            break;
+          case '_buyother':
+            this.tg.sendReply('🔤 Напиши тикер и количество:\n/buy TICKER количество\nПример: /buy LINK 0.5');
+            break;
+          case 'freezebuy':
+            await this.cmdFreezeBuy(cmd.args.trim().toUpperCase());
+            break;
+          case 'unfreezebuy':
+            await this.cmdUnfreezeBuy(cmd.args.trim().toUpperCase());
+            break;
+          case '_freezemenu': {
+            const base = cmd.args.toUpperCase();
+            if (this.state.isBuyBlocked(base)) {
+              this.tg.sendReply(`${base} уже заморожен. Используй /unfreezebuy ${base}.`);
+            } else {
+              this.tg.sendConfirmation(`🧊 Заморозить покупки по ${base}? Будут отменены все buy-ордера; sell продолжат работать.`, `freezebuy:${base}`);
+            }
+            break;
+          }
+          case '_unfreezemenu': {
+            const base = cmd.args.toUpperCase();
+            this.tg.sendConfirmation(`✅ Разморозить покупки по ${base}? Сетки восстановятся в следующем тике.`, `unfreezebuy:${base}`);
+            break;
+          }
+          case 'sellgrid':
+            await this.cmdSellGrid(cmd.args.trim().toUpperCase());
+            break;
+          case 'unsellgrid':
+            await this.cmdUnsellGrid(cmd.args.trim().toUpperCase());
+            break;
+          case '_sellgridmenu': {
+            const base = cmd.args.toUpperCase();
+            if (this.state.isSellGridActive(base)) {
+              this.tg.sendReply(`${base} уже в sellgrid-режиме. Используй /unsellgrid ${base}.`);
+            } else {
+              this.tg.sendConfirmation(`🔻 Включить sellgrid для ${base}? Buy заморозятся, после каждого sell fill ставится новый sell выше (ladder). Завершится автоматически, когда крипта закончится.`, `sellgrid:${base}`);
+            }
+            break;
+          }
+          case '_unsellgridmenu': {
+            const base = cmd.args.toUpperCase();
+            this.tg.sendConfirmation(`✅ Отключить sellgrid для ${base} и разморозить buy?`, `unsellgrid:${base}`);
+            break;
+          }
           default:
-            this.tg.sendReply(`Неизвестная команда /${cmd.command}\nДоступные: /status /stop /run /sellall /buy /orders /cancelorders /stats /regrid`);
+            this.tg.sendReply(`Неизвестная команда /${cmd.command}\nДоступные: /start /status /stop /run /sellall /buy /orders /cancelorders /stats /regrid /freezebuy /unfreezebuy /sellgrid /unsellgrid`);
         }
       } catch (err) {
         this.log.error(`Telegram command /${cmd.command} failed: ${sanitizeError(err)}`);
         this.tg.sendReply(`Ошибка /${cmd.command}: ${sanitizeError(err)}`);
       }
     }
+  }
+
+  /** Build currency list for /buy wizard: base tickers from config pairs + manual pairs, deduped. */
+  private async cmdFreezeBuy(base: string): Promise<void> {
+    if (!base) { this.tg.sendReply('Формат: /freezebuy XRP'); return; }
+    const available = this.collectBuyMenuCurrencies();
+    if (!available.includes(base)) {
+      this.log.warn(`/freezebuy rejected: unknown currency ${base}`);
+      this.tg.sendReply(`❌ Валюта ${base} не найдена в торгуемых парах. Доступны: ${available.join(', ')}`);
+      return;
+    }
+    const added = this.state.addBlockedBuyBase(base);
+    if (!added) {
+      this.tg.sendReply(`${base} уже заморожен.`);
+      return;
+    }
+    // Cancel all buy-orders for every pair with this base
+    const affectedSymbols = this.config.pairs
+      .map(p => p.symbol)
+      .concat(this.state.getManualPairs())
+      .filter((s, i, arr) => arr.indexOf(s) === i) // dedup
+      .filter(sym => sym.split('/')[0] === base);
+
+    let cancelled = 0;
+    let failed = 0;
+    for (const sym of affectedSymbols) {
+      try {
+        const openOrders = await this.exchange.fetchOpenOrders(sym);
+        const buyOrders = openOrders.filter(o => o.side === 'buy');
+        for (const o of buyOrders) {
+          try {
+            await this.exchange.cancelOrder(o.id, sym);
+            cancelled++;
+          } catch (err) {
+            failed++;
+            this.log.warn(`/freezebuy: cancelOrder ${o.id} ${sym} failed: ${sanitizeError(err)}`);
+          }
+        }
+        // Clear orderId/placedAt on buy levels so they don't appear as active (mutate in place; setGridLevels persists)
+        const levels = this.state.getGridLevels(sym);
+        let mutated = false;
+        for (const l of levels) {
+          if (l.side === 'buy' && l.orderId) {
+            l.orderId = undefined;
+            l.placedAt = undefined;
+            mutated = true;
+          }
+        }
+        if (mutated) this.state.setGridLevels(sym, levels);
+      } catch (err) {
+        this.log.error(`/freezebuy: fetchOpenOrders ${sym} failed: ${sanitizeError(err)}`);
+      }
+    }
+    // Post-cancel verification: any buy still open? If so, retry once and report remaining.
+    let stillOpen = 0;
+    for (const sym of affectedSymbols) {
+      try {
+        const remaining = (await this.exchange.fetchOpenOrders(sym)).filter(o => o.side === 'buy');
+        for (const o of remaining) {
+          try {
+            await this.exchange.cancelOrder(o.id, sym);
+            cancelled++;
+          } catch {
+            stillOpen++;
+            this.log.error(`/freezebuy: ${sym} buy-order ${o.id} could not be cancelled after retry`);
+          }
+        }
+      } catch (err) {
+        this.log.warn(`/freezebuy: post-check fetchOpenOrders ${sym} failed: ${sanitizeError(err)}`);
+      }
+    }
+    this.log.info(`/freezebuy ${base}: blocked, cancelled ${cancelled} buy-orders across ${affectedSymbols.length} pair(s), failed=${failed}, stillOpen=${stillOpen}`);
+    let reply = `🧊 ${base} заморожен. Отменено ${cancelled} buy-ордер(ов). Sell-ордера продолжают работать.`;
+    if (stillOpen > 0) {
+      reply += `\n⚠️ Не удалось отменить ${stillOpen} ордер(ов). Повтори /freezebuy ${base} или отмени вручную через /cancelorders.`;
+    }
+    this.tg.sendReply(reply);
+  }
+
+  private async cmdSellGrid(base: string): Promise<void> {
+    if (!base) { this.tg.sendReply('Формат: /sellgrid XRP'); return; }
+    const available = this.collectBuyMenuCurrencies();
+    if (!available.includes(base)) {
+      this.log.warn(`/sellgrid rejected: unknown currency ${base}`);
+      this.tg.sendReply(`❌ Валюта ${base} не найдена в торгуемых парах.`);
+      return;
+    }
+    // Enable sellgrid + implicit freeze (Q-A=б: /unsellgrid will remove both)
+    const addedSellgrid = this.state.addSellGridBase(base);
+    const addedFreeze = this.state.addBlockedBuyBase(base);
+    if (!addedSellgrid) {
+      this.tg.sendReply(`${base} уже в sellgrid-режиме.`);
+      return;
+    }
+    // Cancel existing buy-orders (since buy is now frozen)
+    const affectedSymbols = this.config.pairs
+      .map(p => p.symbol)
+      .concat(this.state.getManualPairs())
+      .filter((s, i, arr) => arr.indexOf(s) === i)
+      .filter(sym => sym.split('/')[0] === base);
+    let cancelled = 0;
+    for (const sym of affectedSymbols) {
+      try {
+        const openOrders = await this.exchange.fetchOpenOrders(sym);
+        const buyOrders = openOrders.filter(o => o.side === 'buy');
+        for (const o of buyOrders) {
+          try { await this.exchange.cancelOrder(o.id, sym); cancelled++; }
+          catch (err) { this.log.warn(`/sellgrid: cancel ${o.id} failed: ${sanitizeError(err)}`); }
+        }
+        const levels = this.state.getGridLevels(sym);
+        let mutated = false;
+        for (const l of levels) {
+          if (l.side === 'buy' && l.orderId) {
+            l.orderId = undefined;
+            l.placedAt = undefined;
+            mutated = true;
+          }
+        }
+        if (mutated) this.state.setGridLevels(sym, levels);
+      } catch (err) {
+        this.log.warn(`/sellgrid: fetchOpenOrders ${sym} failed: ${sanitizeError(err)}`);
+      }
+    }
+    this.log.info(`/sellgrid ${base}: enabled (freeze=${addedFreeze ? 'new' : 'existed'}), cancelled ${cancelled} buy-orders. Ladder-mode active.`);
+    this.tg.sendReply(`🔻 ${base} в sellgrid-режиме. Buy заморожены (${cancelled} ордер(ов) отменено). После каждого sell fill — новый sell выше. Завершится автоматически при исчерпании крипты.`);
+  }
+
+  private async cmdUnsellGrid(base: string): Promise<void> {
+    if (!base) { this.tg.sendReply('Формат: /unsellgrid XRP'); return; }
+    const removedSellgrid = this.state.removeSellGridBase(base);
+    if (!removedSellgrid) {
+      this.tg.sendReply(`${base} не в sellgrid-режиме.`);
+      return;
+    }
+    const removedFreeze = this.state.removeBlockedBuyBase(base); // Q-A=б: также разморозить buy
+    // Force rebalance on affected pairs so buy-levels get refreshed
+    const affectedSymbols = this.config.pairs
+      .map(p => p.symbol)
+      .concat(this.state.getManualPairs())
+      .filter((s, i, arr) => arr.indexOf(s) === i)
+      .filter(sym => sym.split('/')[0] === base);
+    let forced = 0;
+    for (const sym of affectedSymbols) {
+      if (this.state.isGridInitialized(sym)) {
+        this.state.setGridCenterPrice(sym, 0);
+        forced++;
+      }
+    }
+    this.log.info(`/unsellgrid ${base}: sellgrid disabled, freeze also removed (${removedFreeze}), force-rebalance for ${forced} pair(s)`);
+    this.tg.sendReply(`✅ ${base}: sellgrid отключён, buy разморожен. Сетки восстановятся в ближайшем тике.`);
+  }
+
+  private async cmdUnfreezeBuy(base: string): Promise<void> {
+    if (!base) { this.tg.sendReply('Формат: /unfreezebuy XRP'); return; }
+    const removed = this.state.removeBlockedBuyBase(base);
+    if (!removed) {
+      this.tg.sendReply(`${base} не был заморожен.`);
+      return;
+    }
+    // Force rebalance for affected pairs — center=0 triggers fresh grid build on next tick.
+    // This ensures buy-levels are computed from current price, not stale values from before freeze.
+    const affectedSymbols = this.config.pairs
+      .map(p => p.symbol)
+      .concat(this.state.getManualPairs())
+      .filter((s, i, arr) => arr.indexOf(s) === i)
+      .filter(sym => sym.split('/')[0] === base);
+    let forced = 0;
+    for (const sym of affectedSymbols) {
+      if (this.state.isGridInitialized(sym)) {
+        this.state.setGridCenterPrice(sym, 0);
+        forced++;
+      }
+    }
+    this.log.info(`/unfreezebuy ${base}: unblocked, force-rebalance scheduled for ${forced} pair(s) on next tick`);
+    this.tg.sendReply(`✅ ${base} разморожен. Force-rebalance сетки — buy-ордера будут выставлены по актуальной цене в ближайшем тике.`);
+  }
+
+  private cmdStartWelcome(): void {
+    const text = [
+      '🤖 <b>Bybit Combo Bot</b>',
+      '',
+      'Спот-трейдинг на Bybit: Grid + Meta-signals с защитой позиций',
+      '',
+      '<b>📊 Мониторинг:</b>',
+      '/status — капитал, PnL, позиции',
+      '/stats — статистика по парам',
+      '/orders — открытые ордера',
+      '',
+      '<b>🛒 Торговля:</b>',
+      '/buy — купить (wizard или /buy SUI 10)',
+      '/sellall — продать всё + отмена ордеров',
+      '/cancelorders — отменить все ордера',
+      '/regrid — пересобрать торговые сетки',
+      '',
+      '<b>🧊 Заморозка:</b>',
+      '/freezebuy — заморозить покупки по валюте',
+      '/unfreezebuy — разморозить',
+      '',
+      '<b>⚙️ Управление:</b>',
+      '/stop — остановить торговлю',
+      '/run — возобновить торговлю',
+    ].join('\n');
+    this.tg.sendReply(text);
+  }
+
+  private collectBuyMenuCurrencies(): string[] {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const p of this.config.pairs) {
+      const base = p.symbol.split('/')[0];
+      if (base && !seen.has(base)) { seen.add(base); out.push(base); }
+    }
+    for (const sym of this.state.getManualPairs()) {
+      const base = sym.split('/')[0];
+      if (base && !seen.has(base)) { seen.add(base); out.push(base); }
+    }
+    return out;
   }
 
   private async cmdStatus(): Promise<void> {
@@ -1488,14 +1893,18 @@ export class ComboManager {
       const openOrders = levels.filter(l => l.orderId).length;
       const isHalted = this.state.isPairHalted(sym);
 
-      let line = `${sym}: `;
+      const statusBase = sym.split('/')[0];
+      const frozen = this.state.isBuyBlocked(statusBase);
+      const sellgrid = this.state.isSellGridActive(statusBase);
+      const marker = (sellgrid ? ' 🔻' : '') + (frozen ? ' 🧊' : '');
+      let line = `${sym}${marker}: `;
       if (pos.amount > 0) {
         const pnl = price > 0 ? ((price - pos.avgEntryPrice) / pos.avgEntryPrice * 100) : 0;
-        line += `${pos.amount.toFixed(6)} @ ${pos.avgEntryPrice.toFixed(4)} (${pnl >= 0 ? '+' : ''}${pnl.toFixed(1)}%)`;
+        line += `tokens ${pos.amount.toFixed(6)} | avgEntry ${pos.avgEntryPrice.toFixed(4)} | uPnL ${pnl >= 0 ? '+' : ''}${pnl.toFixed(1)}%`;
       } else {
         line += 'нет позиции';
       }
-      line += ` | ${openOrders} ордеров`;
+      line += ` | open ${openOrders}`;
       if (isHalted) line += ' | HALTED';
 
       pairLines.push(line);
@@ -1536,6 +1945,7 @@ export class ComboManager {
     const text = [
       `<b>STATUS</b> (tick ${this.state.totalTicks})`,
       `Capital: <b>${totalValue.toFixed(2)}</b> USDT`,
+      `Start: ${this.state.startingCapital.toFixed(2)} USDT`,
       `PnL: ${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)} (${pnl >= 0 ? '+' : ''}${pnlPct.toFixed(1)}%)`,
       `Drawdown: ${drawdown.toFixed(1)}%`,
       `Halted: ${this.state.halted ? 'YES' : 'no'}`,
@@ -1577,24 +1987,44 @@ export class ComboManager {
 
   private async cmdBuy(args: string): Promise<void> {
     // Parse: /buy SUI 10 → buy 10 SUI for USDT (pair = SUI/USDT)
-    // Parse: /buy SUI/BTC 10 → buy 10 SUI for BTC (pair = SUI/BTC)
-    const parts = args.trim().split(/\s+/);
+    // Parse: /buy SUI BTC 10 → buy 10 SUI for BTC (pair = SUI/BTC)
+    // Legacy: /buy SUI/BTC 10 still accepted (converted transparently)
+    const parts = args.trim().split(/\s+/).filter(Boolean);
     if (parts.length < 2) {
-      this.tg.sendReply('Формат: /buy SUI 10 или /buy SUI/BTC 10\nПервое — количество base, второе — quote (по умолчанию USDT)');
+      this.tg.sendReply('Формат: /buy SUI 10 или /buy SUI BTC 10\nПервое — base (что купить), опционально quote (за что), последнее — количество. Quote по умолчанию USDT.');
       return;
     }
 
-    const rawPair = parts[0].toUpperCase();
-    const amount = parseFloat(parts[1]);
+    let base: string;
+    let quote: string;
+    let amount: number;
+    if (parts.length === 2) {
+      // /buy SUI 10 — quote=USDT, или legacy /buy SUI/BTC 10
+      const first = parts[0].toUpperCase();
+      if (first.includes('/')) {
+        [base, quote] = first.split('/');
+      } else {
+        base = first;
+        quote = 'USDT';
+      }
+      amount = parseFloat(parts[1]);
+    } else {
+      // /buy SUI BTC 10
+      base = parts[0].toUpperCase();
+      quote = parts[1].toUpperCase();
+      amount = parseFloat(parts[2]);
+    }
 
+    if (!base || !quote) {
+      this.tg.sendReply(`Некорректная пара: base=${base} quote=${quote}`);
+      return;
+    }
     if (isNaN(amount) || amount <= 0) {
-      this.tg.sendReply(`Некорректное количество: ${parts[1]}`);
+      this.tg.sendReply(`Некорректное количество: ${parts[parts.length - 1]}`);
       return;
     }
 
-    // Determine symbol: SUI → SUI/USDT, SUI/BTC → SUI/BTC
-    const symbol = rawPair.includes('/') ? rawPair : `${rawPair}/USDT`;
-    const [base, quote] = symbol.split('/');
+    const symbol = `${base}/${quote}`;
 
     // Check quote currency balance
     const balances = await this.exchange.fetchAllBalances();
@@ -1765,19 +2195,70 @@ export class ComboManager {
     this.tg.sendReply(`Все ордера отменены, grid сброшен. Бот остановлен.\n${HALT_HINT}`);
   }
 
-  private cmdStats(): void {
+  private async cmdStats(): Promise<void> {
     const lines: string[] = ['<b>📊 Trade Statistics</b>', ''];
     let totalSpent = 0, totalEarned = 0, totalBuyFees = 0, totalSellFees = 0;
+
+    // Fetch tickers in parallel (cache-first, parallelPairs batch size)
+    const symbols = this.config.pairs.map(p => p.symbol);
+    const chunkSize = this.config.parallelPairs > 0 ? this.config.parallelPairs : 4;
+    const tickerMap = new Map<string, Ticker | null>();
+    for (let i = 0; i < symbols.length; i += chunkSize) {
+      const chunk = symbols.slice(i, i + chunkSize);
+      const results = await Promise.allSettled(
+        chunk.map(s => this.exchange.getCachedOrFreshTicker(s)),
+      );
+      results.forEach((r, idx) => {
+        tickerMap.set(chunk[idx], r.status === 'fulfilled' ? r.value : null);
+      });
+    }
 
     for (const pair of this.config.pairs) {
       const s = this.state.getPairStats(pair.symbol);
       const pnlSign = s.pnl >= 0 ? '+' : '';
+      const pnlPct = s.spent > 0 ? (s.pnl / s.spent) * 100 : 0;
+      const statsBase2 = pair.symbol.split('/')[0];
+      const statsFrozen = this.state.isBuyBlocked(statsBase2);
+      const statsSellgrid = this.state.isSellGridActive(statsBase2);
+      const statsMarker = (statsSellgrid ? ' 🔻' : '') + (statsFrozen ? ' 🧊' : '');
+
+      // Nearest active buy (highest price < current) and sell (lowest price > current)
+      const levels = this.state.getGridLevels(pair.symbol);
+      const activeBuys = levels.filter(l => l.side === 'buy' && l.orderId && !l.filled);
+      const activeSells = levels.filter(l => l.side === 'sell' && l.orderId && !l.filled);
+      const nearestBuy = activeBuys.length > 0 ? Math.max(...activeBuys.map(l => l.price)) : null;
+      const nearestSell = activeSells.length > 0 ? Math.min(...activeSells.map(l => l.price)) : null;
+      const ticker = tickerMap.get(pair.symbol);
+      const px = ticker?.last ?? null;
+      const quote = pair.symbol.split('/')[1] ?? 'USDT';
+      let marketLine = '';
+      if (px === null || px <= 0) {
+        marketLine = ' Price: N/A';
+      } else {
+        const parts: string[] = [`NowPrice ${px.toFixed(4)}`];
+        if (nearestBuy !== null) {
+          const d = nearestBuy - px;
+          const dp = (d / px) * 100;
+          parts.push(`↓ ${d >= 0 ? '+' : ''}${d.toFixed(4)} (${dp >= 0 ? '+' : ''}${dp.toFixed(2)}%)`);
+        } else {
+          parts.push('↓ no buy');
+        }
+        if (nearestSell !== null) {
+          const d = nearestSell - px;
+          const dp = (d / px) * 100;
+          parts.push(`↑ ${d >= 0 ? '+' : ''}${d.toFixed(4)} (${dp >= 0 ? '+' : ''}${dp.toFixed(2)}%)`);
+        } else {
+          parts.push('↑ no sell');
+        }
+        marketLine = ' ' + parts.join(' ') + ` ${quote}`;
+      }
+
       lines.push(
-        `<b>${pair.symbol}</b>`,
-        `  ${s.buys}B / ${s.sells}S`,
-        `  Spent: ${s.spent.toFixed(2)} | Earned: ${s.earned.toFixed(2)}`,
-        `  Fees: ${s.buyFees.toFixed(3)} (buy) + ${s.sellFees.toFixed(3)} (sell)`,
-        `  PnL: ${pnlSign}${s.pnl.toFixed(2)} USDT`,
+        `<b>${pair.symbol}</b> (${s.buys}B / ${s.sells}S)${statsMarker}`,
+        ` Spent: ${s.spent.toFixed(2)} | Earned: ${s.earned.toFixed(2)}`,
+        ` Fees: ${s.buyFees.toFixed(3)} (buy) + ${s.sellFees.toFixed(3)} (sell)`,
+        ` PnL: ${pnlSign}${s.pnl.toFixed(2)} USDT (${pnlSign}${pnlPct.toFixed(1)}%)`,
+        marketLine,
         '',
       );
       totalSpent += s.spent;
@@ -1789,12 +2270,13 @@ export class ComboManager {
     const totalFees = totalBuyFees + totalSellFees;
     const totalPnl = totalEarned - totalSpent - totalFees;
     const sign = totalPnl >= 0 ? '+' : '';
+    const totalPnlPct = totalSpent > 0 ? (totalPnl / totalSpent) * 100 : 0;
     const capital = this.lastTickPortfolioValue > 0 ? this.lastTickPortfolioValue : this.state.peakCapital;
     lines.push(
       `<b>TOTAL</b> (${capital.toFixed(2)} USDT)`,
-      `Spent: ${totalSpent.toFixed(2)} | Earned: ${totalEarned.toFixed(2)}`,
-      `Fees: ${totalBuyFees.toFixed(3)} (buy) + ${totalSellFees.toFixed(3)} (sell) = ${totalFees.toFixed(3)}`,
-      `PnL: ${sign}${totalPnl.toFixed(2)} USDT`,
+      ` Spent: ${totalSpent.toFixed(2)} | Earned: ${totalEarned.toFixed(2)}`,
+      ` Fees: ${totalBuyFees.toFixed(3)} (buy) + ${totalSellFees.toFixed(3)} (sell) = ${totalFees.toFixed(3)}`,
+      ` PnL: ${sign}${totalPnl.toFixed(2)} USDT (${sign}${totalPnlPct.toFixed(1)}%)`,
     );
 
     this.tg.sendReply(lines.join('\n'));

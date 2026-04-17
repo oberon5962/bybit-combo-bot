@@ -38,6 +38,7 @@ export function loadConfig(): BotConfig {
   const gridLevels = json.grid?.gridLevels ?? -1;
   const defaultNum = -1;
   const defaultBool = false;
+  const defaultStr = '';
 
   const config: BotConfig = {
     apiKey,
@@ -77,10 +78,13 @@ export function loadConfig(): BotConfig {
       bollingerBuyMultiplier: json.grid?.bollingerBuyMultiplier ?? defaultNum,
       bollingerSellMultiplier: json.grid?.bollingerSellMultiplier ?? defaultNum,
       bollingerShiftLevels: json.grid?.bollingerShiftLevels ?? defaultNum,
-      sellTrailingDownHours: json.grid?.sellTrailingDownHours ?? 0,
+      sellTrailingDownHours: json.grid?.sellTrailingDownHours ?? defaultNum,
+      minSellProfitPercent: json.grid?.minSellProfitPercent ?? defaultNum,
+      maxSellLossPercent: json.grid?.maxSellLossPercent ?? defaultNum,
+      orphanSellMaxPerTick: json.grid?.orphanSellMaxPerTick ?? defaultNum,
       autoSpacingIntervalMin: json.grid?.autoSpacingIntervalMin ?? defaultNum,
       autoSpacingSafetyMarginPercent: json.grid?.autoSpacingSafetyMarginPercent ?? defaultNum,
-      autoSpacingPriority: json.grid?.autoSpacingPriority ?? 'off',
+      autoSpacingPriority: json.grid?.autoSpacingPriority ?? defaultStr,
     },
 
     dca: {
@@ -121,20 +125,20 @@ export function loadConfig(): BotConfig {
       enabled: !!telegramToken && !!telegramChatId,
       botToken: telegramToken,
       chatId: telegramChatId,
-      telegramApiUrl: json.telegram?.telegramApiUrl ?? '',
+      telegramApiUrl: json.telegram?.telegramApiUrl ?? defaultStr,
       sendSummary: json.telegram?.sendSummary ?? defaultBool,
       sendFills: json.telegram?.sendFills ?? defaultBool,
       sendAlerts: json.telegram?.sendAlerts ?? defaultBool,
       summaryIntervalTicks: json.telegram?.summaryIntervalTicks ?? defaultNum,
-      commandPollIntervalTicks: json.telegram?.commandPollIntervalTicks ?? 0,
-      confirmationTimeoutSec: json.telegram?.confirmationTimeoutSec ?? 60,
+      commandPollIntervalTicks: json.telegram?.commandPollIntervalTicks ?? defaultNum,
+      confirmationTimeoutSec: json.telegram?.confirmationTimeoutSec ?? defaultNum,
     },
 
     tickIntervalSec: json.tickIntervalSec ?? defaultNum,
     syncIntervalSec: json.syncIntervalSec ?? defaultNum,
     configReloadIntervalTicks: json.configReloadIntervalTicks ?? defaultNum,
-    logSummaryIntervalTicks: json.telegram?.logSummaryIntervalTicks ?? json.logSummaryIntervalTicks ?? 10,
-    parallelPairs: json.parallelPairs ?? 1,
+    logSummaryIntervalTicks: json.telegram?.logSummaryIntervalTicks ?? json.logSummaryIntervalTicks ?? defaultNum,
+    parallelPairs: json.parallelPairs ?? defaultNum,
   };
 
   validateConfig(config);
@@ -202,6 +206,9 @@ function validateConfig(config: BotConfig): void {
     if (config.grid.gridLevels < 2) errors.push('gridLevels must be >= 2');
     if (config.grid.orderSizePercent <= 0) errors.push('grid.orderSizePercent must be > 0');
     if (config.grid.rebalancePercent <= 0 || config.grid.rebalancePercent > 50) errors.push('grid.rebalancePercent must be between 0 and 50');
+    if (config.grid.minSellProfitPercent <= 0 || config.grid.minSellProfitPercent > 5) errors.push('grid.minSellProfitPercent must be between 0 and 5 (typical 0.3)');
+    if (config.grid.maxSellLossPercent <= 0 || config.grid.maxSellLossPercent > 10) errors.push('grid.maxSellLossPercent must be between 0 and 10 (typical 1)');
+    if (config.grid.orphanSellMaxPerTick < 1 || config.grid.orphanSellMaxPerTick > 20) errors.push('grid.orphanSellMaxPerTick must be between 1 and 20 (typical 5)');
     if (config.grid.rsiOverboughtThreshold < 50 || config.grid.rsiOverboughtThreshold > 100) {
       errors.push('grid.rsiOverboughtThreshold must be between 50 and 100');
     }

@@ -80,6 +80,12 @@ export interface BotState {
   // Pairs bought manually via /buy that are NOT in config.pairs (e.g. "DOGE/USDT")
   manualPairs: string[];
 
+  // Base currencies with buy-freeze enabled (e.g. ["XRP", "AAVE"]) — bot will not auto-buy these
+  blockedBuyBases: string[];
+
+  // Base currencies with sellgrid mode enabled — after each sell fill, place new sell higher (ladder)
+  sellGridBases: string[];
+
   // Telegram lastUpdateId — persisted to avoid replaying commands on restart
   telegramUpdateId: number;
 }
@@ -109,6 +115,8 @@ function createEmptyState(): BotState {
     halted: false,
     recentTrades: [],
     manualPairs: [],
+    blockedBuyBases: [],
+    sellGridBases: [],
     telegramUpdateId: 0,
   };
 }
@@ -182,6 +190,8 @@ export class StateManager {
         state.halted = typeof parsed.halted === 'boolean' ? parsed.halted : false;
         state.recentTrades = Array.isArray(parsed.recentTrades) ? parsed.recentTrades : [];
         state.manualPairs = Array.isArray(parsed.manualPairs) ? parsed.manualPairs : [];
+        state.blockedBuyBases = Array.isArray(parsed.blockedBuyBases) ? parsed.blockedBuyBases.map((s: string) => String(s).toUpperCase()) : [];
+        state.sellGridBases = Array.isArray(parsed.sellGridBases) ? parsed.sellGridBases.map((s: string) => String(s).toUpperCase()) : [];
         state.telegramUpdateId = typeof parsed.telegramUpdateId === 'number' ? parsed.telegramUpdateId : 0;
 
         // Restore per-pair state with validation
@@ -521,12 +531,52 @@ export class StateManager {
   addManualPair(symbol: string): void {
     if (!this.state.manualPairs.includes(symbol)) {
       this.state.manualPairs.push(symbol);
-      this.save();
+      this.saveCritical(); // manual pair must survive crash — addTrade/addToPosition already committed
     }
   }
   removeManualPair(symbol: string): void {
     this.state.manualPairs = this.state.manualPairs.filter(s => s !== symbol);
-    this.save();
+    this.saveCritical();
+  }
+
+  // Buy-freeze per base currency
+  getBlockedBuyBases(): string[] { return this.state.blockedBuyBases ?? []; }
+  isBuyBlocked(base: string): boolean { return (this.state.blockedBuyBases ?? []).includes(base.toUpperCase()); }
+  addBlockedBuyBase(base: string): boolean {
+    const up = base.toUpperCase();
+    if (!this.state.blockedBuyBases) this.state.blockedBuyBases = [];
+    if (this.state.blockedBuyBases.includes(up)) return false;
+    this.state.blockedBuyBases.push(up);
+    this.saveCritical();
+    return true;
+  }
+  removeBlockedBuyBase(base: string): boolean {
+    const up = base.toUpperCase();
+    const before = this.state.blockedBuyBases?.length ?? 0;
+    this.state.blockedBuyBases = (this.state.blockedBuyBases ?? []).filter(b => b !== up);
+    if (this.state.blockedBuyBases.length === before) return false;
+    this.saveCritical();
+    return true;
+  }
+
+  // Sellgrid mode per base currency
+  getSellGridBases(): string[] { return this.state.sellGridBases ?? []; }
+  isSellGridActive(base: string): boolean { return (this.state.sellGridBases ?? []).includes(base.toUpperCase()); }
+  addSellGridBase(base: string): boolean {
+    const up = base.toUpperCase();
+    if (!this.state.sellGridBases) this.state.sellGridBases = [];
+    if (this.state.sellGridBases.includes(up)) return false;
+    this.state.sellGridBases.push(up);
+    this.saveCritical();
+    return true;
+  }
+  removeSellGridBase(base: string): boolean {
+    const up = base.toUpperCase();
+    const before = this.state.sellGridBases?.length ?? 0;
+    this.state.sellGridBases = (this.state.sellGridBases ?? []).filter(b => b !== up);
+    if (this.state.sellGridBases.length === before) return false;
+    this.saveCritical();
+    return true;
   }
 
   // Telegram update offset (persisted to avoid replaying commands on restart)

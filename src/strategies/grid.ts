@@ -8,6 +8,7 @@ import {
 } from '../types';
 import { BybitExchange } from '../exchange';
 import { StateManager, GridLevelState } from '../state';
+import { TelegramNotifier } from '../telegram';
 
 export class GridStrategy {
   private config: GridConfig;
@@ -23,6 +24,7 @@ export class GridStrategy {
   private lastRebalanceTime: Map<string, number> = new Map(); // cooldown between rebalances
   private _marketProtectionActive: boolean = false;
   private autoSpacingMap: Map<string, { buy: number; sell: number }> = new Map();
+  private telegram: TelegramNotifier | null = null;
 
   private maxOpenOrdersPerPair: number;
 
@@ -33,6 +35,11 @@ export class GridStrategy {
     this.exchange = exchange;
     this.log = log;
     this.state = state;
+  }
+
+  /** Allow ComboManager to inject telegram for fill-time notifications (sellgrid auto-exit) */
+  setTelegram(tg: TelegramNotifier): void {
+    this.telegram = tg;
   }
 
   /** Hot-reload: обновить конфиг без перестроения сетки. Новые параметры применятся к новым ордерам. */
@@ -410,6 +417,11 @@ export class GridStrategy {
         }
 
         if (level.side === 'buy' && level.price < currentPrice) {
+          // Buy-freeze: skip if this base is frozen via /freezebuy
+          if (this.state.isBuyBlocked(base)) {
+            addSkip('buy frozen');
+            continue;
+          }
           // Block new buy orders during market protection (panic / BTC watchdog)
           if (this._marketProtectionActive) {
             addSkip('market protection');
@@ -421,10 +433,19 @@ export class GridStrategy {
             addSkip(buyCheck.reason);
             continue;
           }
-          const orderCost = amount * level.price;
+          let orderCost = amount * level.price;
           if (freeUSDT < orderCost) {
-            addSkip('low USDT');
-            continue;
+            // Fallback: buy as much as we can afford (>= minAmount and minCost)
+            const availableAmount = this.roundAmountForMarket(freeUSDT / level.price, precision.amountPrecision);
+            const availableCost = availableAmount * level.price;
+            if (availableAmount >= precision.minAmount && availableCost >= precision.minCost) {
+              this.log.info(`Buy reduced (low USDT): ${amount} → ${availableAmount} (${(availableAmount/amount*100).toFixed(0)}% of target)`, { symbol });
+              amount = availableAmount;
+              orderCost = availableCost;
+            } else {
+              addSkip('low USDT');
+              continue;
+            }
           }
           const order = await this.exchange.withRetry(
             () => this.exchange.createLimitBuy(symbol, amount, level.price, 'grid'),
@@ -437,22 +458,41 @@ export class GridStrategy {
           this.exchange.deductCachedBalance('USDT', orderCost);
           ordersPlaced++;
         } else if (level.side === 'sell' && level.price > currentPrice) {
-          // Guard: never sell below avg entry price + fees — raise to break-even
+          // Guard: midpoint between spacing price and break-even, if allowed loss ≤ maxSellLossPercent% of avgEntry.
+          // Otherwise skip placement (retire level) — rely on existing higher sells.
           const pos = this.state.getPosition(symbol);
-          if (pos.avgEntryPrice > 0 && level.price < pos.avgEntryPrice * 1.003) {
-            const minPrice = this.roundPriceForMarket(pos.avgEntryPrice * 1.003, precision.pricePrecision);
-            if (minPrice <= currentPrice) {
-              // break-even ниже текущей цены — ордер не исполнится, skip
+          const breakEvenMult = 1 + (this.config.minSellProfitPercent / 100);
+          const lossMult = 1 - (this.config.maxSellLossPercent / 100);
+          const minSellPrice = pos.avgEntryPrice * breakEvenMult;
+          if (pos.avgEntryPrice > 0 && level.price < minSellPrice) {
+            if (minSellPrice <= currentPrice) {
+              // break-even below current — raising to break-even would fill immediately. Skip.
               addSkip('below entry');
               continue;
             }
-            this.log.info(`Grid sell raised to break-even: ${level.price} → ${minPrice}`, { symbol });
-            level.price = minPrice;
+            const midpoint = (level.price + minSellPrice) / 2;
+            const lossThreshold = pos.avgEntryPrice * lossMult;
+            if (midpoint > lossThreshold) {
+              const midPrice = this.roundPriceForMarket(midpoint, precision.pricePrecision);
+              this.log.info(`Grid sell midpoint: ${level.price} → ${midPrice} (break-even=${minSellPrice.toFixed(6)}, avgEntry=${pos.avgEntryPrice.toFixed(6)})`, { symbol });
+              level.price = midPrice;
+            } else {
+              // Midpoint would cause > maxSellLossPercent% loss — skip placement
+              addSkip(`midpoint >${this.config.maxSellLossPercent}% loss`);
+              continue;
+            }
           }
           // Check if we have enough free crypto to place this sell
           if (freeCrypto < amount) {
-            addSkip(`low ${base}`);
-            continue;
+            // Fallback: sell as much as we have (>= minAmount and minCost)
+            const availableAmount = this.roundAmountForMarket(freeCrypto, precision.amountPrecision);
+            if (availableAmount >= precision.minAmount && availableAmount * level.price >= precision.minCost) {
+              this.log.info(`Sell reduced (low ${base}): ${amount} → ${availableAmount} (${(availableAmount/amount*100).toFixed(0)}% of target)`, { symbol });
+              amount = availableAmount;
+            } else {
+              addSkip(`low ${base}`);
+              continue;
+            }
           }
           const order = await this.exchange.withRetry(
             () => this.exchange.createLimitSell(symbol, amount, level.price, 'grid'),
@@ -594,6 +634,22 @@ export class GridStrategy {
             this.state.addToPosition(symbol, filledAmount, filledAmount * actualPrice);
           } else {
             this.state.reducePosition(symbol, filledAmount);
+            // Sellgrid auto-exit: if position is now too small to sell and sellgrid active → disable + notify
+            const baseSym = symbol.split('/')[0];
+            if (this.state.isSellGridActive(baseSym)) {
+              try {
+                const pos = this.state.getPosition(symbol);
+                const precision = await this.getPrecision(symbol);
+                if (pos.amount < precision.minAmount || pos.amount * actualPrice < precision.minCost) {
+                  this.state.removeSellGridBase(baseSym);
+                  this.state.removeBlockedBuyBase(baseSym);
+                  this.log.info(`Sellgrid auto-exit for ${baseSym}: position depleted (${pos.amount.toFixed(8)}). Sellgrid and freeze removed.`);
+                  this.telegram?.sendAlert(`🔻 <b>Sellgrid завершён: ${baseSym}</b>\nКрипта распродана (позиция: ${pos.amount.toFixed(6)}). Sellgrid и freeze сняты автоматически.`);
+                }
+              } catch (err) {
+                this.log.warn(`Sellgrid auto-exit check failed for ${baseSym}: ${sanitizeError(err)} — will retry on next fill`);
+              }
+            }
           }
 
           // Check if pair was halted by SL/TP — fill is already recorded above, skip counter-order only
@@ -612,15 +668,54 @@ export class GridStrategy {
             ? filledPrice * (1 + counterSellPct / 100)
             : filledPrice * (1 - counterBuyPct / 100);
           let counterPrice = this.roundPriceForMarket(rawCounterPrice, precision.pricePrecision);
-          const counterSide: 'buy' | 'sell' = filledSide === 'buy' ? 'sell' : 'buy';
+          let counterSide: 'buy' | 'sell' = filledSide === 'buy' ? 'sell' : 'buy';
 
-          // Guard: counter-sell must not be below avg entry price + fees
+          // Sellgrid mode: after a sell fill, place a NEW SELL higher (ladder), not counter-buy.
+          // Overrides buy-freeze skip below. Sellgrid ~= freeze + ladder-up.
+          const base = symbol.split('/')[0];
+          if (counterSide === 'buy' && this.state.isSellGridActive(base)) {
+            counterSide = 'sell';
+            counterPrice = this.roundPriceForMarket(filledPrice * (1 + counterSellPct / 100), precision.pricePrecision);
+            this.log.info(`Sellgrid: sell fill @ ${filledPrice} → new sell @ ${counterPrice} (ladder up, ${symbol})`);
+          }
+
+          // Buy-freeze: skip counter-buy when base is frozen; retire the level to sell-side so it doesn't retry.
+          if (counterSide === 'buy' && this.state.isBuyBlocked(base)) {
+            this.log.info(`Grid counter-buy skipped for ${symbol} (base frozen) — retiring level`);
+            level.side = 'buy'; // keep price so that unfreeze restores it naturally
+            level.orderId = undefined;
+            level.filled = false;
+            levelsChanged = true;
+            continue;
+          }
+
+          // Guard: counter-sell must not incur loss > maxSellLossPercent% vs avg entry.
+          // Strategy: midpoint between spacing-calc price and break-even if midpoint > avgEntry * (1-maxSellLossPercent/100),
+          // else skip placement (keep level retired for existing higher sells to handle).
           if (counterSide === 'sell') {
             const pos = this.state.getPosition(symbol);
-            const minSellPrice = pos.avgEntryPrice * 1.003;
+            const breakEvenMult = 1 + (this.config.minSellProfitPercent / 100);
+            const lossMult = 1 - (this.config.maxSellLossPercent / 100);
+            const minSellPrice = pos.avgEntryPrice * breakEvenMult;
             if (pos.avgEntryPrice > 0 && counterPrice < minSellPrice) {
-              counterPrice = this.roundPriceForMarket(minSellPrice, precision.pricePrecision);
-              this.log.info(`Counter-sell price raised to break-even: ${counterPrice}`, { symbol });
+              const midpoint = (counterPrice + minSellPrice) / 2;
+              const lossThreshold = pos.avgEntryPrice * lossMult;
+              if (midpoint > lossThreshold) {
+                const oldCounter = counterPrice;
+                counterPrice = this.roundPriceForMarket(midpoint, precision.pricePrecision);
+                this.log.info(`Counter-sell midpoint: ${oldCounter} → ${counterPrice} (spacing=${oldCounter}, break-even=${minSellPrice.toFixed(6)}, avgEntry=${pos.avgEntryPrice.toFixed(6)})`, { symbol });
+              } else {
+                // Midpoint would cause > maxSellLossPercent% loss — skip placement, retire level
+                // If sellgrid active: keep level as 'sell' (ladder mode), orphan-sell will cover
+                // If normal mode: retire to 'buy' side so next cycle places a buy
+                this.log.info(`Counter-sell skipped: midpoint ${midpoint.toFixed(6)} <= avgEntry*${lossMult} (${lossThreshold.toFixed(6)}). Relying on orphan-sell / existing higher sells.`, { symbol });
+                const baseForSkip = symbol.split('/')[0];
+                level.side = this.state.isSellGridActive(baseForSkip) ? 'sell' : 'buy';
+                level.orderId = undefined;
+                level.filled = false;
+                levelsChanged = true;
+                continue;
+              }
             }
           }
 
@@ -820,8 +915,8 @@ export class GridStrategy {
             remaining -= sellAmount;
             priceStep++;
 
-            // Safety: max 5 orphan sells per tick
-            if (priceStep > 5) break;
+            // Safety: max N orphan sells per tick (from config, hot-reloadable)
+            if (priceStep > this.config.orphanSellMaxPerTick) break;
           }
           levels.sort((a, b) => a.price - b.price);
           this.state.setGridLevels(symbol, levels);
@@ -852,7 +947,7 @@ export class GridStrategy {
 
         const pos = this.state.getPosition(symbol);
         if (pos.avgEntryPrice <= 0) continue;
-        const breakEvenPrice = pos.avgEntryPrice * 1.003;
+        const breakEvenPrice = pos.avgEntryPrice * (1 + this.config.minSellProfitPercent / 100);
 
         // Only trail if sell is above break-even AND above current price + 0.5%
         if (level.price <= breakEvenPrice || level.price <= ticker.last * 1.005) continue;

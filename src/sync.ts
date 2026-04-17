@@ -76,6 +76,9 @@ export class ExchangeSync {
     // 1. Sync open orders
     await this.syncOrders();
 
+    // 1b. Enforce buy-freeze: cancel any live buy-orders for frozen bases
+    await this.enforceBuyFreezeAfterSync();
+
     // 2. Build portfolio snapshot
     const snapshot = await this.buildPortfolioSnapshot();
 
@@ -83,6 +86,45 @@ export class ExchangeSync {
     this.logPortfolio(snapshot);
 
     return snapshot;
+  }
+
+  /** Cancel any live buy-orders on exchange for currencies in blockedBuyBases. Called after sync. */
+  private async enforceBuyFreezeAfterSync(): Promise<void> {
+    const frozen = this.state.getBlockedBuyBases();
+    if (frozen.length === 0) return;
+    const symbols = this.config.pairs.map(p => p.symbol).concat(this.state.getManualPairs())
+      .filter((s, i, arr) => arr.indexOf(s) === i)
+      .filter(sym => frozen.includes(sym.split('/')[0].toUpperCase()));
+    let cancelled = 0;
+    for (const sym of symbols) {
+      try {
+        const orders = await this.exchange.fetchOpenOrders(sym);
+        for (const o of orders.filter(o => o.side === 'buy')) {
+          try {
+            await this.exchange.cancelOrder(o.id, sym);
+            cancelled++;
+          } catch (err) {
+            this.log.warn(`[sync] enforceBuyFreeze: cancel ${o.id} ${sym} failed: ${sanitizeError(err)}`);
+          }
+        }
+        // Clear orderId on buy-levels in state so grid doesn't think they're still pending
+        const levels = this.state.getGridLevels(sym);
+        let mutated = false;
+        for (const l of levels) {
+          if (l.side === 'buy' && l.orderId) {
+            l.orderId = undefined;
+            l.placedAt = undefined;
+            mutated = true;
+          }
+        }
+        if (mutated) this.state.setGridLevels(sym, levels);
+      } catch (err) {
+        this.log.warn(`[sync] enforceBuyFreeze: fetchOpenOrders ${sym} failed: ${sanitizeError(err)}`);
+      }
+    }
+    if (cancelled > 0 || frozen.length > 0) {
+      this.log.info(`[sync] enforceBuyFreeze: frozen=${frozen.join(',')} — cancelled ${cancelled} buy-order(s) across ${symbols.length} pair(s)`);
+    }
   }
 
   // ----------------------------------------------------------
