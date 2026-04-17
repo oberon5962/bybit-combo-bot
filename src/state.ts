@@ -23,6 +23,7 @@ export interface GridLevelState {
   side: 'buy' | 'sell';
   orderId?: string;
   filled: boolean;
+  placedAt?: number;     // timestamp когда ордер выставлен (для trailing sell-down)
 }
 
 export interface PairState {
@@ -192,7 +193,7 @@ export class StateManager {
               dcaTotalInvested: typeof pd.dcaTotalInvested === 'number' ? pd.dcaTotalInvested : 0,
               dcaTotalBought: typeof pd.dcaTotalBought === 'number' ? pd.dcaTotalBought : 0,
               gridLevels: Array.isArray(pd.gridLevels)
-                ? (pd.gridLevels as any[]).map((l: any) => ({ ...l, amount: l.amount ?? 0 })) as GridLevelState[]
+                ? (pd.gridLevels as any[]).map((l: any) => ({ ...l, amount: l.amount ?? 0, placedAt: l.placedAt ?? undefined })) as GridLevelState[]
                 : [],
               gridInitialized: typeof pd.gridInitialized === 'boolean' ? pd.gridInitialized : false,
               gridCenterPrice: typeof pd.gridCenterPrice === 'number' ? pd.gridCenterPrice : 0,

@@ -77,6 +77,7 @@ export function loadConfig(): BotConfig {
       bollingerBuyMultiplier: json.grid?.bollingerBuyMultiplier ?? defaultNum,
       bollingerSellMultiplier: json.grid?.bollingerSellMultiplier ?? defaultNum,
       bollingerShiftLevels: json.grid?.bollingerShiftLevels ?? defaultNum,
+      sellTrailingDownHours: json.grid?.sellTrailingDownHours ?? 0,
       autoSpacingIntervalMin: json.grid?.autoSpacingIntervalMin ?? defaultNum,
       autoSpacingSafetyMarginPercent: json.grid?.autoSpacingSafetyMarginPercent ?? defaultNum,
       autoSpacingPriority: json.grid?.autoSpacingPriority ?? 'off',

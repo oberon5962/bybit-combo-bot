@@ -238,10 +238,18 @@ export class GridStrategy {
             }
             return false;
           }
-          // Price moved beyond rebalance threshold from grid center — cancel all and reinitialize
-          this.log.warn(`Grid rebalance for ${symbol}: price drifted ${driftPercent.toFixed(1)}% from center (${gridCenter.toFixed(2)} → ${currentPrice.toFixed(2)})`);
+          // Price moved beyond rebalance threshold from grid center
+          const driftDown = currentPrice < gridCenter;
+          this.log.warn(`Grid rebalance ${driftDown ? 'DOWN' : 'UP'} for ${symbol}: price drifted ${driftPercent.toFixed(1)}% from center (${gridCenter.toFixed(2)} → ${currentPrice.toFixed(2)})`);
           this.lastRebalanceTime.set(symbol, Date.now());
-          await this.cancelAll(symbol);
+
+          if (driftDown) {
+            // Split rebalance: keep sell orders, rebuild only buy side
+            await this.cancelBuySide(symbol);
+          } else {
+            // Full rebalance: cancel all and reinitialize
+            await this.cancelAll(symbol);
+          }
           // Fall through to reinitialize below
         } else {
           // Log only once per session, not every tick
@@ -276,23 +284,39 @@ export class GridStrategy {
 
     const buySpacing = currentPrice * (buySpacingPct / 100);
     const sellSpacing = currentPrice * (sellSpacingPct / 100);
-    const levels: GridLevelState[] = [];
-    const usedPrices = new Set<number>();
+
+    // Check if we have preserved sell levels from split rebalance
+    const existingSells = this.state.getGridLevels(symbol).filter(l => l.side === 'sell');
+    const usedPrices = new Set<number>(existingSells.map(l => l.price));
+
+    const levels: GridLevelState[] = [...existingSells]; // keep existing sells
 
     // Buy levels below price
     for (let i = 1; i <= buyLevels; i++) {
       const price = this.roundPriceForMarket(currentPrice - buySpacing * i, precision.pricePrecision);
-      if (usedPrices.has(price)) continue; // skip duplicate after rounding
+      if (usedPrices.has(price)) continue;
       usedPrices.add(price);
-      levels.push({ price, amount: 0, side: 'buy', filled: false }); // amount заполнится в placeGridOrders()
+      levels.push({ price, amount: 0, side: 'buy', filled: false });
     }
 
-    // Sell levels above price (using separate sell spacing)
-    for (let i = 1; i <= sellLevels; i++) {
-      const price = this.roundPriceForMarket(currentPrice + sellSpacing * i, precision.pricePrecision);
-      if (usedPrices.has(price)) continue; // skip duplicate after rounding
-      usedPrices.add(price);
-      levels.push({ price, amount: 0, side: 'sell', filled: false }); // amount заполнится в placeGridOrders()
+    // Sell levels above price — only if no preserved sells from split rebalance
+    // Cap accumulated sells to prevent unbounded growth from repeated split rebalances
+    if (existingSells.length > this.maxOpenOrdersPerPair) {
+      const excess = existingSells.length - sellLevels;
+      if (excess > 0) {
+        // Remove farthest sells (highest price) to stay within limits
+        levels.sort((a, b) => b.price - a.price);
+        levels.splice(0, excess);
+        levels.sort((a, b) => a.price - b.price);
+      }
+    }
+    if (existingSells.length === 0) {
+      for (let i = 1; i <= sellLevels; i++) {
+        const price = this.roundPriceForMarket(currentPrice + sellSpacing * i, precision.pricePrecision);
+        if (usedPrices.has(price)) continue;
+        usedPrices.add(price);
+        levels.push({ price, amount: 0, side: 'sell', filled: false });
+      }
     }
 
     levels.sort((a, b) => a.price - b.price);
@@ -413,6 +437,18 @@ export class GridStrategy {
           this.exchange.deductCachedBalance('USDT', orderCost);
           ordersPlaced++;
         } else if (level.side === 'sell' && level.price > currentPrice) {
+          // Guard: never sell below avg entry price + fees — raise to break-even
+          const pos = this.state.getPosition(symbol);
+          if (pos.avgEntryPrice > 0 && level.price < pos.avgEntryPrice * 1.003) {
+            const minPrice = this.roundPriceForMarket(pos.avgEntryPrice * 1.003, precision.pricePrecision);
+            if (minPrice <= currentPrice) {
+              // break-even ниже текущей цены — ордер не исполнится, skip
+              addSkip('below entry');
+              continue;
+            }
+            this.log.info(`Grid sell raised to break-even: ${level.price} → ${minPrice}`, { symbol });
+            level.price = minPrice;
+          }
           // Check if we have enough free crypto to place this sell
           if (freeCrypto < amount) {
             addSkip(`low ${base}`);
@@ -424,6 +460,7 @@ export class GridStrategy {
           );
           level.orderId = order.id;
           level.amount = amount;
+          level.placedAt = Date.now();
           // Subtract placed amount from tracked free balance (for subsequent sell levels)
           freeCrypto -= amount;
           this.exchange.deductCachedBalance(base, amount);
@@ -574,8 +611,18 @@ export class GridStrategy {
           const rawCounterPrice = filledSide === 'buy'
             ? filledPrice * (1 + counterSellPct / 100)
             : filledPrice * (1 - counterBuyPct / 100);
-          const counterPrice = this.roundPriceForMarket(rawCounterPrice, precision.pricePrecision);
+          let counterPrice = this.roundPriceForMarket(rawCounterPrice, precision.pricePrecision);
           const counterSide: 'buy' | 'sell' = filledSide === 'buy' ? 'sell' : 'buy';
+
+          // Guard: counter-sell must not be below avg entry price + fees
+          if (counterSide === 'sell') {
+            const pos = this.state.getPosition(symbol);
+            const minSellPrice = pos.avgEntryPrice * 1.003;
+            if (pos.avgEntryPrice > 0 && counterPrice < minSellPrice) {
+              counterPrice = this.roundPriceForMarket(minSellPrice, precision.pricePrecision);
+              this.log.info(`Counter-sell price raised to break-even: ${counterPrice}`, { symbol });
+            }
+          }
 
           // BUG #3 fix: use the SAME amount from the filled order, rounded to market precision
           let counterAmount = this.roundAmountForMarket(filledAmount, precision.amountPrecision);
@@ -659,6 +706,7 @@ export class GridStrategy {
             level.filled = false;
             level.side = counterSide;
             level.price = counterPrice;
+            level.placedAt = Date.now();
 
             decisions.push({
               strategy: 'grid',
@@ -765,7 +813,7 @@ export class GridStrategy {
               () => this.exchange.createLimitSell(symbol, sellAmount, sellPrice, 'grid'),
               `Grid orphan-sell ${symbol} @ ${sellPrice}`,
             );
-            levels.push({ price: sellPrice, amount: sellAmount, side: 'sell', orderId: order.id, filled: false });
+            levels.push({ price: sellPrice, amount: sellAmount, side: 'sell', orderId: order.id, filled: false, placedAt: Date.now() });
             this.exchange.deductCachedBalance(base, sellAmount);
             orphanPlaced++;
             this.log.info(`Grid orphan-sell placed for ${symbol}: ${sellAmount} @ ${sellPrice} (uncovered position)`);
@@ -793,6 +841,56 @@ export class GridStrategy {
       });
     }
 
+    // Trailing sell-down: move stale sells closer to break-even
+    if (this.config.sellTrailingDownHours > 0) {
+      const trailingLevels = this.state.getGridLevels(symbol);
+      let trailingChanged = false;
+      for (const level of trailingLevels) {
+        if (level.side !== 'sell' || !level.orderId || !level.placedAt || level.amount <= 0) continue;
+        const ageHours = (Date.now() - level.placedAt) / 3600000;
+        if (ageHours < this.config.sellTrailingDownHours) continue;
+
+        const pos = this.state.getPosition(symbol);
+        if (pos.avgEntryPrice <= 0) continue;
+        const breakEvenPrice = pos.avgEntryPrice * 1.003;
+
+        // Only trail if sell is above break-even AND above current price + 0.5%
+        if (level.price <= breakEvenPrice || level.price <= ticker.last * 1.005) continue;
+
+        const newPrice = this.roundPriceForMarket(
+          Math.max(breakEvenPrice, ticker.last * 1.005),
+          (await this.getPrecision(symbol)).pricePrecision,
+        );
+
+        // Only move if difference > 1% (avoid micro-adjustments)
+        if (newPrice >= level.price * 0.99) continue;
+
+        try {
+          // Check if order was filled before trying to cancel (race condition prevention)
+          const orderStatus = await this.exchange.fetchOrder(level.orderId, symbol);
+          if (orderStatus.filled > 0) {
+            this.log.info(`Trailing sell-down skipped: ${symbol} order already filled`, { symbol });
+            continue;
+          }
+          await this.exchange.cancelOrder(level.orderId, symbol);
+          const order = await this.exchange.withRetry(
+            () => this.exchange.createLimitSell(symbol, level.amount, newPrice, 'grid'),
+            `Grid trailing-sell-down ${symbol} @ ${newPrice}`,
+          );
+          this.log.info(`Trailing sell-down: ${symbol} ${level.price.toFixed(4)} → ${newPrice.toFixed(4)} (after ${ageHours.toFixed(0)}h)`, { symbol });
+          level.price = newPrice;
+          level.orderId = order.id;
+          level.placedAt = Date.now();
+          trailingChanged = true;
+        } catch (err) {
+          this.log.warn(`Trailing sell-down failed for ${symbol}: ${sanitizeError(err)}`);
+        }
+      }
+      if (trailingChanged) {
+        this.state.setGridLevels(symbol, trailingLevels);
+      }
+    }
+
     return decisions;
   }
 
@@ -804,6 +902,22 @@ export class GridStrategy {
     await this.exchange.cancelAllOrders(symbol);
     this.state.setGridLevels(symbol, []);
     this.state.setGridInitialized(symbol, false);
+  }
+
+  /** Cancel only buy-side orders, keep sell orders intact (for split rebalance down) */
+  private async cancelBuySide(symbol: string): Promise<void> {
+    const levels = this.state.getGridLevels(symbol);
+    for (const level of levels) {
+      if (level.side === 'buy' && level.orderId) {
+        try {
+          await this.exchange.cancelOrder(level.orderId, symbol);
+        } catch { /* already cancelled */ }
+      }
+    }
+    // Keep only sell levels (with and without orderId)
+    const sellLevels = levels.filter(l => l.side === 'sell');
+    this.state.setGridLevels(symbol, sellLevels);
+    this.log.info(`Split rebalance: kept ${sellLevels.length} sell levels, cancelled buy side`, { symbol });
   }
 }
 

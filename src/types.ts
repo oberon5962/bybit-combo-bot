@@ -84,6 +84,7 @@ export interface GridConfig {
   bollingerShiftLevels: number;     // сколько уровней перекинуть в пользу buy/sell (напр. 3)
 
   // Auto-adaptive spacing (на основе волатильности)
+  sellTrailingDownHours: number;            // через N часов sell сдвигается к break-even (0 = выключено)
   autoSpacingIntervalMin: number;          // как часто пересчитывать (минуты, напр. 360 = каждые 6ч)
   autoSpacingSafetyMarginPercent: number; // коэффициент недоверия — вычитать N% из расчётных значений
   autoSpacingPriority: 'off' | 'config' | 'auto'; // "off" = выключено, "config" = считать но не применять, "auto" = применять
