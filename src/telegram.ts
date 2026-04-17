@@ -389,7 +389,7 @@ export class TelegramNotifier {
 
   registerCommands(): void {
     const commands = [
-      { command: 'start', description: 'Приветствие и список команд' },
+      { command: 'start', description: 'Cписок команд' },
       { command: 'status', description: 'Сводка: капитал, PnL, позиции' },
       { command: 'stats', description: 'Статистика торговли по парам' },
       { command: 'orders', description: 'Открытые ордера' },
@@ -398,11 +398,11 @@ export class TelegramNotifier {
       { command: 'regrid', description: 'Перестройка торговой сетки со сбросом ордеров' },
       { command: 'freezebuy', description: 'Заморозить покупки по валюте: /freezebuy XRP' },
       { command: 'unfreezebuy', description: 'Разморозить покупки: /unfreezebuy XRP' },
-      { command: 'sellgrid', description: 'Ladder-распродажа: sell fill → новый sell выше' },
-      { command: 'unsellgrid', description: 'Отключить sellgrid + разморозить buy' },
+      { command: 'sellgrid', description: 'Распродать валюту + freezebuy: /sellgrid XRP' },
+      { command: 'unsellgrid', description: 'Перестать распродавать валюту + unfreezebuy: /unsellgrid XRP' },
       { command: 'cancelorders', description: 'Отменить все ордера + остановить бота' },
-      { command: 'buy', description: 'Купить кол-во валюты (за USDT): /buy SUI 10 или /buy SUI USDT 10' },
-      { command: 'sellall', description: 'Продать всё + /cancelorders' }
+      { command: 'buy', description: 'Купить кол-во валюты за USDT: /buy SUI USDT 10' },
+      { command: 'sellall', description: 'Продать всё + cancelorders' }
     ];
 
     const payload = JSON.stringify({ commands });
