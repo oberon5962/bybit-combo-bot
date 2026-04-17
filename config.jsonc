@@ -18,10 +18,10 @@
   // Risk Management — управление рисками
   // ============================================================
   "risk": {
-    "maxDrawdownPercent": 15,           // HALT если портфель упал на 15% от пика
-    "stopLossPercent": 10,              // Стоп-лосс на позицию (% от entry)
-    "takeProfitPercent": 12,            // Тейк-профит на позицию (% от entry)
-    "portfolioTakeProfitPercent": 100,  // Продать ВСЁ когда портфель +100% от старта
+    "maxDrawdownPercent": 12,           // HALT если портфель упал (-% от пика)
+    "stopLossPercent": 8,              // Стоп-лосс на позицию (-% от entry)
+    "takeProfitPercent": 100,            // Тейк-профит на позицию (+% от entry)
+    "portfolioTakeProfitPercent": 100,  // Продать ВСЁ когда портфель (+% от старта)
     "cooldownAfterSLSec": 1800,         // Пауза после SL (1800 = 30 мин, 0 = halt навсегда)
     "cooldownMaxSL": 3,                 // Макс SL подряд до полного halt
     "trailingSLPercent": 5,             // Trailing SL: продаём если цена упала на 5% от пика
@@ -44,7 +44,7 @@
     "bollingerBuyMultiplier": 1.5,      // orderSize * 1.5 при покупке у нижней полосы BB или все, что есть
     "bollingerSellMultiplier": 1.5,     // orderSize * 1.5 при продаже у верхней полосы BB или все, что есть
     "bollingerShiftLevels": 2,          // Перекинуть 2 уровня в пользу buy/sell по BB
-    "sellTrailingDownHours": 12,        // Через N часов sell без исполнения сдвигается к break-even (0 = выкл)
+    "counterSellTrailStepHours": 4,     // Шаг midpoint-halving для counter-sell при split rebalance DOWN (часы, 0 = выкл). Старый ордер двоичным поиском приближается к virtualNewSellPrice, защита oldBreakEven только на первом шаге
 
     // Защита от продажи в убыток (используется в Counter-Sell Guard и Grid Sell Guard).
     // Если рассчитанная цена sell (по spacing) ниже безубыточной (avgEntry * (1 + minSellProfitPercent/100)) —

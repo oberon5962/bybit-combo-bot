@@ -78,7 +78,7 @@ export function loadConfig(): BotConfig {
       bollingerBuyMultiplier: json.grid?.bollingerBuyMultiplier ?? defaultNum,
       bollingerSellMultiplier: json.grid?.bollingerSellMultiplier ?? defaultNum,
       bollingerShiftLevels: json.grid?.bollingerShiftLevels ?? defaultNum,
-      sellTrailingDownHours: json.grid?.sellTrailingDownHours ?? defaultNum,
+      counterSellTrailStepHours: json.grid?.counterSellTrailStepHours ?? defaultNum,
       minSellProfitPercent: json.grid?.minSellProfitPercent ?? defaultNum,
       maxSellLossPercent: json.grid?.maxSellLossPercent ?? defaultNum,
       orphanSellMaxPerTick: json.grid?.orphanSellMaxPerTick ?? defaultNum,
@@ -209,6 +209,7 @@ function validateConfig(config: BotConfig): void {
     if (config.grid.minSellProfitPercent <= 0 || config.grid.minSellProfitPercent > 5) errors.push('grid.minSellProfitPercent must be between 0 and 5 (typical 0.3)');
     if (config.grid.maxSellLossPercent <= 0 || config.grid.maxSellLossPercent > 10) errors.push('grid.maxSellLossPercent must be between 0 and 10 (typical 1)');
     if (config.grid.orphanSellMaxPerTick < 1 || config.grid.orphanSellMaxPerTick > 20) errors.push('grid.orphanSellMaxPerTick must be between 1 and 20 (typical 5)');
+    if (config.grid.counterSellTrailStepHours < 0 || config.grid.counterSellTrailStepHours > 72) errors.push('grid.counterSellTrailStepHours must be between 0 and 72 (typical 4)');
     if (config.grid.rsiOverboughtThreshold < 50 || config.grid.rsiOverboughtThreshold > 100) {
       errors.push('grid.rsiOverboughtThreshold must be between 50 and 100');
     }

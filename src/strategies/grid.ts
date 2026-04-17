@@ -253,6 +253,8 @@ export class GridStrategy {
           if (driftDown) {
             // Split rebalance: keep sell orders, rebuild only buy side
             await this.cancelBuySide(symbol);
+            // Counter-sell midpoint-halving: step 1-2 of спецификации
+            await this.initCounterSellTrailing(symbol, currentPrice);
           } else {
             // Full rebalance: cancel all and reinitialize
             await this.cancelAll(symbol);
@@ -713,6 +715,10 @@ export class GridStrategy {
                 level.side = this.state.isSellGridActive(baseForSkip) ? 'sell' : 'buy';
                 level.orderId = undefined;
                 level.filled = false;
+                level.oldBreakEven = undefined;
+                level.originalPlannedSellPrice = undefined;
+                level.virtualNewSellPrice = undefined;
+                level.nextStepAt = undefined;
                 levelsChanged = true;
                 continue;
               }
@@ -802,6 +808,21 @@ export class GridStrategy {
             level.side = counterSide;
             level.price = counterPrice;
             level.placedAt = Date.now();
+            // Counter-sell trailing metadata: fixed at creation, used by split rebalance DOWN
+            if (counterSide === 'sell') {
+              const posForMeta = this.state.getPosition(symbol);
+              level.oldBreakEven = posForMeta.avgEntryPrice > 0
+                ? posForMeta.avgEntryPrice * (1 + this.config.minSellProfitPercent / 100)
+                : counterPrice;
+              level.originalPlannedSellPrice = counterPrice;
+              level.virtualNewSellPrice = undefined;
+              level.nextStepAt = undefined;
+            } else {
+              level.oldBreakEven = undefined;
+              level.originalPlannedSellPrice = undefined;
+              level.virtualNewSellPrice = undefined;
+              level.nextStepAt = undefined;
+            }
 
             decisions.push({
               strategy: 'grid',
@@ -827,6 +848,11 @@ export class GridStrategy {
               side: filledSide,
               orderId: undefined,
               filled: false,
+              // Наследуем counter-sell metadata для продолжения trailing
+              oldBreakEven: filledSide === 'sell' ? level.oldBreakEven : undefined,
+              originalPlannedSellPrice: filledSide === 'sell' ? level.originalPlannedSellPrice : undefined,
+              virtualNewSellPrice: filledSide === 'sell' ? level.virtualNewSellPrice : undefined,
+              nextStepAt: filledSide === 'sell' ? level.nextStepAt : undefined,
             };
             levels.push(remainingLevel);
             this.log.info(`Grid partial fill: added retry level for remaining ${orderInfo.remaining} ${filledSide} @ ${filledPrice}`, { symbol });
@@ -936,49 +962,62 @@ export class GridStrategy {
       });
     }
 
-    // Trailing sell-down: move stale sells closer to break-even
-    if (this.config.sellTrailingDownHours > 0) {
+    // Counter-sell midpoint-halving trailing (после split rebalance DOWN).
+    // Шаг 4 из спецификации: каждый nextStepAt-таймер делим пополам расстояние до virtualNewSellPrice.
+    // Защита oldBreakEven только на первом шаге (уже применена при ребалансе в step 2).
+    if (this.config.counterSellTrailStepHours > 0) {
       const trailingLevels = this.state.getGridLevels(symbol);
       let trailingChanged = false;
+      const stepMs = this.config.counterSellTrailStepHours * 3600000;
       for (const level of trailingLevels) {
-        if (level.side !== 'sell' || !level.orderId || !level.placedAt || level.amount <= 0) continue;
-        const ageHours = (Date.now() - level.placedAt) / 3600000;
-        if (ageHours < this.config.sellTrailingDownHours) continue;
+        if (level.side !== 'sell' || !level.orderId || level.amount <= 0) continue;
+        if (!level.nextStepAt || !level.virtualNewSellPrice || level.virtualNewSellPrice <= 0) continue;
+        if (Date.now() < level.nextStepAt) continue;
 
-        const pos = this.state.getPosition(symbol);
-        if (pos.avgEntryPrice <= 0) continue;
-        const breakEvenPrice = pos.avgEntryPrice * (1 + this.config.minSellProfitPercent / 100);
-
-        // Only trail if sell is above break-even AND above current price + 0.5%
-        if (level.price <= breakEvenPrice || level.price <= ticker.last * 1.005) continue;
-
-        const newPrice = this.roundPriceForMarket(
-          Math.max(breakEvenPrice, ticker.last * 1.005),
-          (await this.getPrecision(symbol)).pricePrecision,
-        );
-
-        // Only move if difference > 1% (avoid micro-adjustments)
-        if (newPrice >= level.price * 0.99) continue;
+        const v = level.virtualNewSellPrice;
+        const diff = Math.abs(level.price - v) / v;
+        let newPrice: number;
+        let finish = false;
+        if (diff <= 0.05) {
+          newPrice = v;
+          finish = true;
+        } else {
+          const precision = await this.getPrecision(symbol);
+          const midpoint = (level.price + v) / 2;
+          newPrice = this.roundPriceForMarket(midpoint, precision.pricePrecision);
+        }
+        if (newPrice >= level.price) {
+          // Защита от случая v >= текущей цены (не должно быть при DOWN, но на всякий)
+          level.nextStepAt = undefined;
+          level.virtualNewSellPrice = undefined;
+          trailingChanged = true;
+          continue;
+        }
 
         try {
-          // Check if order was filled before trying to cancel (race condition prevention)
           const orderStatus = await this.exchange.fetchOrder(level.orderId, symbol);
           if (orderStatus.filled > 0) {
-            this.log.info(`Trailing sell-down skipped: ${symbol} order already filled`, { symbol });
+            this.log.info(`Counter-sell trail skipped: ${symbol} order already filled`, { symbol });
             continue;
           }
           await this.exchange.cancelOrder(level.orderId, symbol);
           const order = await this.exchange.withRetry(
             () => this.exchange.createLimitSell(symbol, level.amount, newPrice, 'grid'),
-            `Grid trailing-sell-down ${symbol} @ ${newPrice}`,
+            `Counter-sell trail ${symbol} @ ${newPrice}`,
           );
-          this.log.info(`Trailing sell-down: ${symbol} ${level.price.toFixed(4)} → ${newPrice.toFixed(4)} (after ${ageHours.toFixed(0)}h)`, { symbol });
+          this.log.info(`Counter-sell trail: ${symbol} ${level.price.toFixed(6)} → ${newPrice.toFixed(6)} (target=${v.toFixed(6)}${finish ? ', finished' : ''})`, { symbol });
           level.price = newPrice;
           level.orderId = order.id;
           level.placedAt = Date.now();
+          if (finish) {
+            level.nextStepAt = undefined;
+            level.virtualNewSellPrice = undefined;
+          } else {
+            level.nextStepAt = Date.now() + stepMs;
+          }
           trailingChanged = true;
         } catch (err) {
-          this.log.warn(`Trailing sell-down failed for ${symbol}: ${sanitizeError(err)}`);
+          this.log.warn(`Counter-sell trail failed for ${symbol}: ${sanitizeError(err)}`);
         }
       }
       if (trailingChanged) {
@@ -1013,6 +1052,104 @@ export class GridStrategy {
     const sellLevels = levels.filter(l => l.side === 'sell');
     this.state.setGridLevels(symbol, sellLevels);
     this.log.info(`Split rebalance: kept ${sellLevels.length} sell levels, cancelled buy side`, { symbol });
+  }
+
+  /**
+   * Midpoint-halving trailing после split rebalance DOWN.
+   * Для каждого counter-sell (с oldBreakEven/originalPlannedSellPrice) фиксируем новую целевую цену
+   * virtualNewSellPrice = currentPrice × (1 + sellSpacing/100) и выполняем шаг 2 спецификации.
+   */
+  private async initCounterSellTrailing(symbol: string, currentPrice: number): Promise<void> {
+    if (this.config.counterSellTrailStepHours <= 0) return;
+    const levels = this.state.getGridLevels(symbol);
+    const { sellSpacingPct } = this.getSpacing(symbol);
+    const precision = await this.getPrecision(symbol);
+    const virtualNewSellPrice = this.roundPriceForMarket(
+      currentPrice * (1 + sellSpacingPct / 100),
+      precision.pricePrecision,
+    );
+    const stepMs = this.config.counterSellTrailStepHours * 3600000;
+    let changed = false;
+
+    for (const level of levels) {
+      if (level.side !== 'sell' || level.amount <= 0) continue;
+      if (!level.originalPlannedSellPrice || !level.oldBreakEven) continue;
+      // Только ордера выше virtualNewSellPrice имеет смысл спускать
+      if (level.price <= virtualNewSellPrice) continue;
+
+      level.virtualNewSellPrice = virtualNewSellPrice;
+
+      if (virtualNewSellPrice < level.oldBreakEven) {
+        // Шаг 2: новая цена = max(oldBreakEven, midpoint(originalPlanned, virtualNew))
+        const midpoint = (level.originalPlannedSellPrice + virtualNewSellPrice) / 2;
+        const newPrice = this.roundPriceForMarket(
+          Math.max(level.oldBreakEven, midpoint),
+          precision.pricePrecision,
+        );
+        if (newPrice >= level.price) {
+          // ордер уже стоит ниже/равно — ничего не делаем, но запускаем таймер для дальнейших шагов
+          level.nextStepAt = Date.now() + stepMs;
+          changed = true;
+          continue;
+        }
+        if (level.orderId) {
+          try {
+            const orderStatus = await this.exchange.fetchOrder(level.orderId, symbol);
+            if (orderStatus.filled > 0) {
+              this.log.info(`Counter-sell trail init skipped: ${symbol} filled`, { symbol });
+              continue;
+            }
+            await this.exchange.cancelOrder(level.orderId, symbol);
+            const order = await this.exchange.withRetry(
+              () => this.exchange.createLimitSell(symbol, level.amount, newPrice, 'grid'),
+              `Counter-sell trail init ${symbol} @ ${newPrice}`,
+            );
+            this.log.info(`Counter-sell trail init (step 2): ${symbol} ${level.price.toFixed(6)} → ${newPrice.toFixed(6)} (oldBE=${level.oldBreakEven.toFixed(6)}, target=${virtualNewSellPrice.toFixed(6)})`, { symbol });
+            level.price = newPrice;
+            level.orderId = order.id;
+            level.placedAt = Date.now();
+            level.nextStepAt = Date.now() + stepMs;
+            changed = true;
+          } catch (err) {
+            this.log.warn(`Counter-sell trail init failed for ${symbol}: ${sanitizeError(err)}`);
+          }
+        } else {
+          // Нет orderId — обновляем target, placeGridOrders поставит на новой цене
+          level.price = newPrice;
+          level.nextStepAt = Date.now() + stepMs;
+          changed = true;
+        }
+      } else {
+        // Шаг 3: virtualNewSellPrice >= oldBreakEven → сразу ставим на virtualNewSellPrice, halving не нужен
+        if (level.orderId) {
+          try {
+            const orderStatus = await this.exchange.fetchOrder(level.orderId, symbol);
+            if (orderStatus.filled > 0) continue;
+            await this.exchange.cancelOrder(level.orderId, symbol);
+            const order = await this.exchange.withRetry(
+              () => this.exchange.createLimitSell(symbol, level.amount, virtualNewSellPrice, 'grid'),
+              `Counter-sell trail step3 ${symbol} @ ${virtualNewSellPrice}`,
+            );
+            this.log.info(`Counter-sell trail (step 3): ${symbol} ${level.price.toFixed(6)} → ${virtualNewSellPrice.toFixed(6)} (above oldBE, direct)`, { symbol });
+            level.price = virtualNewSellPrice;
+            level.orderId = order.id;
+            level.placedAt = Date.now();
+            level.nextStepAt = undefined;
+            level.virtualNewSellPrice = undefined;
+            changed = true;
+          } catch (err) {
+            this.log.warn(`Counter-sell trail step3 failed for ${symbol}: ${sanitizeError(err)}`);
+          }
+        } else {
+          level.price = virtualNewSellPrice;
+          level.nextStepAt = undefined;
+          level.virtualNewSellPrice = undefined;
+          changed = true;
+        }
+      }
+    }
+
+    if (changed) this.state.setGridLevels(symbol, levels);
   }
 }
 

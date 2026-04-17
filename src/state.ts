@@ -23,7 +23,12 @@ export interface GridLevelState {
   side: 'buy' | 'sell';
   orderId?: string;
   filled: boolean;
-  placedAt?: number;     // timestamp когда ордер выставлен (для trailing sell-down)
+  placedAt?: number;     // timestamp когда ордер выставлен
+  // Counter-sell trailing (rebalance DOWN):
+  oldBreakEven?: number;              // нижняя граница trailing (только для шага 2)
+  originalPlannedSellPrice?: number;  // стартовая цена sell при создании counter-sell
+  virtualNewSellPrice?: number;       // целевая цена spacing после ребаланса (шаг 1)
+  nextStepAt?: number;                // timestamp следующего шага midpoint (шаг 4)
 }
 
 export interface PairState {
