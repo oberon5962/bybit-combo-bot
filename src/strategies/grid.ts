@@ -1018,6 +1018,15 @@ export class GridStrategy {
           trailingChanged = true;
         } catch (err) {
           this.log.warn(`Counter-sell trail failed for ${symbol}: ${sanitizeError(err)}`);
+          level.orderId = undefined;
+          level.price = newPrice;
+          if (finish) {
+            level.nextStepAt = undefined;
+            level.virtualNewSellPrice = undefined;
+          } else {
+            level.nextStepAt = Date.now() + stepMs;
+          }
+          trailingChanged = true;
         }
       }
       if (trailingChanged) {
@@ -1112,6 +1121,11 @@ export class GridStrategy {
             changed = true;
           } catch (err) {
             this.log.warn(`Counter-sell trail init failed for ${symbol}: ${sanitizeError(err)}`);
+            // Сбрасываем orderId чтобы следующий тик не обратился к отменённому ордеру
+            level.orderId = undefined;
+            level.price = newPrice;
+            level.nextStepAt = Date.now() + stepMs;
+            changed = true;
           }
         } else {
           // Нет orderId — обновляем target, placeGridOrders поставит на новой цене
@@ -1139,6 +1153,11 @@ export class GridStrategy {
             changed = true;
           } catch (err) {
             this.log.warn(`Counter-sell trail step3 failed for ${symbol}: ${sanitizeError(err)}`);
+            level.orderId = undefined;
+            level.price = virtualNewSellPrice;
+            level.nextStepAt = undefined;
+            level.virtualNewSellPrice = undefined;
+            changed = true;
           }
         } else {
           level.price = virtualNewSellPrice;
