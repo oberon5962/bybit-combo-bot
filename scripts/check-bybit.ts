@@ -1,7 +1,7 @@
 // Quick check of Bybit state: open orders, balances, recent trades
-import { loadConfig } from './src/config';
-import { BybitExchange } from './src/exchange';
-import { createLogger } from './src/logger';
+import { loadConfig } from '../src/config';
+import { BybitExchange } from '../src/exchange';
+import { createLogger } from '../src/logger';
 
 async function main() {
   const log = createLogger('info');

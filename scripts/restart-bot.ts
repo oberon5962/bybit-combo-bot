@@ -1,4 +1,4 @@
-// Запуск: npx ts-node restart-bot.ts
+// Запуск: npx ts-node scripts/restart-bot.ts
 // Убивает все node-процессы бота (кроме себя), затем запускает бота заново.
 //
 // Поиск работающего бота:
@@ -15,7 +15,7 @@
 import { execSync, spawn } from 'child_process';
 import path from 'path';
 
-const BOT_DIR = path.resolve(__dirname);
+const BOT_DIR = path.resolve(__dirname, '..');
 const selfPid = process.pid;
 const parentPid = process.ppid; // ts-node parent
 

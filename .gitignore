@@ -6,3 +6,5 @@ bot.log
 errors.log
 bot-state.json
 bot-state.json.tmp
+CLAUDE.md
+task.md

@@ -4,9 +4,9 @@
 //
 // Запуск (из директории bybit-combo-bot):
 //   1. Остановить бота:  taskkill //F //IM node.exe
-//   2. Сбросить сетку:   npx ts-node reset-grid.ts
+//   2. Сбросить сетку:   npx ts-node scripts/reset-grid.ts
 //   3. Запустить бота:   npx ts-node src/index.ts
-//   Или одной командой:  taskkill //F //IM node.exe && npx ts-node reset-grid.ts && npx ts-node src/index.ts
+//   Или одной командой:  taskkill //F //IM node.exe && npx ts-node scripts/reset-grid.ts && npx ts-node src/index.ts
 //
 // Что делает:
 //   1. Подключается к Bybit API (ключи из .env)
@@ -40,7 +40,7 @@ import ccxt from 'ccxt';
 import dotenv from 'dotenv';
 dotenv.config();
 
-const STATE_PATH = path.resolve(__dirname, 'bot-state.json');
+const STATE_PATH = path.resolve(__dirname, '..', 'bot-state.json');
 
 async function main() {
   // 1. Cancel all orders on Bybit
@@ -82,7 +82,7 @@ async function main() {
   fs.writeFileSync(STATE_PATH, JSON.stringify(state, null, 2), 'utf-8');
 
   // Remove lock file so bot can start
-  const lockFile = path.resolve(__dirname, 'bot.lock');
+  const lockFile = path.resolve(__dirname, '..', 'bot.lock');
   try { fs.unlinkSync(lockFile); console.log('Removed bot.lock'); } catch { /* no lock */ }
 
   console.log(`\nGrid reset for ${symbols.length} pairs. State saved.`);
