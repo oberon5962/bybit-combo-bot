@@ -476,8 +476,10 @@ export class GridStrategy {
             const lossThreshold = pos.avgEntryPrice * lossMult;
             if (midpoint > lossThreshold) {
               const midPrice = this.roundPriceForMarket(midpoint, precision.pricePrecision);
-              this.log.info(`Grid sell midpoint: ${level.price} → ${midPrice} (break-even=${minSellPrice.toFixed(6)}, avgEntry=${pos.avgEntryPrice.toFixed(6)})`, { symbol });
-              level.price = midPrice;
+              if (midPrice !== level.price) {
+                this.log.info(`Grid sell midpoint: ${level.price} → ${midPrice} (break-even=${minSellPrice.toFixed(6)}, avgEntry=${pos.avgEntryPrice.toFixed(6)})`, { symbol });
+                level.price = midPrice;
+              }
             } else {
               // Midpoint would cause > maxSellLossPercent% loss — skip placement
               addSkip(`midpoint >${this.config.maxSellLossPercent}% loss`);
