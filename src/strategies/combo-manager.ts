@@ -282,6 +282,7 @@ export class ComboManager {
         if (hash !== this.lastConfigHash) {
           this.lastConfigHash = hash;
           const newConfig = loadConfig();
+          const prevPairs = this.config.pairs; // сохраняем ДО перезаписи this.config
           this.config = newConfig;
           this.grid.updateConfig(newConfig);
           this.dca.updateConfig(newConfig);
@@ -290,7 +291,7 @@ export class ComboManager {
 
           // Hot-reload: обработка per-pair state изменений
           for (const newPair of newConfig.pairs) {
-            const oldPair = this.config.pairs.find(p => p.symbol === newPair.symbol);
+            const oldPair = prevPairs.find(p => p.symbol === newPair.symbol);
             const oldState = oldPair?.state ?? 'unfreeze';
             const newState = newPair.state ?? 'unfreeze';
             if (oldState !== newState) {
@@ -1908,32 +1909,41 @@ export class ComboManager {
   // writeConfig=false при вызове из hot-reload (конфиг уже обновлён), true при вызове из Telegram.
   private async applyPairState(base: string, newState: string, writeConfig: boolean): Promise<void> {
     const configPath = resolve(__dirname, '../../config.jsonc');
-    const pair = this.config.pairs.find(p => p.symbol.split('/')[0] === base);
-    const symbol = pair?.symbol ?? `${base}/USDT`;
+    const mainPair = this.config.pairs.find(p => p.symbol.split('/')[0] === base);
+    const mainSymbol = mainPair?.symbol ?? `${base}/USDT`;
+
+    // Все символы с данной базой (включая manual pairs) — как в cmdFreezeBuy
+    const affectedSymbols = this.config.pairs
+      .map(p => p.symbol)
+      .concat(this.state.getManualPairs())
+      .filter((s, i, arr) => arr.indexOf(s) === i)
+      .filter(sym => sym.split('/')[0] === base);
 
     if (newState === 'freeze') {
-      // Снять все ордера (buy + sell), выставить frozen
+      // Снять все ордера (buy + sell) по всем affected символам, выставить frozen
       this.state.addFrozenPair(base);
       this.state.addBlockedBuyBase(base);
       let cancelled = 0;
-      try {
-        const openOrders = await this.exchange.fetchOpenOrders(symbol);
-        for (const o of openOrders) {
-          try { await this.exchange.cancelOrder(o.id, symbol); cancelled++; }
-          catch (err) { this.log.warn(`/freeze: cancel ${o.id} failed: ${sanitizeError(err)}`); }
+      for (const sym of affectedSymbols) {
+        try {
+          const openOrders = await this.exchange.fetchOpenOrders(sym);
+          for (const o of openOrders) {
+            try { await this.exchange.cancelOrder(o.id, sym); cancelled++; }
+            catch (err) { this.log.warn(`/freeze: cancel ${o.id} ${sym} failed: ${sanitizeError(err)}`); }
+          }
+          const levels = this.state.getGridLevels(sym);
+          let mutated = false;
+          for (const l of levels) {
+            if (l.orderId) { l.orderId = undefined; l.placedAt = undefined; mutated = true; }
+          }
+          if (mutated) this.state.setGridLevels(sym, levels);
+        } catch (err) {
+          this.log.warn(`/freeze: fetchOpenOrders ${sym} failed: ${sanitizeError(err)}`);
         }
-        const levels = this.state.getGridLevels(symbol);
-        let mutated = false;
-        for (const l of levels) {
-          if (l.orderId) { l.orderId = undefined; l.placedAt = undefined; mutated = true; }
-        }
-        if (mutated) this.state.setGridLevels(symbol, levels);
-      } catch (err) {
-        this.log.warn(`/freeze: fetchOpenOrders ${symbol} failed: ${sanitizeError(err)}`);
       }
-      this.log.info(`/freeze ${base}: full freeze applied, cancelled ${cancelled} orders`);
+      this.log.info(`/freeze ${base}: full freeze applied, cancelled ${cancelled} orders across ${affectedSymbols.length} pair(s)`);
       if (writeConfig) {
-        try { updatePairStateInConfig(configPath, symbol, 'freeze'); } catch (e) { this.log.warn(`config-writer freeze: ${sanitizeError(e)}`); }
+        try { updatePairStateInConfig(configPath, mainSymbol, 'freeze'); } catch (e) { this.log.warn(`config-writer freeze: ${sanitizeError(e)}`); }
         this.lastConfigHash = createHash('md5').update(readFileSync(configPath, 'utf-8')).digest('hex');
         this.tg.sendReply(`🔒 ${base} полностью заморожен. Все ордера отменены (${cancelled}). Только SL/TP работают.`);
       }
@@ -1941,28 +1951,31 @@ export class ComboManager {
       this.state.removeFrozenPair(base);
       await this.cmdFreezeBuyInternal(base);
       if (writeConfig) {
-        try { updatePairStateInConfig(configPath, symbol, 'freezebuy'); } catch (e) { this.log.warn(`config-writer freezebuy: ${sanitizeError(e)}`); }
+        try { updatePairStateInConfig(configPath, mainSymbol, 'freezebuy'); } catch (e) { this.log.warn(`config-writer freezebuy: ${sanitizeError(e)}`); }
         this.lastConfigHash = createHash('md5').update(readFileSync(configPath, 'utf-8')).digest('hex');
       }
     } else if (newState === 'sellgrid') {
       this.state.removeFrozenPair(base);
       await this.cmdSellGridInternal(base);
       if (writeConfig) {
-        try { updatePairStateInConfig(configPath, symbol, 'sellgrid'); } catch (e) { this.log.warn(`config-writer sellgrid: ${sanitizeError(e)}`); }
+        try { updatePairStateInConfig(configPath, mainSymbol, 'sellgrid'); } catch (e) { this.log.warn(`config-writer sellgrid: ${sanitizeError(e)}`); }
         this.lastConfigHash = createHash('md5').update(readFileSync(configPath, 'utf-8')).digest('hex');
       }
     } else {
-      // unfreeze: снять всё
+      // unfreeze: снять всё, force-rebalance для всех affected символов
       this.state.removeFrozenPair(base);
       this.state.removeBlockedBuyBase(base);
       this.state.removeSellGridBase(base);
-      // Force rebalance для пересборки сетки
-      if (pair && this.state.isGridInitialized(symbol)) {
-        this.state.setGridCenterPrice(symbol, 0);
+      let forced = 0;
+      for (const sym of affectedSymbols) {
+        if (this.state.isGridInitialized(sym)) {
+          this.state.setGridCenterPrice(sym, 0);
+          forced++;
+        }
       }
-      this.log.info(`/unfreeze ${base}: all freezes removed, grid will rebalance`);
+      this.log.info(`/unfreeze ${base}: all freezes removed, force-rebalance for ${forced} pair(s)`);
       if (writeConfig) {
-        try { updatePairStateInConfig(configPath, symbol, 'unfreeze'); } catch (e) { this.log.warn(`config-writer unfreeze: ${sanitizeError(e)}`); }
+        try { updatePairStateInConfig(configPath, mainSymbol, 'unfreeze'); } catch (e) { this.log.warn(`config-writer unfreeze: ${sanitizeError(e)}`); }
         this.lastConfigHash = createHash('md5').update(readFileSync(configPath, 'utf-8')).digest('hex');
         this.tg.sendReply(`✅ ${base} разморожен полностью. Сетка пересоберётся в ближайшем тике.`);
       }
