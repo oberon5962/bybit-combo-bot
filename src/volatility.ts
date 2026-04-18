@@ -65,6 +65,15 @@ export type CandleFetcher = (
 
 // ── Helpers ────────────────────────────────────────────────
 
+/** 3σ rule: remove values beyond μ + sigmaMultiplier * σ (upper tail only, ranges are always > 0) */
+export function trimOutliers(values: number[], sigmaMultiplier = 3): number[] {
+  if (values.length < 4) return values;
+  const mean = values.reduce((s, v) => s + v, 0) / values.length;
+  const stddev = Math.sqrt(values.reduce((s, v) => s + (v - mean) ** 2, 0) / values.length);
+  const upper = mean + sigmaMultiplier * stddev;
+  return values.filter(v => v <= upper);
+}
+
 export function percentile(sorted: number[], p: number): number {
   const idx = (p / 100) * (sorted.length - 1);
   const lo = Math.floor(idx);
@@ -126,16 +135,16 @@ export async function analyzeSymbol(
   }
   const atrPct = (atrSum / (allCandles.length - 1)) / currentPrice * 100;
 
-  // Range percentiles (high-low)/close
-  const ranges: number[] = allCandles.map(c => (c[2] - c[3]) / c[4] * 100);
-  ranges.sort((a, b) => a - b);
+  // Range percentiles (high-low)/close — trimmed by 3σ rule
+  const rangesRaw: number[] = allCandles.map(c => (c[2] - c[3]) / c[4] * 100);
+  const ranges = trimOutliers(rangesRaw).sort((a, b) => a - b);
 
-  // Close-to-close absolute moves
-  const moves: number[] = [];
+  // Close-to-close absolute moves — trimmed by 3σ rule
+  const movesRaw: number[] = [];
   for (let i = 1; i < closes.length; i++) {
-    moves.push(Math.abs(closes[i] - closes[i - 1]) / closes[i - 1] * 100);
+    movesRaw.push(Math.abs(closes[i] - closes[i - 1]) / closes[i - 1] * 100);
   }
-  moves.sort((a, b) => a - b);
+  const moves = trimOutliers(movesRaw).sort((a, b) => a - b);
 
   // StdDev of returns
   const returns: number[] = [];
