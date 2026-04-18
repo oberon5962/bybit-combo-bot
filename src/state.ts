@@ -94,6 +94,9 @@ export interface BotState {
   // Base currencies with full freeze: no buy/sell orders placed, only SL/TP allowed
   frozenPairs: string[];
 
+  // Symbols (full, e.g. "DOT/USDT") marked as deleted — no trading, hidden from summary/stats/status
+  deletedPairs: string[];
+
   // Telegram lastUpdateId — persisted to avoid replaying commands on restart
   telegramUpdateId: number;
 }
@@ -126,6 +129,7 @@ function createEmptyState(): BotState {
     blockedBuyBases: [],
     sellGridBases: [],
     frozenPairs: [],
+    deletedPairs: [],
     telegramUpdateId: 0,
   };
 }
@@ -202,6 +206,7 @@ export class StateManager {
         state.blockedBuyBases = Array.isArray(parsed.blockedBuyBases) ? parsed.blockedBuyBases.map((s: string) => String(s).toUpperCase()) : [];
         state.sellGridBases = Array.isArray(parsed.sellGridBases) ? parsed.sellGridBases.map((s: string) => String(s).toUpperCase()) : [];
         state.frozenPairs = Array.isArray(parsed.frozenPairs) ? parsed.frozenPairs.map((s: string) => String(s).toUpperCase()) : [];
+        state.deletedPairs = Array.isArray(parsed.deletedPairs) ? parsed.deletedPairs.map((s: string) => String(s)) : [];
         state.telegramUpdateId = typeof parsed.telegramUpdateId === 'number' ? parsed.telegramUpdateId : 0;
 
         // Restore per-pair state with validation
@@ -610,6 +615,21 @@ export class StateManager {
     if (this.state.frozenPairs.length === before) return false;
     this.saveCritical();
     return true;
+  }
+
+  // Deleted pairs (full symbol, e.g. "DOT/USDT")
+  getDeletedPairs(): string[] { return this.state.deletedPairs ?? []; }
+  isPairDeleted(symbol: string): boolean { return (this.state.deletedPairs ?? []).includes(symbol); }
+  markPairDeleted(symbol: string): void {
+    if (!this.state.deletedPairs) this.state.deletedPairs = [];
+    if (!this.state.deletedPairs.includes(symbol)) {
+      this.state.deletedPairs.push(symbol);
+      this.saveCritical();
+    }
+  }
+  unmarkPairDeleted(symbol: string): void {
+    this.state.deletedPairs = (this.state.deletedPairs ?? []).filter(s => s !== symbol);
+    this.saveCritical();
   }
 
   // Telegram update offset (persisted to avoid replaying commands on restart)

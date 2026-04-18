@@ -155,6 +155,7 @@ export async function analyzeSymbol(
   periodHours: number,
   periodName: string,
   feeRoundTripPct: number = FEE_ROUND_TRIP_PCT,
+  sigmaMultiplier: number = 3,
 ): Promise<CandleStats | null> {
   const since = Date.now() - periodHours * 60 * 60 * 1000;
 
@@ -202,7 +203,7 @@ export async function analyzeSymbol(
   // чуть шире типичного размаха, иначе ордера срабатывают на внутрисвечном шуме.
   // Фильтруем 3σ выбросы (flash-crash свечи), затем сортируем для перцентилей.
   const rangesRaw: number[] = allCandles.map(c => (c[2] - c[3]) / c[4] * 100);
-  const ranges = trimOutliers(rangesRaw).sort((a, b) => a - b);
+  const ranges = trimOutliers(rangesRaw, sigmaMultiplier).sort((a, b) => a - b);
 
   // moves[] = |close[i]−close[i-1]|/close[i-1] × 100% — движение между закрытиями.
   // Дополняет ranges: ranges показывает внутрисвечной шум,
@@ -211,7 +212,7 @@ export async function analyzeSymbol(
   for (let i = 1; i < closes.length; i++) {
     movesRaw.push(Math.abs(closes[i] - closes[i - 1]) / closes[i - 1] * 100);
   }
-  const moves = trimOutliers(movesRaw).sort((a, b) => a - b);
+  const moves = trimOutliers(movesRaw, sigmaMultiplier).sort((a, b) => a - b);
 
   // StdDev логарифмических доходностей — стандартная мера волатильности в финансах.
   // Используется только для отображения в логах, не влияет на spacing.
@@ -317,6 +318,7 @@ export async function analyzeAllSymbols(
   symbols: string[],
   onProgress?: (symbol: string, done: number, total: number) => void,
   feeRoundTripPct: number = FEE_ROUND_TRIP_PCT,
+  sigmaMultiplier: number = 3,
 ): Promise<SymbolRecommendation[]> {
   const total = symbols.length * PERIODS.length * TIMEFRAMES.length;
   let done = 0;
@@ -329,7 +331,7 @@ export async function analyzeAllSymbols(
     for (const period of PERIODS) {
       for (const { tf } of TIMEFRAMES) {
         try {
-          const stats = await analyzeSymbol(fetchCandles, symbol, tf, period.hours, period.name, feeRoundTripPct);
+          const stats = await analyzeSymbol(fetchCandles, symbol, tf, period.hours, period.name, feeRoundTripPct, sigmaMultiplier);
           if (stats) {
             details.push(stats);
             currentPrice = stats.currentPrice;

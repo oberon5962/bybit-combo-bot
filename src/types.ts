@@ -42,6 +42,13 @@ export interface BotConfig {
 
   // Number of pairs to process in parallel per tick. 1 = sequential, 2+ = parallel batches.
   parallelPairs: number;
+
+  // "auto" = allocationPercent распределяется равномерно между активными парами и пишется обратно в config.jsonc
+  // "" или "config" = allocationPercent берётся из config.jsonc вручную
+  allocationPercentMode: string;
+
+  // Порог "пыли" в USDT: если баланс пары ниже этого значения при sellgrid — автоматически переводить в freeze
+  dustThresholdUSDT: number;
 }
 
 export interface PairConfig {
@@ -52,7 +59,8 @@ export interface PairConfig {
   // Режим торговли парой (hot-reload + Telegram sync):
   // 'freezebuy' — заморозить покупки; 'sellgrid' — режим распродажи;
   // 'freeze' — заморозить всё (SL/TP работают); 'unfreeze' — штатный режим (default)
-  state?: 'freezebuy' | 'sellgrid' | 'freeze' | 'unfreeze';
+  // 'deleted' — пара удалена: ордера отменяются, торговля не ведётся, в статистике не отображается (только TSL/TP срабатывают)
+  state?: 'freezebuy' | 'sellgrid' | 'freeze' | 'unfreeze' | 'deleted';
 }
 
 export interface RiskConfig {
@@ -94,6 +102,7 @@ export interface GridConfig {
   orphanSellMaxPerTick: number;             // максимум orphan-sell ордеров за один тик
   autoSpacingIntervalMin: number;          // как часто пересчитывать (минуты, напр. 360 = каждые 6ч)
   autoSpacingSafetyMarginPercent: number; // коэффициент недоверия — вычитать N% из расчётных значений
+  qtySigmas: number;                      // уровень обрезки выбросов: 1, 2 или 3σ
   autoSpacingPriority: 'off' | 'config' | 'auto'; // "off" = выключено, "config" = считать но не применять, "auto" = применять
 }
 

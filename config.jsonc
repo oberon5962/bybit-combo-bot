@@ -5,22 +5,22 @@
   // gridSpacingPercent / gridSpacingSellPercent — опционально для каждой пары (иначе берётся из grid.gridSpacingPercent)
   // state — опционально: "freeze" | "freezebuy" | "sellgrid" | "unfreeze" (default). Синхронизируется с Telegram-командами и hot-reload.
   "pairs": [
-    { "symbol": "DOT/USDT", "allocationPercent": 13, "gridSpacingPercent": 1.32, "gridSpacingSellPercent": 1.62 },
-    { "symbol": "NEAR/USDT", "allocationPercent": 12, "gridSpacingPercent": 1.16, "gridSpacingSellPercent": 1.46 },
-    { "symbol": "ADA/USDT", "allocationPercent": 12, "gridSpacingPercent": 1.05, "gridSpacingSellPercent": 1.35 },
-    { "symbol": "SUI/USDT", "allocationPercent": 13, "gridSpacingPercent": 1.18, "gridSpacingSellPercent": 1.48 },
-    { "symbol": "SOL/USDT", "allocationPercent": 13, "gridSpacingPercent": 0.88, "gridSpacingSellPercent": 1.18 },
-    { "symbol": "XRP/USDT", "allocationPercent": 12, "gridSpacingPercent": 0.85, "gridSpacingSellPercent": 1.15 },
-    { "symbol": "AAVE/USDT", "allocationPercent": 13, "gridSpacingPercent": 1.43, "gridSpacingSellPercent": 1.73 },
-    { "symbol": "RENDER/USDT", "allocationPercent": 12, "gridSpacingPercent": 1.28, "gridSpacingSellPercent": 1.67 }
+    { "symbol": "DOT/USDT", "allocationPercent": 13, "gridSpacingPercent": 1.24, "gridSpacingSellPercent": 1.74, "state": "unfreeze" },
+    { "symbol": "NEAR/USDT", "allocationPercent": 12, "gridSpacingPercent": 1.13, "gridSpacingSellPercent": 1.63, "state": "sellgrid" },
+    { "symbol": "ADA/USDT", "allocationPercent": 12, "gridSpacingPercent": 0.95, "gridSpacingSellPercent": 1.45, "state": "unfreeze" },
+    { "symbol": "SUI/USDT", "allocationPercent": 13, "gridSpacingPercent": 1.11, "gridSpacingSellPercent": 1.61, "state": "unfreeze" },
+    { "symbol": "SOL/USDT", "allocationPercent": 13, "gridSpacingPercent": 0.75, "gridSpacingSellPercent": 1.25, "state": "unfreeze" },
+    { "symbol": "XRP/USDT", "allocationPercent": 12, "gridSpacingPercent": 0.76, "gridSpacingSellPercent": 1.26, "state": "sellgrid" },
+    { "symbol": "AAVE/USDT", "allocationPercent": 13, "gridSpacingPercent": 1.27, "gridSpacingSellPercent": 1.77, "state": "unfreeze" },
+    { "symbol": "RENDER/USDT", "allocationPercent": 12, "gridSpacingPercent": 1.21, "gridSpacingSellPercent": 1.71, "state": "sellgrid" }
   ],
 
   // ============================================================
   // Risk Management — управление рисками
   // ============================================================
   "risk": {
-    "maxDrawdownPercent": 8,           // HALT если портфель упал (-% от пика)
-    "stopLossPercent": 7,              // StopLoss на позицию (-% от entry)
+    "maxDrawdownPercent": 15,           // HALT если портфель упал (-% от пика)
+    "stopLossPercent": 10,              // StopLoss на позицию (-% от entry)
     "takeProfitPercent": 100,            // Тейк-профит на позицию (+% от entry)
     "portfolioTakeProfitPercent": 100,  // Продать ВСЁ когда портфель (+% от старта)
     "cooldownAfterSLSec": 1800,         // Пауза после StopLoss (SL) (1800 = 30 мин, 0 = halt навсегда)
@@ -34,7 +34,7 @@
   // ============================================================
   "grid": {
     "enabled": true,                    // true = grid включен, false = выключить grid
-    "gridLevels": 4,                    // Кол-во уровней (делятся на buy/sell)
+    "gridLevels": 14,                    // Кол-во уровней (делятся на buy/sell)
     "gridSpacingPercent": 1.0,          // DEFAULT расстояние между BUY-уровнями (% от текущей цены при построении сетки). Fallback если пара не задаёт свой
     "gridSpacingSellPercent": 1.4,      // DEFAULT расстояние между SELL-уровнями (% от текущей цены при построении сетки). Fallback если пара не задаёт свой
     "orderSizePercent": 15,             // Размер ордера (% от аллокации пары)
@@ -60,11 +60,12 @@
     "minSellProfitPercent": 0.5,        // Минимальная прибыль для безубыточного sell (% над avgEntry). Покрывает комиссии round-trip (0.2%) + запас (0.3%)
     "maxSellLossPercent": 1,            // Максимально допустимый убыток в midpoint-режиме (% ниже avgEntry). Если midpoint ниже этого порога — sell не ставится
 
-    "orphanSellMaxPerTick": 10,         // Максимум orphan-sell ордеров за один тик (защита от спама при рассинхроне позиции)
+    "orphanSellMaxPerTick": 30,         // Максимум orphan-sell ордеров за один тик (защита от спама при рассинхроне позиции)
 
     // Auto-adaptive spacing (на основе статистики волатильности)
     "autoSpacingIntervalMin": 180,       // Как часто пересчитывать в минутах (180 = каждые 3ч)
-    "autoSpacingSafetyMarginPercent": 15,  // Коэффициент недоверия — вычитать 10% из расчётных значений статистики волатильности
+    "autoSpacingSafetyMarginPercent": 15,  // Коэффициент недоверия — вычитать % из расчётных значений статистики волатильности
+    "qtySigmas": 1,                        // Уровень уверенности для расчёта spacing: 1, 2 или 3 (другие значения запрещены)
     // "off"    — выключено, не считает, не тратит API
     // "config" — считает и пишет в лог/Telegram для сравнения, торгует по config
     // "auto"   — считает и применяет к торговле
@@ -126,8 +127,8 @@
     "sendSummary": true,                // Отправлять summary в Telegram
     "sendFills": true,                  // Уведомления о сделках
     "sendAlerts": true,                 // Алерты: SL/TP/halt/panic
-    "summaryIntervalTicks": 120,         // Summary в Telegram раз в 120 тиков (~20 мин)
-    "logSummaryIntervalTicks": 15,      // Summary в bot.log раз в 15 тиков (~2,5 мин)
+    "summaryIntervalTicks": 120,         // Summary в Telegram раз в summaryIntervalTicks тиков (~20 мин)
+    "logSummaryIntervalTicks": 6,      // Summary в bot.log раз в logSummaryIntervalTicks тиков (~1 мин)
     "commandPollIntervalTicks": 1,      // Проверять Telegram-команды каждый тик (~10с) — для плавного /buy wizard
     "confirmationTimeoutSec": 120        // Таймаут подтверждения команды в секундах (0 = без таймаута)
   },
@@ -138,5 +139,11 @@
   "tickIntervalSec": 10,               // Основной цикл бота (10 сек, НЕ hot-reload)
   "syncIntervalSec": 43200,            // Sync с Bybit каждые 12 часов ( 0 = выкл)
   "configReloadIntervalTicks": 3,       // Перечитывать config.jsonc каждые 3 тика (~30с). 0 = выкл (fallback раз в 5 мин)
-  "parallelPairs": 4                    // Обработка пар параллельно (1 = последовательно, 2 = по 2, 3 = по 3)
+  "parallelPairs": 4,                   // Размер батча: сколько пар/ордеров запускается одновременно (1 = строго последовательно; 4 = волны по 4; 8 пар ÷ 4 = 2 волны)
+
+  // ============================================================
+  // Token Management — управление парами
+  // ============================================================
+  "allocationPercentMode": "auto",    // "auto" = равномерное распределение между активными парами (пишется в config.jsonc); "config" = задавать вручную
+  "dustThresholdUSDT": 1               // Порог "пыли" в USDT: если баланс пары в sellgrid-режиме < этого значения — автоматически перевести в freeze
 }

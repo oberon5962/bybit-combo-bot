@@ -200,6 +200,26 @@ export class TelegramNotifier {
     this.sendRaw(payload);
   }
 
+  /** Send /addtoken state selection menu: start trading (unfreeze) or freeze */
+  sendAddTokenStateMenu(symbol: string): void {
+    if (!this.config.enabled) return;
+    const payload = JSON.stringify({
+      chat_id: this.config.chatId,
+      text: `➕ <b>${symbol}</b> — начальное состояние:`,
+      parse_mode: 'HTML',
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: '▶️ Начать торговать', callback_data: `addtokenstate:${symbol}:unfreeze` },
+            { text: '🧊 Заморозить', callback_data: `addtokenstate:${symbol}:freeze` },
+          ],
+          [{ text: '❌ Отмена', callback_data: 'cancel' }],
+        ],
+      },
+    });
+    this.sendRaw(payload);
+  }
+
   /** Send /buy amount selection menu: preset USDT amounts + Отмена */
   sendBuyAmountMenu(currency: string, presets: number[]): void {
     if (!this.config.enabled) return;
@@ -318,6 +338,11 @@ export class TelegramNotifier {
             commands.push({ command: '_unsellgridmenu', args: data.substring('unsellgridmenu:'.length), chatId: cbChatId, messageId: cb.message?.message_id ?? 0, confirmed: true });
             continue;
           }
+          if (data.startsWith('addtokenstate:')) {
+            // args = "SYMBOL:state" e.g. "DOT/USDT:unfreeze"
+            commands.push({ command: '_addtokenstate', args: data.substring('addtokenstate:'.length), chatId: cbChatId, messageId: cb.message?.message_id ?? 0, confirmed: true });
+            continue;
+          }
           if (data.startsWith('confirm:')) {
             // Check confirmation timeout
             const msgDate = cb.message?.date ?? 0; // unix seconds
@@ -402,7 +427,9 @@ export class TelegramNotifier {
       { command: 'unsellgrid', description: 'Перестать распродавать валюту + unfreezebuy: /unsellgrid XRP' },
       { command: 'cancelorders', description: 'Отменить все ордера + остановить бота' },
       { command: 'buy', description: 'Купить кол-во валюты за USDT: /buy SUI USDT 10' },
-      { command: 'sellall', description: 'Продать всё + cancelorders' }
+      { command: 'sellall', description: 'Продать всё + cancelorders' },
+      { command: 'addtoken', description: 'Добавить торговую пару: /addtoken SOL' },
+      { command: 'removetoken', description: 'Удалить торговую пару: /removetoken SOL' }
     ];
 
     const payload = JSON.stringify({ commands });

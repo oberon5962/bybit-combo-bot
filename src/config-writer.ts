@@ -70,6 +70,69 @@ export function updatePairStateInConfig(
   }
 }
 
+// Добавить новую пару в массив pairs[] в config.jsonc (перед закрывающей ']').
+export function addPairToConfig(
+  configPath: string,
+  symbol: string,
+  allocationPercent: number,
+  state?: string,
+): void {
+  const content = readFileSync(configPath, 'utf-8');
+  const lines = content.split('\n');
+
+  // Найти последнюю строку с '}' перед закрывающей ']' в секции pairs
+  // Ищем строку '],' или ']' после секции pairs
+  let pairsEndIdx = -1;
+  let inPairs = false;
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].includes('"pairs"') && lines[i].includes('[')) inPairs = true;
+    if (inPairs && lines[i].includes(']') && !lines[i].trimStart().startsWith('//')) { pairsEndIdx = i; break; }
+  }
+  if (pairsEndIdx < 0) throw new Error('pairs array not found in config.jsonc');
+
+  // Найти последнюю строку пары перед ']' и убедиться что заканчивается ','
+  let lastPairIdx = pairsEndIdx - 1;
+  while (lastPairIdx >= 0 && lines[lastPairIdx].trim() === '') lastPairIdx--;
+
+  // Добавить запятую к последней паре если её нет
+  if (lastPairIdx >= 0 && !lines[lastPairIdx].trimEnd().endsWith(',')) {
+    lines[lastPairIdx] = lines[lastPairIdx].trimEnd() + ',';
+  }
+
+  const stateStr = state && state !== 'unfreeze' ? `, "state": "${state}"` : '';
+  const indent = '    ';
+  const newLine = `${indent}{ "symbol": "${symbol}", "allocationPercent": ${allocationPercent}${stateStr} }`;
+  lines.splice(pairsEndIdx, 0, newLine);
+
+  const tmp = configPath + '.tmp';
+  writeFileSync(tmp, lines.join('\n'), 'utf-8');
+  renameSync(tmp, configPath);
+}
+
+// Пометить пару как deleted в config.jsonc (state → "deleted").
+export function markPairDeletedInConfig(configPath: string, symbol: string): void {
+  updatePairField(configPath, symbol, 'state', 'deleted');
+}
+
+// Перезаписать allocationPercent для всех пар (используется при allocationPercentMode="auto").
+// pairs — массив { symbol, allocationPercent } для всех активных пар.
+export function rewritePairAllocations(
+  configPath: string,
+  pairs: { symbol: string; allocationPercent: number }[],
+): void {
+  let content = readFileSync(configPath, 'utf-8');
+  for (const p of pairs) {
+    const symbolJson = `"symbol": "${p.symbol}"`;
+    content = content.split('\n').map(line => {
+      if (!line.includes(symbolJson)) return line;
+      return line.replace(/"allocationPercent":\s*\d+/, `"allocationPercent": ${p.allocationPercent}`);
+    }).join('\n');
+  }
+  const tmp = configPath + '.tmp';
+  writeFileSync(tmp, content, 'utf-8');
+  renameSync(tmp, configPath);
+}
+
 // Обновить gridSpacingPercent и gridSpacingSellPercent для пары (auto-spacing sync).
 export function updatePairSpacingInConfig(
   configPath: string,

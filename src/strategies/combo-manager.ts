@@ -16,7 +16,7 @@ import { TelegramNotifier, TelegramCommand } from '../telegram';
 import { ExchangeSync } from '../sync';
 import { analyzeAllSymbols, round as volRound } from '../volatility';
 import type { CandleFetcher } from '../volatility';
-import { updatePairStateInConfig, updatePairSpacingInConfig } from '../config-writer';
+import { updatePairStateInConfig, updatePairSpacingInConfig, addPairToConfig, markPairDeletedInConfig, rewritePairAllocations } from '../config-writer';
 import { createHash } from 'crypto';
 import { readFileSync } from 'fs';
 import { resolve } from 'path';
@@ -173,7 +173,7 @@ export class ComboManager {
       const minSellProfitPct = this.config.grid.minSellProfitPercent;
       const results = await analyzeAllSymbols(fetcher, symbols, (sym, done, total) => {
         this.log.debug(`Auto-spacing: ${sym} (${done}/${total})`);
-      }, minSellProfitPct);
+      }, minSellProfitPct, this.config.grid.qtySigmas);
 
       const safetyMultiplier = 1 - (this.config.grid.autoSpacingSafetyMarginPercent / 100);
       const newMap = new Map<string, { buy: number; sell: number }>();
@@ -338,8 +338,9 @@ export class ComboManager {
     const { single: currentBalance, all: allBalances } = await this.exchange.fetchBalanceAndAll('USDT');
     let totalPortfolioUSDT = currentBalance.total;
 
-    // Add value of held crypto to portfolio total
+    // Add value of held crypto to portfolio total (skip deleted pairs)
     for (const pair of this.config.pairs) {
+      if (pair.state === 'deleted' || this.state.isPairDeleted(pair.symbol)) continue;
       const base = pair.symbol.split('/')[0]; // "BTC" from "BTC/USDT"
       const held = allBalances[base];
       if (held && held.total > 0) {
@@ -477,6 +478,9 @@ export class ComboManager {
   private async processPair(pair: PairConfig, totalUSDT: number): Promise<void> {
     const { symbol } = pair;
 
+    // Skip deleted pairs — completely outside bot responsibility
+    if (pair.state === 'deleted' || this.state.isPairDeleted(symbol)) return;
+
     // Skip halted pairs (max consecutive SL exceeded)
     if (this.state.isPairHalted(symbol)) {
       this.log.debug(`Skipping ${symbol} — pair is halted`);
@@ -535,6 +539,28 @@ export class ComboManager {
     if (slTriggered) {
       // Position was closed by SL/TP — skip normal strategy evaluation this tick
       return;
+    }
+
+    // ---- Sellgrid dust-check: если баланс < dustThresholdUSDT — авто-freeze ----
+    const pairBase = symbol.split('/')[0];
+    if (this.state.isSellGridActive(pairBase)) {
+      try {
+        const allBals = await this.exchange.fetchAllBalances();
+        const heldBase = allBals[pairBase];
+        const heldValueUSDT = heldBase && heldBase.total > 0 ? heldBase.total * ticker.last : 0;
+        const dustThreshold = this.config.dustThresholdUSDT ?? 1;
+        if (heldValueUSDT < dustThreshold) {
+          this.log.info(`[sellgrid] ${symbol}: dust detected (${heldValueUSDT.toFixed(4)} USDT < ${dustThreshold} USDT) — auto-freeze`);
+          const configPathDust = resolve(__dirname, '../../config.jsonc');
+          await this.applyPairState(pairBase, 'freeze', false);
+          try { updatePairStateInConfig(configPathDust, symbol, 'freeze'); } catch { /* ignore */ }
+          this.lastConfigHash = createHash('md5').update(readFileSync(configPathDust, 'utf-8')).digest('hex');
+          this.tg.sendAlert(`🧊 <b>${symbol}</b> — sellgrid завершён (остаток < ${dustThreshold}$). Пара автоматически заморожена.`);
+          return;
+        }
+      } catch (dustErr) {
+        this.log.debug(`${symbol}: dust-check failed: ${sanitizeError(dustErr)}`);
+      }
     }
 
     // ---- Freeze check: пара полностью заморожена — только SL/TP (выше), торговля пропускается ----
@@ -1185,10 +1211,11 @@ export class ComboManager {
 
   private async checkMarketPanic(): Promise<void> {
     const threshold = this.config.marketProtection.panicBearishPairsThreshold;
-    const total = this.config.pairs.length;
+    const activePairsForPanic = this.config.pairs.filter(p => p.state !== 'deleted' && !this.state.isPairDeleted(p.symbol));
+    const total = activePairsForPanic.length;
     let bearishCount = 0;
 
-    for (const pair of this.config.pairs) {
+    for (const pair of activePairsForPanic) {
       const ind = this.lastIndicatorsPerPair.get(pair.symbol);
       if (ind && ind.emaFast < ind.emaSlow) {
         bearishCount++;
@@ -1210,7 +1237,7 @@ export class ComboManager {
   }
 
   private async cancelAllBuyOrders(): Promise<void> {
-    for (const pair of this.config.pairs) {
+    for (const pair of this.config.pairs.filter(p => p.state !== 'deleted' && !this.state.isPairDeleted(p.symbol))) {
       try {
         const openOrders = await this.exchange.fetchOpenOrders(pair.symbol);
         const buyOrders = openOrders.filter(o => o.side === 'buy');
@@ -1469,7 +1496,7 @@ export class ComboManager {
       this.log.info(`Telegram command: /${cmd.command} ${cmd.args}${cmd.confirmed ? ' [confirmed]' : ''}`);
       try {
         // Commands requiring confirmation: stop, sellall, buy
-        const needsConfirm = ['stop', 'sellall', 'buy', 'cancelorders', 'regrid', 'freezebuy', 'unfreezebuy', 'sellgrid', 'unsellgrid', 'freeze', 'unfreeze'].includes(cmd.command);
+        const needsConfirm = ['stop', 'sellall', 'buy', 'cancelorders', 'regrid', 'freezebuy', 'unfreezebuy', 'sellgrid', 'unsellgrid', 'freeze', 'unfreeze', 'addtoken', 'removetoken'].includes(cmd.command);
 
         // /freezebuy: empty args → wizard, unknown currency → reject
         if (cmd.command === 'freezebuy' && !cmd.confirmed) {
@@ -1522,6 +1549,35 @@ export class ComboManager {
             continue;
           }
         }
+        // /addtoken: empty args → ask to type token name; with args → show state selection
+        if (cmd.command === 'addtoken' && !cmd.confirmed) {
+          const arg = cmd.args.trim().toUpperCase().replace('/USDT', '');
+          if (!arg) {
+            this.tg.sendReply('➕ Напиши: /addtoken SYMBOL\nПример: /addtoken DOT или /addtoken dot\n(USDT добавляется автоматически)');
+            continue;
+          }
+          const symbol = `${arg}/USDT`;
+          if (this.config.pairs.find(p => p.symbol === symbol && p.state !== 'deleted')) {
+            this.tg.sendReply(`❌ Пара ${symbol} уже существует в конфиге.`);
+            continue;
+          }
+          this.tg.sendAddTokenStateMenu(symbol);
+          continue;
+        }
+        // /removetoken: empty args → show list of active pairs; with args → confirmation
+        if (cmd.command === 'removetoken' && !cmd.confirmed) {
+          const arg = cmd.args.trim().toUpperCase().replace('/USDT', '');
+          if (!arg) {
+            const activePairs = this.config.pairs.filter(p => p.state !== 'deleted').map(p => p.symbol.split('/')[0]);
+            this.tg.sendReply(`🗑 Укажи токен для удаления:\n/removetoken SYMBOL\n\nАктивные пары: ${activePairs.join(', ')}`);
+            continue;
+          }
+          const symbol = `${arg}/USDT`;
+          if (!this.config.pairs.find(p => p.symbol === symbol)) {
+            this.tg.sendReply(`❌ Пара ${symbol} не найдена.`);
+            continue;
+          }
+        }
         // Pre-validate /buy args before showing confirmation dialog; empty args → show wizard
         if (cmd.command === 'buy' && !cmd.confirmed) {
           const parts = cmd.args.trim().split(/\s+/).filter(Boolean);
@@ -1558,6 +1614,7 @@ export class ComboManager {
             unfreezebuy: `✅ Разморозить покупки по ${cmd.args.toUpperCase()}? Сетки восстановятся в следующем тике.`,
             sellgrid: `🔻 Включить sellgrid для ${cmd.args.toUpperCase()}? Buy заморозятся, после каждого sell fill ставится новый sell выше (ladder). Завершится автоматически, когда крипта закончится.`,
             unsellgrid: `✅ Отключить sellgrid для ${cmd.args.toUpperCase()} и разморозить buy?`,
+            removetoken: `🗑 Удалить пару ${cmd.args.trim().toUpperCase().replace('/USDT','')}/USDT? Все ордера будут отменены. Торговля остановлена навсегда (state=deleted).`,
           };
           const label = descriptions[cmd.command] ?? `/${cmd.command}`;
           const callbackData = cmd.args ? `${cmd.command}:${cmd.args}` : cmd.command;
@@ -1690,8 +1747,23 @@ export class ComboManager {
           case 'unfreeze':
             await this.cmdUnfreeze(cmd.args.trim().toUpperCase());
             break;
+          case '_addtokenstate': {
+            // args = "DOT/USDT:unfreeze" or "DOT/USDT:freeze"
+            const lastColon = cmd.args.lastIndexOf(':');
+            const atSymbol = lastColon > 0 ? cmd.args.substring(0, lastColon) : cmd.args;
+            const atState  = lastColon > 0 ? cmd.args.substring(lastColon + 1) : 'unfreeze';
+            const stateLabel = atState === 'freeze' ? '🧊 Заморожен (freeze)' : '▶️ Начать торговать (unfreeze)';
+            this.tg.sendConfirmation(`➕ Добавить ${atSymbol}?\nСостояние: ${stateLabel}`, `addtoken:${atSymbol}:${atState}`);
+            break;
+          }
+          case 'addtoken':
+            await this.cmdAddToken(cmd.args.trim());
+            break;
+          case 'removetoken':
+            await this.cmdRemoveToken(cmd.args.trim().toUpperCase().replace('/USDT', ''));
+            break;
           default:
-            this.tg.sendReply(`Неизвестная команда /${cmd.command}\nДоступные: /start /status /stop /run /sellall /buy /orders /cancelorders /stats /regrid /freezebuy /unfreezebuy /sellgrid /unsellgrid /freeze /unfreeze`);
+            this.tg.sendReply(`Неизвестная команда /${cmd.command}\nДоступные: /start /status /stop /run /sellall /buy /orders /cancelorders /stats /regrid /freezebuy /unfreezebuy /sellgrid /unsellgrid /freeze /unfreeze /addtoken /removetoken`);
         }
       } catch (err) {
         this.log.error(`Telegram command /${cmd.command} failed: ${sanitizeError(err)}`);
@@ -1905,7 +1977,46 @@ export class ComboManager {
       .filter((s, i, arr) => arr.indexOf(s) === i)
       .filter(sym => sym.split('/')[0] === base);
 
-    if (newState === 'freeze') {
+    if (newState === 'deleted') {
+      // Пара удалена: сначала отменить все ордера, затем пометить в state
+      this.state.removeBlockedBuyBase(base);
+      this.state.removeSellGridBase(base);
+      this.state.removeFrozenPair(base);
+      let cancelled = 0;
+      for (const sym of affectedSymbols) {
+        try {
+          const openOrders = await this.exchange.fetchOpenOrders(sym);
+          for (const o of openOrders) {
+            try { await this.exchange.cancelOrder(o.id, sym); cancelled++; }
+            catch (err) { this.log.warn(`deleted: cancel ${o.id} ${sym} failed: ${sanitizeError(err)}`); }
+          }
+          this.state.setGridLevels(sym, []);
+          this.state.setGridInitialized(sym, false);
+        } catch (err) {
+          this.log.warn(`deleted: fetchOpenOrders ${sym} failed: ${sanitizeError(err)}`);
+        }
+      }
+      // Помечаем deleted только после отмены ордеров
+      this.state.markPairDeleted(mainSymbol);
+      this.log.info(`Pair ${mainSymbol} marked deleted: cancelled ${cancelled} orders, grid cleared`);
+      this.tg.sendAlert(`🗑 <b>${mainSymbol}</b> удалена из торговли. Отменено ордеров: ${cancelled}. Пара скрыта из статистики.`);
+
+      // При auto-режиме пересчитать аллокации оставшихся активных пар
+      if (this.config.allocationPercentMode === 'auto') {
+        try {
+          const configPath = resolve(__dirname, '../../config.jsonc');
+          const remaining = this.config.pairs.filter(p => p.state !== 'deleted' && !this.state.isPairDeleted(p.symbol));
+          if (remaining.length > 0) {
+            const equalAlloc = Math.floor(100 / remaining.length);
+            rewritePairAllocations(configPath, remaining.map(p => ({ symbol: p.symbol, allocationPercent: equalAlloc })));
+            this.lastConfigHash = createHash('md5').update(readFileSync(configPath, 'utf-8')).digest('hex');
+          }
+        } catch (err) {
+          this.log.warn(`applyPairState deleted: rewritePairAllocations failed: ${sanitizeError(err)}`);
+        }
+      }
+      return;
+    } else if (newState === 'freeze') {
       // Снять все ордера (buy + sell) по всем affected символам, выставить frozen
       this.state.addFrozenPair(base);
       this.state.addBlockedBuyBase(base);
@@ -2045,6 +2156,125 @@ export class ComboManager {
     }
   }
 
+  private async cmdAddToken(args: string): Promise<void> {
+    // args = "DOT/USDT:unfreeze" or "DOT/USDT:freeze" (from _addtokenstate confirmation)
+    const lastColon = args.lastIndexOf(':');
+    const symbol  = lastColon > 0 ? args.substring(0, lastColon) : args;
+    const newState = lastColon > 0 ? args.substring(lastColon + 1) : 'unfreeze';
+
+    if (!symbol.includes('/')) {
+      this.tg.sendReply(`❌ Некорректный символ: ${args}`);
+      return;
+    }
+
+    const configPath = resolve(__dirname, '../../config.jsonc');
+    const activePairs = this.config.pairs.filter(p => p.state !== 'deleted');
+
+    // Рассчитать allocationPercent
+    // auto: равномерно; config: минимально возможный (остаток от текущей суммы)
+    const currentTotal = activePairs.reduce((s, p) => s + p.allocationPercent, 0);
+    let allocationPercent: number;
+    if (this.config.allocationPercentMode === 'auto') {
+      allocationPercent = Math.floor(100 / (activePairs.length + 1));
+    } else {
+      allocationPercent = Math.max(1, 100 - currentTotal);
+    }
+
+    // Проверить что суммарный alloc не превысит 100
+    if (currentTotal + allocationPercent > 100) {
+      this.tg.sendReply(`⚠️ Невозможно добавить ${symbol}: суммарная аллокация превысит 100% (текущая ${currentTotal}%, новая ${allocationPercent}%).\nСначала уменьши аллокацию других пар или удали лишние.`);
+      return;
+    }
+
+    try {
+      addPairToConfig(configPath, symbol, allocationPercent, newState === 'freeze' ? 'freeze' : undefined);
+
+      // При auto-режиме пересчитать все аллокации равномерно
+      if (this.config.allocationPercentMode === 'auto') {
+        const newTotal = activePairs.length + 1;
+        const equalAlloc = Math.floor(100 / newTotal);
+        const newAllocPairs = [...activePairs.map(p => ({ symbol: p.symbol, allocationPercent: equalAlloc })),
+          { symbol, allocationPercent: equalAlloc }];
+        rewritePairAllocations(configPath, newAllocPairs);
+      }
+
+      this.lastConfigHash = createHash('md5').update(readFileSync(configPath, 'utf-8')).digest('hex');
+    } catch (err) {
+      this.tg.sendReply(`❌ Ошибка записи в config.jsonc: ${sanitizeError(err)}`);
+      return;
+    }
+
+    const stateLabel = newState === 'freeze' ? '🧊 заморожена' : '▶️ активна';
+    this.log.info(`/addtoken: ${symbol} добавлена в config.jsonc (alloc=${allocationPercent}%, state=${newState})`);
+    this.tg.sendReply(
+      `✅ <b>${symbol}</b> добавлена в конфиг.\n` +
+      `Аллокация: ${allocationPercent}% | Состояние: ${stateLabel}\n` +
+      `Бот подхватит изменения через ~30с (hot-reload).`,
+    );
+  }
+
+  private async cmdRemoveToken(base: string): Promise<void> {
+    if (!base) { this.tg.sendReply('Формат: /removetoken XRP'); return; }
+
+    const symbol = `${base}/USDT`;
+    const pair = this.config.pairs.find(p => p.symbol === symbol);
+    if (!pair) {
+      this.tg.sendReply(`❌ Пара ${symbol} не найдена.`);
+      return;
+    }
+    if (pair.state === 'deleted') {
+      this.tg.sendReply(`${symbol} уже помечена как deleted.`);
+      return;
+    }
+
+    // Отменить все ордера
+    let cancelled = 0;
+    try {
+      const openOrders = await this.exchange.fetchOpenOrders(symbol);
+      for (const o of openOrders) {
+        try { await this.exchange.cancelOrder(o.id, symbol); cancelled++; }
+        catch (err) { this.log.warn(`/removetoken: cancel ${o.id} failed: ${sanitizeError(err)}`); }
+      }
+    } catch (err) {
+      this.log.warn(`/removetoken: fetchOpenOrders ${symbol} failed: ${sanitizeError(err)}`);
+    }
+
+    // Очистить grid levels в state
+    this.state.setGridLevels(symbol, []);
+    this.state.setGridInitialized(symbol, false);
+
+    // Пометить в state как deleted
+    this.state.markPairDeleted(symbol);
+
+    // Снять все freezes/sellgrid
+    this.state.removeBlockedBuyBase(base);
+    this.state.removeSellGridBase(base);
+    this.state.removeFrozenPair(base);
+
+    // Записать state=deleted в config.jsonc
+    const configPath = resolve(__dirname, '../../config.jsonc');
+    try {
+      markPairDeletedInConfig(configPath, symbol);
+
+      // При auto-режиме пересчитать аллокации оставшихся активных пар
+      if (this.config.allocationPercentMode === 'auto') {
+        const remaining = this.config.pairs.filter(p => p.symbol !== symbol && p.state !== 'deleted' && !this.state.isPairDeleted(p.symbol));
+        if (remaining.length > 0) {
+          const equalAlloc = Math.floor(100 / remaining.length);
+          rewritePairAllocations(configPath, remaining.map(p => ({ symbol: p.symbol, allocationPercent: equalAlloc })));
+        }
+      }
+
+      this.lastConfigHash = createHash('md5').update(readFileSync(configPath, 'utf-8')).digest('hex');
+    } catch (err) {
+      this.log.warn(`/removetoken: config-writer error: ${sanitizeError(err)}`);
+    }
+
+    const msg = `🗑 ${symbol} удалена. Отменено ордеров: ${cancelled}. Торговля остановлена, пара скрыта из статистики.`;
+    this.log.info(`/removetoken: ${symbol} marked deleted, cancelled=${cancelled}`);
+    this.tg.sendReply(msg);
+  }
+
   private cmdStartWelcome(): void {
     const text = [
       '🤖 <b>Bybit Combo Bot</b>',
@@ -2075,6 +2305,10 @@ export class ComboManager {
       '<b>⚙️ Управление:</b>',
       '/stop — остановить торговлю',
       '/run — возобновить торговлю',
+      '',
+      '<b>➕ Криптовалюта:</b>',
+      '/addtoken — добавить новую валюту (торговую пару)',
+      '/removetoken — удалить пару (ордера отменяются)',
     ].join('\n');
     this.tg.sendReply(text);
   }
@@ -2083,6 +2317,7 @@ export class ComboManager {
     const seen = new Set<string>();
     const out: string[] = [];
     for (const p of this.config.pairs) {
+      if (p.state === 'deleted') continue;
       const base = p.symbol.split('/')[0];
       if (base && !seen.has(base)) { seen.add(base); out.push(base); }
     }

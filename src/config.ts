@@ -51,7 +51,7 @@ export function loadConfig(): BotConfig {
       allocationPercent: p.allocationPercent,
       ...(p.gridSpacingPercent != null && { gridSpacingPercent: p.gridSpacingPercent }),
       ...(p.gridSpacingSellPercent != null && { gridSpacingSellPercent: p.gridSpacingSellPercent }),
-      ...(p.state != null && ['freezebuy', 'sellgrid', 'freeze', 'unfreeze'].includes(p.state) && { state: p.state }),
+      ...(p.state != null && ['freezebuy', 'sellgrid', 'freeze', 'unfreeze', 'deleted'].includes(p.state) && { state: p.state }),
     })),
 
     risk: {
@@ -85,6 +85,7 @@ export function loadConfig(): BotConfig {
       orphanSellMaxPerTick: json.grid?.orphanSellMaxPerTick ?? defaultNum,
       autoSpacingIntervalMin: json.grid?.autoSpacingIntervalMin ?? defaultNum,
       autoSpacingSafetyMarginPercent: json.grid?.autoSpacingSafetyMarginPercent ?? defaultNum,
+      qtySigmas: json.grid?.qtySigmas ?? defaultNum,
       autoSpacingPriority: json.grid?.autoSpacingPriority ?? defaultStr,
     },
 
@@ -140,6 +141,8 @@ export function loadConfig(): BotConfig {
     configReloadIntervalTicks: json.configReloadIntervalTicks ?? defaultNum,
     logSummaryIntervalTicks: json.telegram?.logSummaryIntervalTicks ?? json.logSummaryIntervalTicks ?? defaultNum,
     parallelPairs: json.parallelPairs ?? defaultNum,
+    allocationPercentMode: json.allocationPercentMode ?? defaultStr,
+    dustThresholdUSDT: json.dustThresholdUSDT ?? defaultNum,
   };
 
   validateConfig(config);
@@ -154,15 +157,17 @@ export function loadConfig(): BotConfig {
 function validateConfig(config: BotConfig): void {
   const errors: string[] = [];
 
-  // Pairs allocation
-  const totalAlloc = config.pairs.reduce((s, p) => s + p.allocationPercent, 0);
+  // Pairs allocation (deleted pairs excluded from sum)
+  const activePairs = config.pairs.filter(p => p.state !== 'deleted');
+  const totalAlloc = activePairs.reduce((s, p) => s + p.allocationPercent, 0);
   if (totalAlloc > 100) {
     errors.push(`Total pair allocation is ${totalAlloc}% — must be <= 100%`);
   }
-  if (config.pairs.length === 0) {
-    errors.push('No trading pairs configured');
+  if (activePairs.length === 0) {
+    errors.push('No active trading pairs configured (all deleted?)');
   }
   for (const p of config.pairs) {
+    if (p.state === 'deleted') continue;
     if (p.gridSpacingPercent != null && p.gridSpacingPercent <= 0) {
       errors.push(`${p.symbol}: gridSpacingPercent must be > 0`);
     }
@@ -232,6 +237,9 @@ function validateConfig(config: BotConfig): void {
       }
       if (config.grid.autoSpacingSafetyMarginPercent < 0 || config.grid.autoSpacingSafetyMarginPercent > 50) {
         errors.push('autoSpacingSafetyMarginPercent must be between 0 and 50');
+      }
+      if (![1, 2, 3].includes(config.grid.qtySigmas)) {
+        errors.push('qtySigmas must be 1, 2, or 3');
       }
     }
   }
