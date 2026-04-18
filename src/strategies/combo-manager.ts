@@ -1431,7 +1431,7 @@ export class ComboManager {
       if (st.buys > 0 || st.sells > 0) {
         const stPnlSign = st.pnl >= 0 ? '+' : '';
         const stPnlPct = st.spent > 0 ? (st.pnl / st.spent) * 100 : 0;
-        tgPairParts.push(` PnL: ${stPnlSign}${st.pnl.toFixed(2)} USDT (${stPnlSign}${stPnlPct.toFixed(1)}%)`);
+        tgPairParts.push(` PnL: ${stPnlSign}${st.pnl.toFixed(2)} (${stPnlSign}${stPnlPct.toFixed(1)}%)`);
       }
       // center removed from telegram per user request
       if (slTrades.length > 0) tgPairParts.push(` SL: ${slTrades.length}x`);
