@@ -21,6 +21,7 @@ export class GridStrategy {
   // BUG #12 fix: cache market precision per symbol
   private precisionCache: Map<string, { pricePrecision: number; amountPrecision: number; minAmount: number; minCost: number }> = new Map();
   private lastSkipSummary: Map<string, string> = new Map(); // suppress repeated skip logs
+  private lastEmaCrossover: Map<string, 'bearish' | 'bullish' | 'neutral'> = new Map(); // dedup EMA crossover logs
   private lastRebalanceTime: Map<string, number> = new Map(); // cooldown between rebalances
   private _marketProtectionActive: boolean = false;
   private autoSpacingMap: Map<string, { buy: number; sell: number }> = new Map();
@@ -967,13 +968,17 @@ export class GridStrategy {
       }
     }
 
-    if (indicators.emaCrossover === 'bearish') {
-      decisions.push({
-        strategy: 'grid',
-        signal: 'hold',
-        symbol,
-        reason: 'EMA bearish crossover — consider tightening grid or pausing sells',
-      });
+    // Log EMA crossover state only on transitions (bearish↔bullish↔none) to avoid per-tick spam.
+    // Informational only — grid behavior is driven by useEmaFilter (blocks buys) and per-level midpoint guards.
+    const currentEma = indicators.emaCrossover ?? 'neutral';
+    const prevEma = this.lastEmaCrossover.get(symbol) ?? 'neutral';
+    if (currentEma !== prevEma) {
+      if (currentEma === 'bearish') {
+        this.log.info(`[grid] ${symbol}  EMA crossover: bearish${this.config.useEmaFilter ? ' (buys blocked by filter)' : ''}`);
+      } else if (currentEma === 'bullish') {
+        this.log.info(`[grid] ${symbol}  EMA crossover: bullish`);
+      }
+      this.lastEmaCrossover.set(symbol, currentEma);
     }
 
     // Counter-sell midpoint-halving trailing (после split rebalance DOWN).
