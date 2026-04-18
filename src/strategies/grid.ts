@@ -27,11 +27,13 @@ export class GridStrategy {
   private telegram: TelegramNotifier | null = null;
 
   private maxOpenOrdersPerPair: number;
+  private parallelOrders: number;
 
   constructor(config: BotConfig, exchange: BybitExchange, log: Logger, state: StateManager) {
     this.config = config.grid;
     this.pairsConfig = config.pairs;
     this.maxOpenOrdersPerPair = config.risk.maxOpenOrdersPerPair;
+    this.parallelOrders = Math.max(1, config.parallelPairs || 1);
     this.exchange = exchange;
     this.log = log;
     this.state = state;
@@ -48,6 +50,7 @@ export class GridStrategy {
     this.config = config.grid;
     this.pairsConfig = config.pairs;
     this.maxOpenOrdersPerPair = config.risk.maxOpenOrdersPerPair;
+    this.parallelOrders = Math.max(1, config.parallelPairs || 1);
     // При отключении autoSpacing — очистить auto-значения, вернуться к config
     if (wasAutoOn && config.grid.autoSpacingPriority === 'off') {
       this.autoSpacingMap.clear();
@@ -408,133 +411,114 @@ export class GridStrategy {
     const skipReasons: Set<string> = new Set();
     const addSkip = (reason: string) => { skipReasons.add(reason); };
 
+    // Pass 1: compute eligible orders sequentially (no API calls).
+    // Reserves balance (freeUSDT / freeCrypto) and mutates level.price for midpoint sells.
+    type PendingOrder = { level: GridLevelState; side: 'buy' | 'sell'; amount: number };
+    const pendingOrders: PendingOrder[] = [];
+
     for (const level of sortedLevels) {
       if (level.orderId || level.filled) continue;
-      if (ordersPlaced >= maxNewOrders) { addSkip('max orders'); break; }
+      if (pendingOrders.length >= maxNewOrders) { addSkip('max orders'); break; }
 
-      try {
-        // Bollinger adaptive: apply multiplier per side
-        const sideMultiplier = level.side === 'buy' ? bbAdaptive.buyMultiplier : bbAdaptive.sellMultiplier;
-        const orderBudget = baseOrderBudget * sideMultiplier;
-        let amount = this.roundAmountForMarket(orderBudget / level.price, precision.amountPrecision);
+      const sideMultiplier = level.side === 'buy' ? bbAdaptive.buyMultiplier : bbAdaptive.sellMultiplier;
+      const orderBudget = baseOrderBudget * sideMultiplier;
+      let amount = this.roundAmountForMarket(orderBudget / level.price, precision.amountPrecision);
 
-        // Bump up to exchange minimum if too small, but don't exceed budget
-        if (amount < precision.minAmount) {
-          if (precision.minAmount * level.price > orderBudget * 1.5) {
-            addSkip('budget too small');
-            continue;
-          }
-          amount = precision.minAmount;
-        }
-        if (amount * level.price < precision.minCost) {
-          const minAmountForCost = Math.ceil((precision.minCost / level.price) * Math.pow(10, precision.amountPrecision)) / Math.pow(10, precision.amountPrecision);
-          if (minAmountForCost * level.price > orderBudget * 1.5) {
-            addSkip('below minCost');
-            continue;
-          }
-          amount = Math.max(amount, minAmountForCost);
-        }
-
-        if (level.side === 'buy' && level.price < currentPrice) {
-          // Buy-freeze: skip if this base is frozen via /freezebuy
-          if (this.state.isBuyBlocked(base)) {
-            addSkip('buy frozen');
-            continue;
-          }
-          // Block new buy orders during market protection (panic / BTC watchdog)
-          if (this._marketProtectionActive) {
-            addSkip('market protection');
-            continue;
-          }
-          // RSI + EMA filter
-          const buyCheck = this.isBuyAllowed(symbol);
-          if (!buyCheck.allowed) {
-            addSkip(buyCheck.reason);
-            continue;
-          }
-          let orderCost = amount * level.price;
-          if (freeUSDT < orderCost) {
-            // Fallback: buy as much as we can afford (>= minAmount and minCost)
-            const availableAmount = this.roundAmountForMarket(freeUSDT / level.price, precision.amountPrecision);
-            const availableCost = availableAmount * level.price;
-            if (availableAmount >= precision.minAmount && availableCost >= precision.minCost) {
-              this.log.info(`Buy reduced (low USDT): ${amount} → ${availableAmount} (${(availableAmount/amount*100).toFixed(0)}% of target)`, { symbol });
-              amount = availableAmount;
-              orderCost = availableCost;
-            } else {
-              addSkip('low USDT');
-              continue;
-            }
-          }
-          const order = await this.exchange.withRetry(
-            () => this.exchange.createLimitBuy(symbol, amount, level.price, 'grid'),
-            `Grid buy ${symbol} @ ${level.price}`,
-          );
-          level.orderId = order.id;
-          level.amount = amount;
-          freeUSDT -= orderCost;
-          // Deduct from balance cache (with ~0.2% fee buffer) for parallel pair accuracy
-          this.exchange.deductCachedBalance('USDT', orderCost);
-          ordersPlaced++;
-        } else if (level.side === 'sell' && level.price > currentPrice) {
-          // Guard: midpoint between spacing price and break-even, if allowed loss ≤ maxSellLossPercent% of avgEntry.
-          // Otherwise skip placement (retire level) — rely on existing higher sells.
-          const pos = this.state.getPosition(symbol);
-          const breakEvenMult = 1 + (this.config.minSellProfitPercent / 100);
-          const lossMult = 1 - (this.config.maxSellLossPercent / 100);
-          const minSellPrice = pos.avgEntryPrice * breakEvenMult;
-          if (pos.avgEntryPrice > 0 && level.price < minSellPrice) {
-            if (minSellPrice <= currentPrice) {
-              // break-even below current — raising to break-even would fill immediately. Skip.
-              addSkip('below entry');
-              continue;
-            }
-            const midpoint = (level.price + minSellPrice) / 2;
-            const lossThreshold = pos.avgEntryPrice * lossMult;
-            if (midpoint > lossThreshold) {
-              const midPrice = this.roundPriceForMarket(midpoint, precision.pricePrecision);
-              if (midPrice !== level.price) {
-                this.log.info(`Grid sell midpoint: ${level.price} → ${midPrice} (break-even=${minSellPrice.toFixed(6)}, avgEntry=${pos.avgEntryPrice.toFixed(6)})`, { symbol });
-                level.price = midPrice;
-              }
-            } else {
-              // Midpoint would cause > maxSellLossPercent% loss — skip placement
-              addSkip(`midpoint >${this.config.maxSellLossPercent}% loss`);
-              continue;
-            }
-          }
-          // Check if we have enough free crypto to place this sell
-          if (freeCrypto < amount) {
-            // Fallback: sell as much as we have (>= minAmount and minCost)
-            const availableAmount = this.roundAmountForMarket(freeCrypto, precision.amountPrecision);
-            if (availableAmount >= precision.minAmount && availableAmount * level.price >= precision.minCost) {
-              this.log.info(`Sell reduced (low ${base}): ${amount} → ${availableAmount} (${(availableAmount/amount*100).toFixed(0)}% of target)`, { symbol });
-              amount = availableAmount;
-            } else {
-              addSkip(`low ${base}`);
-              continue;
-            }
-          }
-          const order = await this.exchange.withRetry(
-            () => this.exchange.createLimitSell(symbol, amount, level.price, 'grid'),
-            `Grid sell ${symbol} @ ${level.price}`,
-          );
-          level.orderId = order.id;
-          level.amount = amount;
-          level.placedAt = Date.now();
-          // Subtract placed amount from tracked free balance (for subsequent sell levels)
-          freeCrypto -= amount;
-          this.exchange.deductCachedBalance(base, amount);
-          ordersPlaced++;
-        }
-      } catch (err) {
-        const errStr = String(err);
-        if (errStr.includes('InsufficientFunds') || errStr.includes('Insufficient balance')) {
-          addSkip('insufficient balance');
-          break; // no point trying remaining levels if balance is depleted
-        }
-        this.log.error(`Failed to place grid order: ${err}`, { symbol });
+      if (amount < precision.minAmount) {
+        if (precision.minAmount * level.price > orderBudget * 1.5) { addSkip('budget too small'); continue; }
+        amount = precision.minAmount;
       }
+      if (amount * level.price < precision.minCost) {
+        const minAmountForCost = Math.ceil((precision.minCost / level.price) * Math.pow(10, precision.amountPrecision)) / Math.pow(10, precision.amountPrecision);
+        if (minAmountForCost * level.price > orderBudget * 1.5) { addSkip('below minCost'); continue; }
+        amount = Math.max(amount, minAmountForCost);
+      }
+
+      if (level.side === 'buy' && level.price < currentPrice) {
+        if (this.state.isBuyBlocked(base)) { addSkip('buy frozen'); continue; }
+        if (this._marketProtectionActive) { addSkip('market protection'); continue; }
+        const buyCheck = this.isBuyAllowed(symbol);
+        if (!buyCheck.allowed) { addSkip(buyCheck.reason); continue; }
+        let orderCost = amount * level.price;
+        if (freeUSDT < orderCost) {
+          const availableAmount = this.roundAmountForMarket(freeUSDT / level.price, precision.amountPrecision);
+          const availableCost = availableAmount * level.price;
+          if (availableAmount >= precision.minAmount && availableCost >= precision.minCost) {
+            this.log.info(`Buy reduced (low USDT): ${amount} → ${availableAmount} (${(availableAmount/amount*100).toFixed(0)}% of target)`, { symbol });
+            amount = availableAmount;
+            orderCost = availableCost;
+          } else {
+            addSkip('low USDT');
+            continue;
+          }
+        }
+        freeUSDT -= orderCost;
+        this.exchange.deductCachedBalance('USDT', orderCost);
+        pendingOrders.push({ level, side: 'buy', amount });
+
+      } else if (level.side === 'sell' && level.price > currentPrice) {
+        const pos = this.state.getPosition(symbol);
+        const breakEvenMult = 1 + (this.config.minSellProfitPercent / 100);
+        const lossMult = 1 - (this.config.maxSellLossPercent / 100);
+        const minSellPrice = pos.avgEntryPrice * breakEvenMult;
+        if (pos.avgEntryPrice > 0 && level.price < minSellPrice) {
+          if (minSellPrice <= currentPrice) { addSkip('below entry'); continue; }
+          const midpoint = (level.price + minSellPrice) / 2;
+          const lossThreshold = pos.avgEntryPrice * lossMult;
+          if (midpoint > lossThreshold) {
+            const midPrice = this.roundPriceForMarket(midpoint, precision.pricePrecision);
+            if (midPrice !== level.price) {
+              this.log.info(`Grid sell midpoint: ${level.price} → ${midPrice} (break-even=${minSellPrice.toFixed(6)}, avgEntry=${pos.avgEntryPrice.toFixed(6)})`, { symbol });
+              level.price = midPrice;
+            }
+          } else {
+            addSkip(`midpoint >${this.config.maxSellLossPercent}% loss`);
+            continue;
+          }
+        }
+        if (freeCrypto < amount) {
+          const availableAmount = this.roundAmountForMarket(freeCrypto, precision.amountPrecision);
+          if (availableAmount >= precision.minAmount && availableAmount * level.price >= precision.minCost) {
+            this.log.info(`Sell reduced (low ${base}): ${amount} → ${availableAmount} (${(availableAmount/amount*100).toFixed(0)}% of target)`, { symbol });
+            amount = availableAmount;
+          } else {
+            addSkip(`low ${base}`);
+            continue;
+          }
+        }
+        freeCrypto -= amount;
+        this.exchange.deductCachedBalance(base, amount);
+        pendingOrders.push({ level, side: 'sell', amount });
+      }
+    }
+
+    // Pass 2: fire API calls in parallel batches of parallelOrders.
+    for (let i = 0; i < pendingOrders.length; i += this.parallelOrders) {
+      const batch = pendingOrders.slice(i, i + this.parallelOrders);
+      await Promise.all(batch.map(async (pending) => {
+        try {
+          const order = pending.side === 'buy'
+            ? await this.exchange.withRetry(
+                () => this.exchange.createLimitBuy(symbol, pending.amount, pending.level.price, 'grid'),
+                `Grid buy ${symbol} @ ${pending.level.price}`,
+              )
+            : await this.exchange.withRetry(
+                () => this.exchange.createLimitSell(symbol, pending.amount, pending.level.price, 'grid'),
+                `Grid sell ${symbol} @ ${pending.level.price}`,
+              );
+          pending.level.orderId = order.id;
+          pending.level.amount = pending.amount;
+          if (pending.side === 'sell') pending.level.placedAt = Date.now();
+          ordersPlaced++;
+        } catch (err) {
+          const errStr = String(err);
+          if (errStr.includes('InsufficientFunds') || errStr.includes('Insufficient balance')) {
+            addSkip('insufficient balance');
+          } else {
+            this.log.error(`Failed to place grid order: ${err}`, { symbol });
+          }
+        }
+      }));
     }
 
     // Log skip summary — only when reasons change from last tick
