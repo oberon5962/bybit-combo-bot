@@ -313,15 +313,28 @@ export class GridStrategy {
     }
 
     // Sell levels above price — only if no preserved sells from split rebalance
-    // Cap accumulated sells to prevent unbounded growth from repeated split rebalances
-    if (existingSells.length > this.maxOpenOrdersPerPair) {
+    // Cap accumulated sells to prevent unbounded growth from repeated split rebalances.
+    // Condition: trim when preserved sells exceed the sell portion of the grid (sellLevels),
+    // not maxOpenOrdersPerPair — otherwise buy levels can never be placed (max orders hit).
+    if (existingSells.length > sellLevels) {
       const excess = existingSells.length - sellLevels;
-      if (excess > 0) {
-        // Remove farthest sells (highest price) to stay within limits
-        levels.sort((a, b) => b.price - a.price);
-        levels.splice(0, excess);
-        levels.sort((a, b) => a.price - b.price);
+      // Sort descending: highest-priced sells first (farthest from current price)
+      levels.sort((a, b) => b.price - a.price);
+      // Cancel the farthest sell orders on exchange before removing from state
+      // to prevent silent fills of untracked orders
+      const toCancel = levels.filter(l => l.side === 'sell').slice(0, excess);
+      for (const s of toCancel) {
+        if (s.orderId) {
+          try {
+            await this.exchange.cancelOrder(s.orderId, symbol);
+            this.log.info(`Grid trim excess sell: cancelled ${symbol} @ ${s.price} (reducing ${existingSells.length} → ${sellLevels} sells)`);
+          } catch (err) {
+            this.log.warn(`Grid trim excess sell: cancel failed for ${symbol} @ ${s.price}: ${sanitizeError(err)}`);
+          }
+        }
       }
+      levels.splice(0, excess);
+      levels.sort((a, b) => a.price - b.price);
     }
     if (existingSells.length === 0) {
       for (let i = 1; i <= sellLevels; i++) {
