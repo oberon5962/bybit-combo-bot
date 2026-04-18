@@ -378,6 +378,61 @@ Grid-ордера — лимитные, исполняются напрямую 
 8. **BTC Watchdog** — BTC упал на 3%+ за час → пауза всех покупок
 9. **RSI + EMA фильтры** — блокируют grid buy при overbought / bearish crossover
 
+### Max Drawdown — подробно
+
+**Где задаётся:** `config.jsonc` → `risk.maxDrawdownPercent` (текущее 15, рекомендуемое 25-30 для grid-бота).
+
+**Формула:**
+```
+drawdown = (peakCapital − currentPortfolio) / peakCapital × 100
+```
+
+- **`peakCapital`** — пиковая стоимость портфеля за всё время работы бота (USDT free + все позиции × текущая рыночная цена). Обновляется каждый тик ([combo-manager.ts:403-405](src/strategies/combo-manager.ts#L403-L405))
+- **`currentPortfolio`** — текущая стоимость (то же: USDT + позиции × current price)
+- Проверка: если `drawdown > maxDrawdownPercent` → halt ([combo-manager.ts:413](src/strategies/combo-manager.ts#L413))
+
+**Учитываются нереализованные убытки.** Если купил 10 SUI по $1.00, цена упала до $0.80 — позиция уже даёт -20% и это в `currentPortfolio`, даже если не продавал.
+
+**Учёт депозитов/выводов** ([combo-manager.ts:381-391](src/strategies/combo-manager.ts#L381-L391)):
+- При депозите извне — `startingCapital` и `peakCapital` увеличиваются на сумму депозита (не триггерит ложный PTP)
+- При выводе — оба уменьшаются, `peakCapital` clamp'ится до `max(current, startingCapital)` (не триггерит ложный drawdown)
+
+**Что происходит при триггере:**
+1. `state.halted = true` установлен
+2. `return` из функции
+3. ❌ НЕТ market-продажи позиций (в отличие от SL/TP/sellall)
+4. ❌ НЕТ отмены ордеров (в отличие от SL/TP)
+5. Telegram-алерт: `🚨 MAX DRAWDOWN X.X%  Peak: $Y → $Z USDT  Bot HALTED!`
+
+**Во время halt:**
+- Telegram-команды работают (`/run`, `/status`, `/buy` — обрабатываются до halted-check в [combo-manager.ts:262](src/strategies/combo-manager.ts#L262))
+- Ранний выход в [combo-manager.ts:264](src/strategies/combo-manager.ts#L264) — `processPair` не запускается
+- Grid.evaluate() не вызывается → **ребаланс не сработает**, fills не обрабатываются, counter-orders не ставятся
+- Лимитные ордера на бирже **продолжают жить** — биржа может их исполнить в любой момент (но бот об этом узнает только после `/run` + sync)
+
+**Взаимодействие с `stopLossPercent`:**
+- SL per-pair (20% от avgEntry одной пары) → продаёт только эту пару, остальные работают
+- maxDrawdown per-portfolio (16% от пика) → halt всего, ничего не продаётся
+- Что сработает раньше — зависит от сценария:
+  - **Изолированный крах пары** (-25% по одной) → SL сработает первым (вклад в портфель ~3.5%)
+  - **Рыночный обвал** (-15% все сразу) → maxDrawdown сработает первым
+  - **Комбинированный** — сначала SL по наиболее убыточной, потом может сработать maxDrawdown если убытки продолжаются
+
+**Возобновление:**
+- `/run` в Telegram — сбрасывает `halted`, resume без рестарта процесса
+- Или вручную: остановить процесс → `halted: false` в `bot-state.json` → запуск
+- `peakCapital` **не сбрасывается** при resume — новый отсчёт drawdown пойдёт от того же пика. Пик переопределится только если портфель вырастет выше него.
+
+**Рекомендации по значениям:**
+
+| Цель | `maxDrawdownPercent` | `stopLossPercent` |
+|---|---|---|
+| Переживать коррекции, накапливать | 25-30% | 18-20% |
+| Сбалансированно | 20% | 15% |
+| Жёсткая защита капитала | 15% | 10% |
+
+Исторические просадки альткоинов: май 2021 до -80%, LUNA 2022 до -90%, декабрь 2024 до -35%, апрель 2025 до -55%. 15% maxDrawdown = halt при обычной коррекции рынка.
+
 ### Процедура закрытия позиции (SL/TP)
 
 1. Отменяются все grid-ордера по паре (`grid.cancelAll`)
