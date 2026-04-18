@@ -967,7 +967,52 @@ export class GridStrategy {
     // Counter-sell midpoint-halving trailing (после split rebalance DOWN).
     // Шаг 4 из спецификации: каждый nextStepAt-таймер делим пополам расстояние до virtualNewSellPrice.
     // Защита oldBreakEven только на первом шаге (уже применена при ребалансе в step 2).
-    if (this.config.counterSellTrailStepHours > 0) {
+    if (this.config.counterSellTrailStepHours === 0) {
+      // Отключено: для каждого level с незавершённым halving — прыгаем сразу на virtualNewSellPrice.
+      const flushLevels = this.state.getGridLevels(symbol);
+      let flushChanged = false;
+      for (const level of flushLevels) {
+        if (level.side !== 'sell' || level.amount <= 0) continue;
+        if (!level.virtualNewSellPrice || level.virtualNewSellPrice <= 0) continue;
+        const target = level.virtualNewSellPrice;
+        if (level.price <= target) {
+          level.nextStepAt = undefined;
+          level.virtualNewSellPrice = undefined;
+          flushChanged = true;
+          continue;
+        }
+        if (level.orderId) {
+          try {
+            const orderStatus = await this.exchange.fetchOrder(level.orderId, symbol);
+            if (orderStatus.filled > 0) {
+              level.nextStepAt = undefined;
+              level.virtualNewSellPrice = undefined;
+              flushChanged = true;
+              continue;
+            }
+            await this.exchange.cancelOrder(level.orderId, symbol);
+            const order = await this.exchange.withRetry(
+              () => this.exchange.createLimitSell(symbol, level.amount, target, 'grid'),
+              `Counter-sell trail flush ${symbol} @ ${target}`,
+            );
+            this.log.info(`Counter-sell trail flush (stepHours=0): ${symbol} ${level.price.toFixed(6)} → ${target.toFixed(6)}`, { symbol });
+            level.price = target;
+            level.orderId = order.id;
+            level.placedAt = Date.now();
+          } catch (err) {
+            this.log.warn(`Counter-sell trail flush failed for ${symbol}: ${sanitizeError(err)}`);
+            level.orderId = undefined;
+            level.price = target;
+          }
+        } else {
+          level.price = target;
+        }
+        level.nextStepAt = undefined;
+        level.virtualNewSellPrice = undefined;
+        flushChanged = true;
+      }
+      if (flushChanged) this.state.setGridLevels(symbol, flushLevels);
+    } else if (this.config.counterSellTrailStepHours > 0) {
       const trailingLevels = this.state.getGridLevels(symbol);
       let trailingChanged = false;
       const stepMs = this.config.counterSellTrailStepHours * 3600000;
