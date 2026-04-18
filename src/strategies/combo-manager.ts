@@ -412,7 +412,7 @@ export class ComboManager {
         : 0;
       if (drawdown > this.config.risk.maxDrawdownPercent) {
         this.log.error(`MAX DRAWDOWN EXCEEDED: ${drawdown.toFixed(1)}% > ${this.config.risk.maxDrawdownPercent}%`);
-        this.log.error('HALTING ALL TRADING.');
+        this.log.error(`HALTING ALL TRADING. ${HALT_HINT}`);
         this.tg.sendAlert(`🚨 <b>MAX DRAWDOWN ${drawdown.toFixed(1)}%</b>\nPeak: ${this.state.peakCapital.toFixed(2)} → ${totalPortfolioUSDT.toFixed(2)} USDT\nBot HALTED!\n${HALT_HINT}`);
         this.state.halted = true;
         return;
@@ -438,7 +438,7 @@ export class ComboManager {
       await this.sellEverything();
       this.state.halted = true;
       this.tg.sendAlert(`🎉 <b>PORTFOLIO TAKE-PROFIT!</b>\nStart: ${this.state.startingCapital.toFixed(2)} → ${totalPortfolioUSDT.toFixed(2)} USDT (+${profitPercent.toFixed(1)}%)\nAll sold. Bot halted.\n${HALT_HINT}`);
-      this.log.info('All positions sold. Bot halted. Congratulations!');
+      this.log.info(`All positions sold. Bot halted. Congratulations! ${HALT_HINT}`);
       return;
     }
 
@@ -880,7 +880,7 @@ export class ComboManager {
     if (count >= maxConsecutive) {
       // Too many SL in a row — full halt
       this.state.haltPair(symbol, `${reason} [${count}x SL — halted]`);
-      this.log.warn(`${symbol} HALTED — ${count} consecutive stop-losses. Edit bot-state.json to resume.`);
+      this.log.warn(`${symbol} HALTED — ${count} consecutive stop-losses. ${HALT_HINT}`);
       this.tg.sendAlert(`🛑 <b>${symbol} HALTED</b>\n${count}x SL подряд — пара остановлена.\n${HALT_HINT}`);
     } else if (cooldownSec > 0) {
       // Cooldown — pause and resume later
@@ -891,7 +891,7 @@ export class ComboManager {
     } else {
       // cooldownSec = 0 — halt forever (old behavior)
       this.state.haltPair(symbol, reason);
-      this.log.warn(`${symbol} HALTED after stop-loss. Edit bot-state.json to resume.`);
+      this.log.warn(`${symbol} HALTED after stop-loss. ${HALT_HINT}`);
       this.tg.sendAlert(`🛑 <b>${symbol} HALTED</b>\nSL сработал, cooldown=0 — пара остановлена навсегда.\n${HALT_HINT}`);
     }
   }
@@ -2431,7 +2431,7 @@ export class ComboManager {
 
   private async cmdStop(): Promise<void> {
     this.state.halted = true;
-    this.log.info('Telegram /stop: bot halted');
+    this.log.info(`Telegram /stop: bot halted. ${HALT_HINT}`);
     this.tg.sendReply(`Бот остановлен (/stop). Ордера остаются на бирже.\n${HALT_HINT}`);
   }
 
@@ -2451,7 +2451,7 @@ export class ComboManager {
     this.tg.sendReply('Выполняю /sellall — отмена ордеров и продажа всех позиций...');
     await this.sellEverything();
     this.state.halted = true;
-    this.log.info('Telegram /sellall: all positions sold, bot halted');
+    this.log.info(`Telegram /sellall: all positions sold, bot halted. ${HALT_HINT}`);
 
     const balance = await this.exchange.fetchBalance('USDT');
     this.tg.sendReply(`/sellall выполнен. USDT: ${balance.total.toFixed(2)}. Бот остановлен.\n${HALT_HINT}`);
