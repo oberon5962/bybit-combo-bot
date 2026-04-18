@@ -125,6 +125,23 @@ bybit-combo-bot/
 - Fill-уведомления при исполнении grid-ордеров
 - Алерты: Stop-Loss, Trailing SL, Take-Profit, Max Drawdown, Portfolio TP
 
+### Состояния пар
+
+Каждая пара в `config.jsonc` может иметь поле `state`. Состояние синхронизируется между конфигом и Telegram-командами (hot-reload ~30с).
+
+| Состояние | Маркер | Описание |
+|---|---|---|
+| `unfreeze` | _(нет)_ | Обычный режим. Grid + DCA + мета-сигналы работают в полную силу. Это состояние по умолчанию. |
+| `freezebuy` | 🧊 | Покупки заморожены. Все buy-ордера отменяются, новые не ставятся. Sell-ордера работают в обычном режиме. SL/TP/TSL активны. Используется когда нужно распродать позицию без новых докупок. |
+| `sellgrid` | 🔻 | Режим лестничной распродажи. После каждого sell fill ставится новый sell выше (вместо counter-buy) — позиция плавно распродаётся вверх. Авто-включает freezebuy. Когда позиция исчерпана (< minAmount) — пара автоматически переводится в freezebuy. |
+| `freeze` | 🧊❄️ | Полная заморозка. Grid/DCA/мета-сигналы не работают, сетка не строится. **Только SL/TP/TSL продолжают защищать позицию.** Все ордера (buy и sell) отменяются при включении. Используется для временной полной остановки торговли по паре без потери позиции. |
+| `deleted` | _(скрыт)_ | Пара удалена из торговли. Скрыта из `/status`, `/stats`, BOT SUMMARY. Не учитывается в аллокациях. Позиция и история сохраняются в `bot-state.json`. При режиме `allocationPercentMode: "auto"` — оставшиеся пары автоматически получают пересчитанные доли. |
+
+**Авто-переводы:**
+- Пара автоматически переходит в `freezebuy` если в режиме `sellgrid` остаток позиции упал ниже `dustThresholdUSDT` (пыль) — покупки блокируются, но существующие sell-ордера продолжают исполняться.
+- `/sellgrid` авто-включает freezebuy.
+- `/unsellgrid` авто-разблокирует покупки (переходит в `unfreeze`).
+
 ### Telegram-команды
 
 Управление ботом через Telegram (команды обрабатываются даже когда бот остановлен):
@@ -132,23 +149,25 @@ bybit-combo-bot/
 | Команда | Описание |
 |---|---|
 | `/start` | Приветствие + список всех команд по группам |
-| `/status` | Сводка: капитал, PnL, позиции по всем парам (с маркерами 🧊/🔻) |
+| `/status` | Сводка: капитал, PnL, позиции по всем парам (с маркерами 🧊/🔻/🧊❄️) |
+| `/stats` | Статистика по парам (sorted by PnL desc) + цена + дистанция до nearest buy/sell |
+| `/orders` | Показать все открытые ордера |
+| `/buy` | Wizard покупки (без args — кнопки валют + сумм). Работает даже на замороженной паре. |
+| `/buy SUI 10` | Купить 10 токенов SUI за USDT (market order, без проверки состояния пары) |
+| `/buy SUI BTC 10` | Купить 10 токенов SUI за BTC (market order) |
+| `/sellall` | Продать все позиции + отменить ордера + halt |
+| `/cancelorders` | Отменить все ордера + сбросить grid + halt |
+| `/regrid` | Сброс сетки (cancel orders) + перестройка с текущим spacing. Sell-ордера с counter-sell metadata (`oldBreakEven`, `originalPlannedSellPrice`) сохраняются — trailing продолжает работать после перестройки. |
 | `/stop` | Остановить торговлю (halted=true) |
 | `/run` | Возобновить торговлю (сбрасывает halt, cooldown, consecutiveSL) |
-| `/sellall` | Продать все позиции + отменить ордера + halt |
-| `/buy` | Wizard покупки (без args — кнопки валют + сумм) |
-| `/buy SUI 10` | Купить 10 токенов SUI за USDT (market order) |
-| `/buy SUI BTC 10` | Купить 10 токенов SUI за BTC (market order) |
-| `/orders` | Показать все открытые ордера |
-| `/cancelorders` | Отменить все ордера + сбросить grid + halt |
-| `/stats` | Статистика по парам (sorted by PnL desc) + цена + дистанция до nearest buy/sell |
-| `/regrid` | Сброс сетки (cancel orders) + перестройка с текущим spacing |
 | `/freezebuy` | Заморозить покупки по валюте (wizard или `/freezebuy XRP`). Маркер 🧊 |
 | `/unfreezebuy` | Разморозить покупки + force-rebalance |
 | `/sellgrid` | Sellgrid-режим: после sell fill ставить новый sell выше (ladder). Авто-freeze. Маркер 🔻 |
-| `/unsellgrid` | Отключить sellgrid + разморозить buy |
-| `/freeze` | Полная заморозка пары: stop grid/DCA/meta, SL/TP работают. Маркер 🧊❄️ |
+| `/unsellgrid` | Отключить sellgrid + разморозить buy (→ `unfreeze`) |
+| `/freeze` | Полная заморозка пары: отменить все ордера (buy и sell), прекратить grid/DCA/meta. SL/TP/TSL продолжают работать. Маркер 🧊❄️ |
 | `/unfreeze` | Полная разморозка пары (grid/DCA/meta возобновляются) + force-rebalance |
+| `/addtoken` | Добавить новую валюту в торговлю (wizard с вводом тикера и аллокации) |
+| `/removetoken` | Удалить валюту из торговли (переводит в `deleted`, при `auto` режиме пересчитывает аллокации) |
 
 **Два вида PnL:**
 - `/stats` — **Realized PnL** (per-pair): только закрытые сделки (`earned − spent − fees`). Может показывать большой минус если крипта куплена, но ещё не продана — это нормально, позиция удерживается
@@ -157,6 +176,23 @@ bybit-combo-bot/
 Ручные покупки через `/buy` не входящих в конфиг пар отслеживаются отдельно (`manualPairs`), отображаются в `/status` и `/orders`, продаются по `/sellall`.
 
 **Меню команд** регистрируется автоматически при каждом запуске бота через `setMyCommands` API.
+
+### Поведение `/freeze` и `/buy` на замороженной паре
+
+**`/freeze XRP` делает:**
+1. Отменяет **все** открытые ордера по паре (и buy, и sell)
+2. Добавляет пару в `frozenPairs` + `blockedBuyBases` (переживает рестарт)
+3. В `processPair` — ранний выход: grid, DCA, мета-сигналы не запускаются
+4. SL/TP/TSL **продолжают работать** (проверяются до freeze-check)
+5. Записывает `state: "freeze"` в `config.jsonc`
+
+**`/buy XRP 10` на замороженной паре:**
+- **Выполнится** — `cmdBuy` не проверяет состояние пары (`isPairFrozen` / `isBlockedBuy`)
+- Выставляет рыночный ордер, обновляет позицию в `bot-state.json`
+- Новые grid-ордера автоматически **не** выставятся — пара остаётся frozen
+- Чтобы бот снова начал торговать по паре — нужен `/unfreeze XRP`
+
+> Таким образом, `/freeze` + `/buy` — это способ докупить вручную без автоматической торговли. `/unfreeze` после этого запустит force-rebalance и выстроит новую сетку вокруг текущей цены.
 
 ### Telegram через прокси (Custom API URL)
 
@@ -910,6 +946,43 @@ Per-pair state control, bidirectional config sync, RSI/EMA/BB в summary, фик
 - **Hot-reload state detection**: `prevPairs` теперь сохраняется ДО `this.config = newConfig`. Раньше сравнение всегда давало oldState === newState (массивы уже одинаковые)
 - **Freeze охватывает все affected symbols**: `applyPairState(freeze)` итерирует все пары (включая `manualPairs`) с тем же base-тикером, как и `cmdFreezeBuy`
 - **Zombie sell levels**: sell-уровни с `amount=0`, без `orderId` и без `filled` (артефакт после TSL partial-fill) отфильтровываются в `setGridLevels` и больше не зависают в pending
+
+### v2.4.0 (2026-04-19)
+
+Аудит конфига, `qtySigmas`, защита metadata при `/regrid`, фиксы dust-loop и Telegram HTML.
+
+**`qtySigmas` — управление уровнем уверенности auto-spacing:**
+- Новый параметр `grid.qtySigmas` (допустимые значения: 1, 2, 3) определяет сигму для `trimOutliers()` в `volatility.ts`
+- 1σ — агрессивная фильтрация выбросов (compact spacing), 3σ — консервативная (широкий spacing)
+- Передаётся в `analyzeAllSymbols` → `analyzeSymbol` → `trimOutliers`
+- Валидация в `config.ts`: только `[1, 2, 3]` — иные значения запрещены
+
+**`/regrid` сохраняет counter-sell metadata:**
+- Раньше `/regrid` обнулял все grid-уровни через `setGridLevels(sym, [])`, теряя `oldBreakEven` и `originalPlannedSellPrice`
+- Теперь `cmdResetGrid` перед очисткой сохраняет sell-уровни с заполненной metadata, сбрасывает `orderId`/`filled`/`virtualNewSellPrice`/`nextStepAt` (trailing перезапускается), сохраняет `oldBreakEven` + `originalPlannedSellPrice`
+- `initGrid` подхватывает preserved sells как `existingSells` (line 304 в `grid.ts`) — механизм уже был готов
+- Trailing продолжает работу после `/regrid` с теми же защитами oldBreakEven
+
+**`allocationPercentMode: "auto"` при удалении пары:**
+- `applyPairState('deleted')` теперь вызывает `rewritePairAllocations` — пересчитывает доли для оставшихся активных пар
+- Раньше пересчёт происходил только в `cmdRemoveToken`, теперь и при hot-reload смены состояния на `deleted`
+
+**Новые Telegram-команды `/addtoken` / `/removetoken`:**
+- `/addtoken` — wizard добавления новой валюты в торговлю
+- `/removetoken` — wizard удаления (переводит в `deleted`, при `auto` режиме пересчитывает аллокации)
+- Добавлены в меню `setMyCommands` (`registerCommands`)
+
+**Фиксы:**
+- **Dust loop** (`applyPairState('freezebuy')` не чистил `sellGridBases`): пара в `sellgrid` + `dustThresholdUSDT` каждый тик заново переводила себя в `freezebuy`. Добавлен `removeSellGridBase(base)` в ветку freezebuy
+- **Telegram HTML 400 ошибка**: символ `<` в dust-алерте (`остаток < X$`) интерпретировался как HTML-тег. Исправлено на `&lt;`
+- **Dust: freeze → freezebuy**: пара с исчерпанным sellgrid переходит в `freezebuy` (а не `freeze`) — оставшиеся sell-ордера продолжают исполняться
+- **`orphanSellMaxPerTick` валидация**: верхний лимит поднят с 20 до 100 (конфиг использует 30)
+- **`config-writer.ts` Bug #7**: определение конца блока `pairs` теперь пропускает строки-комментарии (`//`)
+
+**README:**
+- Добавлена секция «Состояния пар» с описанием всех состояний (`unfreeze`, `freezebuy`, `sellgrid`, `freeze`, `deleted`) и правилами авто-переходов
+- Расширена таблица Telegram-команд: добавлены `/addtoken`, `/removetoken`, уточнено поведение `/buy` и `/regrid`
+- Новая подсекция «Поведение `/freeze` и `/buy` на замороженной паре»
 
 ## Важные замечания
 
