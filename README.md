@@ -433,16 +433,77 @@ drawdown = (peakCapital − currentPortfolio) / peakCapital × 100
 
 Исторические просадки альткоинов: май 2021 до -80%, LUNA 2022 до -90%, декабрь 2024 до -35%, апрель 2025 до -55%. 15% maxDrawdown = halt при обычной коррекции рынка.
 
-### Процедура закрытия позиции (SL/TP)
+### Stop-Loss — подробно
+
+**Где задаётся:** `config.jsonc` → `risk.stopLossPercent` (текущее 20, рекомендуемое 18-20% для grid-бота). Связанные: `cooldownAfterSLSec` (пауза после SL, default 1800 = 30 мин), `cooldownMaxSL` (макс SL подряд до hard halt, default 3).
+
+**Формула (per-position):**
+```
+pnlPercent = (currentPrice − avgEntryPrice) / avgEntryPrice × 100
+```
+
+- **`avgEntryPrice`** — средняя цена покупки позиции: `positionCostBasis / positionAmount`. Усредняется вниз при grid-накоплении (каждая новая покупка на более низком уровне снижает avg)
+- **`currentPrice`** — рыночная цена сейчас (из тикера)
+- Проверка: если `pnlPercent ≤ -stopLossPercent` → триггер SL ([combo-manager.ts:769](src/strategies/combo-manager.ts#L769))
+
+**Dust guard** ([combo-manager.ts:753-761](src/strategies/combo-manager.ts#L753-L761)): если стоимость позиции `< minCost` биржи — SL пропускается (чтобы не зациклиться на пыли). Позиция остаётся, orphan-sell подберёт её на прибыльной цене.
+
+**Что происходит при триггере** ([combo-manager.ts:768-783](src/strategies/combo-manager.ts#L768-L783), `closePosition`):
+1. Отменяются **все grid-ордера** по паре (`grid.cancelAll(symbol)`)
+2. Poll (до 5 попыток × 1 сек) — ждём пока баланс освободится после отмен
+3. `sellAmount = min(freeBalance, positionAmount)` — не продаём больше свободного
+4. Округление до `amountPrecision` + проверка `minAmount` / `minCost`
+5. `createMarketSell(symbol, sellAmount, 'risk', 'stop-loss')` — рыночная продажа
+6. `addTrade(...)` + `reducePosition(...)` — фиксация убытка
+7. `handlePostSL(...)` — обработка cooldown / halt
+
+**Cooldown / consecutive SL** ([combo-manager.ts:859-897](src/strategies/combo-manager.ts#L859-L897)):
+- `consecutiveSL[symbol]` увеличивается на 1
+- **Если `consecutiveSL ≥ cooldownMaxSL` (3)**: `haltPair(symbol)` → полная заморозка **только этой пары** навсегда (до `/run`). Остальные пары работают.
+- **Иначе если `cooldownAfterSLSec > 0`**: пара ставится в cooldown до `Date.now() + cooldownSec × 1000`. Во время cooldown `processPair` её пропускает.
+- **Если `cooldownAfterSLSec = 0`**: haltPair навсегда (старое поведение).
+- `consecutiveSL[symbol]` сбрасывается на 0 **только** после профитной продажи (TP или успешный TSL) — несколько SL без профита между ними считаются подряд.
+
+**Trailing Stop-Loss (TSL) — защитная прибыль:**
+- Конфиг: `trailingSLPercent` (5% = drop от пика), `trailingSLActivationPercent` (3% = активация после профита)
+- Формула: после `pnlPercent ≥ trailingSLActivationPercent` обновляется `trailingPeak[symbol] = max(peak, currentPrice)` каждый тик
+- При `(trailingPeak − currentPrice) / trailingPeak × 100 ≥ trailingSLPercent` → market sell (reason='trailing-stop')
+- Если TSL продал в прибыль → `resetConsecutiveSL` (цикл не считается SL-неудачей)
+- Если TSL продал в убыток (rare: activation +3% → drop -5% = нетто -2%) → `handlePostSL` → cooldown как обычный SL
+- **Отключение TSL**: поставить `trailingSLPercent: 999` и `trailingSLActivationPercent: 999` (текущая конфигурация — TSL выключен)
+
+**Разница SL vs maxDrawdown:**
+
+| Параметр | Stop-Loss | Max Drawdown |
+|---|---|---|
+| Уровень | per-pair (одна позиция) | per-portfolio (весь капитал) |
+| База отсчёта | `avgEntryPrice` этой пары | `peakCapital` портфеля |
+| Действие | **market sell этой пары** + cooldown | **halt всего**, ничего не продаётся |
+| Ордера остальных пар | Работают | Висят на бирже, не обрабатываются |
+| Восстановление | Авто через 30 мин (cooldown) | Только ручной `/run` |
+
+**Рекомендации:**
+
+| Цель | `stopLossPercent` |
+|---|---|
+| Тугая защита капитала | 10-12% |
+| Сбалансированно | 15% |
+| Grid-friendly (даёт место усреднению) | 18-22% |
+| Выключить (продажи только через /sellall или maxDD) | 999 |
+
+Grid стратегия усредняет вниз через buy-уровни — это её механизм работы. Слишком тугой SL (10%) срабатывает на обычных откатах, не давая накоплению развернуться. Слишком широкий (25%+) — позиция становится тяжёлой, restoration требует существенного отскока.
+
+### Процедура закрытия позиции (closePosition)
+
+Общие шаги для SL, TSL, TP, Portfolio-TP:
 
 1. Отменяются все grid-ордера по паре (`grid.cancelAll`)
-2. Ожидание 1 секунду
-3. Загружаются свежие балансы
-4. `Math.min(free, positionAmount)` — не продаём больше доступного
-5. Округление до market precision (`Math.floor` + minAmount/minCost check)
-6. Market sell
-7. Обновление position + trade record
-8. Cooldown или halt в зависимости от consecutiveSL count
+2. Poll до 5 секунд — ждём освобождения баланса после отмен
+3. `Math.min(free, positionAmount)` — не продаём больше доступного
+4. Округление до market precision (`Math.floor` + minAmount/minCost check)
+5. `createMarketSell(symbol, amount, 'risk', reason)` — рыночная продажа
+6. Обновление position + trade record
+7. Cooldown или halt в зависимости от consecutiveSL count (только SL и losing TSL)
 
 ## Персистентность состояния
 
