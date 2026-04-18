@@ -84,7 +84,7 @@ export interface GridConfig {
   bollingerShiftLevels: number;     // сколько уровней перекинуть в пользу buy/sell (напр. 3)
 
   // Auto-adaptive spacing (на основе волатильности)
-  counterSellTrailStepHours: number;        // размер шага таймера midpoint-halving при ребалансе DOWN (часы, 0 = выключено)
+  counterSellTrailStepHours: number;        // шаг midpoint-halving при split rebalance DOWN (часы). >0=halving, 0=snap без halving, <0=trailing off
   minSellProfitPercent: number;             // минимальная прибыль для безубыточного sell (% над avgEntry, покрывает комиссии + буфер)
   maxSellLossPercent: number;               // максимальный убыток в midpoint-режиме (% ниже avgEntry, иначе skip)
   orphanSellMaxPerTick: number;             // максимум orphan-sell ордеров за один тик

@@ -236,10 +236,7 @@ export class ExchangeSync {
                 level.orderId = undefined;
                 level.filled = false;
                 if (counterSide === 'sell') {
-                  const syncPos = this.state.getPosition(symbol);
-                  level.oldBreakEven = syncPos.avgEntryPrice > 0
-                    ? syncPos.avgEntryPrice * (1 + this.config.grid.minSellProfitPercent / 100)
-                    : counterPrice;
+                  level.oldBreakEven = fillPrice * (1 + this.config.grid.minSellProfitPercent / 100);
                   level.originalPlannedSellPrice = counterPrice;
                   level.virtualNewSellPrice = undefined;
                   level.nextStepAt = undefined;

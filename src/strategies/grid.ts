@@ -254,7 +254,11 @@ export class GridStrategy {
             // Split rebalance: keep sell orders, rebuild only buy side
             await this.cancelBuySide(symbol);
             // Counter-sell midpoint-halving: step 1-2 of спецификации
-            await this.initCounterSellTrailing(symbol, currentPrice);
+            try {
+              await this.initCounterSellTrailing(symbol, currentPrice);
+            } catch (err) {
+              this.log.warn(`initCounterSellTrailing failed for ${symbol}: ${sanitizeError(err)}`);
+            }
           } else {
             // Full rebalance: cancel all and reinitialize
             await this.cancelAll(symbol);
@@ -810,12 +814,10 @@ export class GridStrategy {
             level.side = counterSide;
             level.price = counterPrice;
             level.placedAt = Date.now();
-            // Counter-sell trailing metadata: fixed at creation, used by split rebalance DOWN
+            // Counter-sell trailing metadata: fixed at creation, used by split rebalance DOWN.
+            // oldBreakEven = цена конкретной покупки, породившей этот counter-sell, + minSellProfitPercent
             if (counterSide === 'sell') {
-              const posForMeta = this.state.getPosition(symbol);
-              level.oldBreakEven = posForMeta.avgEntryPrice > 0
-                ? posForMeta.avgEntryPrice * (1 + this.config.minSellProfitPercent / 100)
-                : counterPrice;
+              level.oldBreakEven = actualPrice * (1 + this.config.minSellProfitPercent / 100);
               level.originalPlannedSellPrice = counterPrice;
               level.virtualNewSellPrice = undefined;
               level.nextStepAt = undefined;
@@ -840,10 +842,7 @@ export class GridStrategy {
             level.orderId = undefined;
             level.filled = false;
             if (counterSide === 'sell') {
-              const posForFail = this.state.getPosition(symbol);
-              level.oldBreakEven = posForFail.avgEntryPrice > 0
-                ? posForFail.avgEntryPrice * (1 + this.config.minSellProfitPercent / 100)
-                : counterPrice;
+              level.oldBreakEven = actualPrice * (1 + this.config.minSellProfitPercent / 100);
               level.originalPlannedSellPrice = counterPrice;
               level.virtualNewSellPrice = undefined;
               level.nextStepAt = undefined;
