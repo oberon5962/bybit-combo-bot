@@ -1,8 +1,59 @@
 // ============================================================
 // Volatility Analysis — общий модуль для анализа волатильности
 // ============================================================
+//
+// АЛГОРИТМ (полный путь от свечей до spacing в config.jsonc):
+//
+// Шаг 1. Сбор данных
+//   Для каждой пары загружаем свечи по 4 периодам (24h/3d/7d/14d)
+//   и 3 таймфреймам (15m/1h/4h) → итого 12 наборов данных на пару.
+//   Больше таймфреймов = более полная картина: 15m ловит внутридневной шум,
+//   4h показывает структурные движения, 1h — баланс.
+//
+// Шаг 2. Метрики волатильности (analyzeSymbol)
+//   Из каждого набора свечей считаем:
+//   а) ATR (Average True Range) — средний истинный диапазон свечи в %
+//   б) ranges[] = (high−low)/close — относительный размах каждой свечи в %
+//   в) moves[]  = |close[i]−close[i-1]|/close[i-1] — межсвечное движение в %
+//
+//   Фильтрация выбросов (закон нормального распределения, правило 3σ):
+//   Удаляем значения выше μ + 3σ. Это устраняет flash-crash свечи
+//   (напр. внезапный памп/дамп на 15%), которые раздували бы среднее
+//   и делали spacing слишком широким. После фильтрации вычисляем
+//   перцентили уже на "очищенных" данных.
+//
+//   Рекомендации по spacing для одного набора:
+//   recBuySpacing  = P55(ranges) — 55% обычных свечей не дотянутся до
+//                   следующего buy-уровня, т.е. каждый fill = реальное движение
+//   recSellSpacing = max(P70(ranges), buy + 0.3%) — шире buy + минимум на
+//                   покрытие комиссий round-trip (0.1%+0.1%+0.1% запас)
+//
+// Шаг 3. Взвешенное среднее (computeRecommendation)
+//   12 значений recBuySpacing/recSellSpacing объединяются с весами.
+//   Свежие данные важнее старых, часовые важнее 15-минутных:
+//     24h/1h  → вес 2.0  (главный: текущая волатильность)
+//     3d/1h   → вес 1.5
+//     24h/4h  → вес 0.8
+//     7d/1h   → вес 1.0
+//     14d/15m → вес 0.05 (почти не влияет)
+//   Итог: одно число buySpacing = Σ(recBuy × w) / Σ(w)
+//
+//   Режим волатильности (для информации, не влияет на расчёт):
+//   ratio = ATR_24h / ATR_7d
+//   < 0.7  → 'low'    (рынок затих относительно недельной нормы)
+//   > 1.3  → 'high'   (рынок возбуждён, выше недельной нормы)
+//   иначе  → 'normal'
+//
+// Шаг 4. Safety margin и floor (в combo-manager.ts)
+//   buySpacing  × (1 − autoSpacingSafetyMarginPercent/100)
+//   floor: buy >= 0.3%, sell >= buy + 0.3%
+//
+// Шаг 5. Запись в config.jsonc (config-writer.ts)
+//   Атомарное обновление gridSpacingPercent/gridSpacingSellPercent для каждой пары.
+//   Hot-reload подхватывает через ~30с, новые значения применяются
+//   при следующем ребалансе сетки.
+//
 // Используется как ботом (auto-spacing), так и standalone скриптом (analyze-volatility.ts).
-// Все функции — чистая математика + загрузка свечей через callback.
 
 // ── Constants ──────────────────────────────────────────────
 
@@ -65,7 +116,10 @@ export type CandleFetcher = (
 
 // ── Helpers ────────────────────────────────────────────────
 
-/** 3σ rule: remove values beyond μ + sigmaMultiplier * σ (upper tail only, ranges are always > 0) */
+// Правило 3σ: удаляем выбросы в верхнем хвосте распределения.
+// Для нормально распределённых данных μ + 3σ охватывает 99.85% значений —
+// всё что выше почти наверняка flash-crash или API-аномалия.
+// Применяем только к верхнему хвосту т.к. ranges/moves всегда > 0.
 export function trimOutliers(values: number[], sigmaMultiplier = 3): number[] {
   if (values.length < 4) return values;
   const mean = values.reduce((s, v) => s + v, 0) / values.length;
@@ -74,6 +128,8 @@ export function trimOutliers(values: number[], sigmaMultiplier = 3): number[] {
   return values.filter(v => v <= upper);
 }
 
+// Линейная интерполяция между соседними элементами отсортированного массива.
+// Например P55 на массиве [0.3, 0.5, 0.8, 1.1, 1.5] → между индексами 2 и 3.
 export function percentile(sorted: number[], p: number): number {
   const idx = (p / 100) * (sorted.length - 1);
   const lo = Math.floor(idx);
@@ -89,6 +145,9 @@ export function round(n: number, decimals = 3): number {
 
 // ── Core Analysis ──────────────────────────────────────────
 
+// Анализирует один символ на одном таймфрейме за один период.
+// Возвращает CandleStats с метриками волатильности и рекомендациями spacing.
+// Вызывается 12 раз на пару (4 периода × 3 таймфрейма).
 export async function analyzeSymbol(
   fetchCandles: CandleFetcher,
   symbol: string,
@@ -98,7 +157,7 @@ export async function analyzeSymbol(
 ): Promise<CandleStats | null> {
   const since = Date.now() - periodHours * 60 * 60 * 1000;
 
-  // Fetch candles with pagination
+  // Загружаем свечи постранично (Bybit отдаёт max 1000 за раз)
   let allCandles: number[][] = [];
   let fetchSince = since;
   const tfMinutes: Record<string, number> = { '15m': 15, '1h': 60, '4h': 240 };
@@ -114,7 +173,7 @@ export async function analyzeSymbol(
     if (candles.length < limit) break;
   }
 
-  // Filter to period
+  // Отсекаем свечи за пределами периода и требуем минимум 10 штук
   allCandles = allCandles.filter(c => c[0] >= since);
   if (allCandles.length < 10) return null;
 
@@ -123,7 +182,9 @@ export async function analyzeSymbol(
   const lows = allCandles.map(c => c[3]);
   const currentPrice = closes[closes.length - 1];
 
-  // ATR
+  // ATR (Average True Range) в % от текущей цены.
+  // True Range = max(high−low, |high−prevClose|, |low−prevClose|).
+  // Учитывает гэпы между свечами в отличие от простого high−low.
   let atrSum = 0;
   for (let i = 1; i < allCandles.length; i++) {
     const tr = Math.max(
@@ -135,18 +196,24 @@ export async function analyzeSymbol(
   }
   const atrPct = (atrSum / (allCandles.length - 1)) / currentPrice * 100;
 
-  // Range percentiles (high-low)/close — trimmed by 3σ rule
+  // ranges[] = (high−low)/close × 100% — размах каждой свечи в %.
+  // Это основа для recBuySpacing/recSellSpacing: spacing должен быть
+  // чуть шире типичного размаха, иначе ордера срабатывают на внутрисвечном шуме.
+  // Фильтруем 3σ выбросы (flash-crash свечи), затем сортируем для перцентилей.
   const rangesRaw: number[] = allCandles.map(c => (c[2] - c[3]) / c[4] * 100);
   const ranges = trimOutliers(rangesRaw).sort((a, b) => a - b);
 
-  // Close-to-close absolute moves — trimmed by 3σ rule
+  // moves[] = |close[i]−close[i-1]|/close[i-1] × 100% — движение между закрытиями.
+  // Дополняет ranges: ranges показывает внутрисвечной шум,
+  // moves показывает реальное направленное движение цены.
   const movesRaw: number[] = [];
   for (let i = 1; i < closes.length; i++) {
     movesRaw.push(Math.abs(closes[i] - closes[i - 1]) / closes[i - 1] * 100);
   }
   const moves = trimOutliers(movesRaw).sort((a, b) => a - b);
 
-  // StdDev of returns
+  // StdDev логарифмических доходностей — стандартная мера волатильности в финансах.
+  // Используется только для отображения в логах, не влияет на spacing.
   const returns: number[] = [];
   for (let i = 1; i < closes.length; i++) {
     returns.push((closes[i] - closes[i - 1]) / closes[i - 1]);
@@ -154,11 +221,14 @@ export async function analyzeSymbol(
   const mean = returns.reduce((s, r) => s + r, 0) / returns.length;
   const stddev = Math.sqrt(returns.reduce((s, r) => s + (r - mean) ** 2, 0) / returns.length) * 100;
 
-  // Directional bias
+  // Доля растущих свечей (close > open) — индикатор бычьего/медвежьего рынка.
   const upCandles = allCandles.filter(c => c[4] > c[1]).length;
   const upCandlesPct = upCandles / allCandles.length * 100;
 
-  // Recommendations
+  // Рекомендации spacing для данного набора (период × таймфрейм).
+  // recBuySpacing  = P55: 55% свечей уже не дотянутся до следующего уровня →
+  //                  каждый buy fill = реальное движение, не внутрисвечной шум.
+  // recSellSpacing = P70, но не меньше buy + 0.3% (комиссии round-trip).
   const recBuySpacing = Math.round(percentile(ranges, 55) * 100) / 100;
   const minSellForProfit = recBuySpacing + FEE_ROUND_TRIP_PCT;
   const recSellRaw = Math.round(percentile(ranges, 70) * 100) / 100;
@@ -189,6 +259,10 @@ export async function analyzeSymbol(
 
 // ── Weighted recommendation ────────────────────────────────
 
+// Объединяет 12 наборов CandleStats в одну рекомендацию через взвешенное среднее.
+// Логика весов: чем свежее и чем "средний" таймфрейм — тем важнее.
+// 24h/1h → вес 2.0: текущая реальная волатильность, самый важный сигнал.
+// 14d/15m → вес 0.05: слишком далёкое прошлое и слишком мелкий шум.
 export function computeRecommendation(
   details: CandleStats[],
 ): { buySpacing: number; sellSpacing: number; regime: 'low' | 'normal' | 'high' } {
@@ -208,6 +282,7 @@ export function computeRecommendation(
     sellSum += d.recSellSpacing * w;
     weightSum += w;
 
+    // ATR 24h и 7d используются для определения режима волатильности
     if (d.period === '24h' && d.timeframe === '1h') atr24h = d.atrPct;
     if (d.period === '7d' && d.timeframe === '1h') atr7d = d.atrPct;
   }
@@ -217,6 +292,9 @@ export function computeRecommendation(
   const buySpacing = round(buySum / weightSum, 2);
   const sellSpacing = round(sellSum / weightSum, 2);
 
+  // Режим волатильности: сравниваем ATR последних 24h с недельной нормой ATR_7d.
+  // ratio < 0.7 → рынок затих (low), ratio > 1.3 → рынок возбуждён (high).
+  // Используется только для информации в логах/Telegram, не меняет spacing напрямую.
   let regime: 'low' | 'normal' | 'high' = 'normal';
   if (atr7d > 0) {
     const ratio = atr24h / atr7d;
@@ -229,6 +307,9 @@ export function computeRecommendation(
 
 // ── High-level convenience function ────────────────────────
 
+// Запускает полный анализ для списка символов.
+// Вызывается ботом каждые autoSpacingIntervalMin минут и standalone-скриптом analyze-volatility.ts.
+// onProgress — callback для отображения прогресса (например, в логах).
 export async function analyzeAllSymbols(
   fetchCandles: CandleFetcher,
   symbols: string[],
@@ -251,12 +332,12 @@ export async function analyzeAllSymbols(
             currentPrice = stats.currentPrice;
           }
         } catch {
-          // Skip failed fetches, continue with available data
+          // Пропускаем неудавшиеся запросы, продолжаем с доступными данными
         }
         done++;
         if (onProgress) onProgress(symbol, done, total);
 
-        // Small delay between API calls to avoid rate limiting
+        // Пауза между запросами к API чтобы не словить rate limit
         await new Promise(r => setTimeout(r, 300));
       }
     }
@@ -267,10 +348,9 @@ export async function analyzeAllSymbols(
     results.push({ symbol, currentPrice, buySpacing, sellSpacing, volatilityRank: 0, regime, details });
   }
 
-  // Rank by volatility
+  // Ранжируем по волатильности (для standalone-скрипта), затем восстанавливаем исходный порядок
   results.sort((a, b) => b.buySpacing - a.buySpacing);
   results.forEach((r, i) => r.volatilityRank = i + 1);
-  // Restore original order
   results.sort((a, b) => symbols.indexOf(a.symbol) - symbols.indexOf(b.symbol));
 
   return results;
