@@ -676,6 +676,19 @@ export class ComboManager {
       return false;
     }
 
+    // Guard: if position value < minCost — это dust, нет смысла триггерить SL/TSL/TP (закончится infinite retry).
+    // Сбрасываем trailingPeak чтобы не зацикливаться, оставляем dust в позиции (orphan-sell со временем подхватит).
+    try {
+      const mp = await this.exchange.getMarketPrecision(symbol);
+      if (position.amount * currentPrice < mp.minCost) {
+        if (this.state.getTrailingPeak(symbol) > 0) {
+          this.log.info(`${symbol}: position is dust (${position.amount} × ${currentPrice} < minCost ${mp.minCost}) — resetting trailingPeak to skip TSL retry loop`);
+          this.state.resetTrailingPeak(symbol);
+        }
+        return false;
+      }
+    } catch { /* ignore precision fetch errors here */ }
+
     const { stopLossPercent, takeProfitPercent, trailingSLPercent, trailingSLActivationPercent,
             cooldownAfterSLSec, cooldownMaxSL } = this.config.risk;
     const pnlPercent = ((currentPrice - position.avgEntryPrice) / position.avgEntryPrice) * 100;
