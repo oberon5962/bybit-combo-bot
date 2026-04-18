@@ -235,6 +235,20 @@ export class ExchangeSync {
                 level.price = counterPrice;
                 level.orderId = undefined;
                 level.filled = false;
+                if (counterSide === 'sell') {
+                  const syncPos = this.state.getPosition(symbol);
+                  level.oldBreakEven = syncPos.avgEntryPrice > 0
+                    ? syncPos.avgEntryPrice * (1 + this.config.grid.minSellProfitPercent / 100)
+                    : counterPrice;
+                  level.originalPlannedSellPrice = counterPrice;
+                  level.virtualNewSellPrice = undefined;
+                  level.nextStepAt = undefined;
+                } else {
+                  level.oldBreakEven = undefined;
+                  level.originalPlannedSellPrice = undefined;
+                  level.virtualNewSellPrice = undefined;
+                  level.nextStepAt = undefined;
+                }
               } else {
                 this.log.info(`[sync] ${symbol}: order ${level.orderId} at ${level.price} (${level.side}) was ${orderInfo.status} — removing from state`);
                 level.orderId = undefined;

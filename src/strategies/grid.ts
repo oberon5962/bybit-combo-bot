@@ -839,6 +839,20 @@ export class GridStrategy {
             level.price = counterPrice;
             level.orderId = undefined;
             level.filled = false;
+            if (counterSide === 'sell') {
+              const posForFail = this.state.getPosition(symbol);
+              level.oldBreakEven = posForFail.avgEntryPrice > 0
+                ? posForFail.avgEntryPrice * (1 + this.config.minSellProfitPercent / 100)
+                : counterPrice;
+              level.originalPlannedSellPrice = counterPrice;
+              level.virtualNewSellPrice = undefined;
+              level.nextStepAt = undefined;
+            } else {
+              level.oldBreakEven = undefined;
+              level.originalPlannedSellPrice = undefined;
+              level.virtualNewSellPrice = undefined;
+              level.nextStepAt = undefined;
+            }
           }
 
           // Partial fill: create a new level for the remaining unfilled portion
@@ -1192,7 +1206,7 @@ export class GridStrategy {
               () => this.exchange.createLimitSell(symbol, level.amount, virtualNewSellPrice, 'grid'),
               `Counter-sell trail step3 ${symbol} @ ${virtualNewSellPrice}`,
             );
-            this.log.info(`Counter-sell trail (step 3): ${symbol} ${level.price.toFixed(6)} → ${virtualNewSellPrice.toFixed(6)} (above oldBE, direct)`, { symbol });
+            this.log.info(`Counter-sell trail (step 3): ${symbol} ${level.price.toFixed(6)} → ${virtualNewSellPrice.toFixed(6)} (${halvingDisabled ? 'halving disabled' : 'above oldBE'}, direct)`, { symbol });
             level.price = virtualNewSellPrice;
             level.orderId = order.id;
             level.placedAt = Date.now();
