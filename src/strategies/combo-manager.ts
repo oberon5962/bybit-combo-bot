@@ -2509,7 +2509,7 @@ export class ComboManager {
         `<b>${pair.symbol}</b> (${s.buys}B / ${s.sells}S)${statsMarker}`,
         ` Spent: ${s.spent.toFixed(2)} | Earned: ${s.earned.toFixed(2)}`,
         ` Fees: ${s.buyFees.toFixed(3)} (buy) + ${s.sellFees.toFixed(3)} (sell)`,
-        ` PnL: ${pnlSign}${s.pnl.toFixed(2)} USDT (${pnlSign}${pnlPct.toFixed(1)}%)`,
+        ` Realized PnL: ${pnlSign}${s.pnl.toFixed(2)} USDT (${pnlSign}${pnlPct.toFixed(1)}%)`,
         marketLine,
         '',
       );
@@ -2520,15 +2520,16 @@ export class ComboManager {
     }
 
     const totalFees = totalBuyFees + totalSellFees;
-    const totalPnl = totalEarned - totalSpent - totalFees;
-    const sign = totalPnl >= 0 ? '+' : '';
-    const totalPnlPct = totalSpent > 0 ? (totalPnl / totalSpent) * 100 : 0;
     const capital = this.lastTickPortfolioValue > 0 ? this.lastTickPortfolioValue : this.state.peakCapital;
+    const portfolioPnl = capital - this.state.startingCapital;
+    const portfolioSign = portfolioPnl >= 0 ? '+' : '';
+    const portfolioPnlPct = this.state.startingCapital > 0 ? (portfolioPnl / this.state.startingCapital) * 100 : 0;
     lines.push(
       `<b>TOTAL</b> (${capital.toFixed(2)} USDT)`,
+      ` Start: ${this.state.startingCapital.toFixed(2)} USDT`,
       ` Spent: ${totalSpent.toFixed(2)} | Earned: ${totalEarned.toFixed(2)}`,
       ` Fees: ${totalBuyFees.toFixed(3)} (buy) + ${totalSellFees.toFixed(3)} (sell) = ${totalFees.toFixed(3)}`,
-      ` PnL: ${sign}${totalPnl.toFixed(2)} USDT (${sign}${totalPnlPct.toFixed(1)}%)`,
+      ` Portfolio PnL: ${portfolioSign}${portfolioPnl.toFixed(2)} USDT (${portfolioSign}${portfolioPnlPct.toFixed(1)}%)`,
     );
 
     this.tg.sendReply(lines.join('\n'));
