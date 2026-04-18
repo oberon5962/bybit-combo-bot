@@ -2145,7 +2145,7 @@ export class ComboManager {
       let line = `${sym}${marker}: `;
       if (pos.amount > 0) {
         const pnl = price > 0 ? ((price - pos.avgEntryPrice) / pos.avgEntryPrice * 100) : 0;
-        line += `tokens ${pos.amount.toFixed(6)} | avgEntry ${pos.avgEntryPrice.toFixed(4)} | uPnL ${pnl >= 0 ? '+' : ''}${pnl.toFixed(1)}%`;
+        line += `tokens ${parseFloat(pos.amount.toFixed(6))} | avgEntry ${pos.avgEntryPrice.toFixed(4)} | uPnL ${pnl >= 0 ? '+' : ''}${pnl.toFixed(1)}%`;
       } else {
         line += 'нет позиции';
       }
