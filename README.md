@@ -147,6 +147,8 @@ bybit-combo-bot/
 | `/unfreezebuy` | Разморозить покупки + force-rebalance |
 | `/sellgrid` | Sellgrid-режим: после sell fill ставить новый sell выше (ladder). Авто-freeze. Маркер 🔻 |
 | `/unsellgrid` | Отключить sellgrid + разморозить buy |
+| `/freeze` | Полная заморозка пары: stop grid/DCA/meta, SL/TP работают. Маркер 🧊❄️ |
+| `/unfreeze` | Полная разморозка пары (grid/DCA/meta возобновляются) + force-rebalance |
 
 Ручные покупки через `/buy` не входящих в конфиг пар отслеживаются отдельно (`manualPairs`), отображаются в `/status` и `/orders`, продаются по `/sellall`.
 
@@ -869,6 +871,41 @@ Counter-Sell Midpoint Trailing — замена старого Trailing Sell-Dow
 - Counter-sell skip в midpoint guard чистит counter-sell metadata
 - initCounterSellTrailing корректно обрабатывает level без orderId (externally-cancelled)
 - Finish-branch в шаге 4 чистит nextStepAt и virtualNewSellPrice
+
+### v2.3.0 — `97aae42` + `0f91254` + `e4f5508` (2026-04-18)
+
+Per-pair state control, bidirectional config sync, RSI/EMA/BB в summary, фиксы.
+
+**Per-pair `state` в config.jsonc:**
+- Каждая пара поддерживает поле `state`: `"unfreeze"` / `"freezebuy"` / `"sellgrid"` / `"freeze"`
+- Hot-reload: изменение `state` в конфиге подхватывается автоматически (~30с), применяется без рестарта
+- Стартовое применение: при запуске бота состояния из конфига применяются к парам
+- Пример: `{ "symbol": "XRP/USDT", "allocationPercent": 12, "state": "sellgrid" }`
+
+**Новые Telegram-команды `/freeze` / `/unfreeze`:**
+- **`/freeze XRP`** — полная заморозка: grid/DCA/meta не работают, но SL/TP/TSL продолжают защищать позицию. Маркер 🧊❄️
+- **`/unfreeze XRP`** — снять полную заморозку + force-rebalance для актуализации сетки
+- State `frozenPairs` в `bot-state.json`, переживает рестарты
+- Wizards с inline-кнопками (как `/freezebuy`)
+
+**Bidirectional config sync (`src/config-writer.ts`):**
+- Новый модуль для атомарной записи полей в `config.jsonc` (через .tmp + rename, сохраняет комментарии)
+- Telegram-команды пишут `state` обратно в конфиг: `/freeze` → `"freeze"`, `/unfreeze` → `"unfreeze"`, `/freezebuy` → `"freezebuy"`, `/unsellgrid` → `"unfreeze"`
+- `autoSpacingPriority: "auto"` — после пересчёта spacing значения `gridSpacingPercent` / `gridSpacingSellPercent` синхронизируются в конфиг для каждой пары
+- После записи `lastConfigHash` обновляется, чтобы избежать ложного hot-reload
+
+**RSI / EMA / BB в summary:**
+- Per-pair строки в BOT SUMMARY (лог и Telegram) содержат: `RSI: 54.3 EMA: bullish BB: below_middle`
+- Данные берутся из `lastIndicatorsPerPair` — отображают состояние последнего тика
+
+**TSL: деактивация через 999:**
+- `trailingSLPercent: 999` + `trailingSLActivationPercent: 999` — полное отключение Trailing SL без рестарта
+- Валидация снята: верхняя граница `trailingSLPercent` убрана (раньше требовалась < `takeProfitPercent`)
+
+**Bug fixes:**
+- **Hot-reload state detection**: `prevPairs` теперь сохраняется ДО `this.config = newConfig`. Раньше сравнение всегда давало oldState === newState (массивы уже одинаковые)
+- **Freeze охватывает все affected symbols**: `applyPairState(freeze)` итерирует все пары (включая `manualPairs`) с тем же base-тикером, как и `cmdFreezeBuy`
+- **Zombie sell levels**: sell-уровни с `amount=0`, без `orderId` и без `filled` (артефакт после TSL partial-fill) отфильтровываются в `setGridLevels` и больше не зависают в pending
 
 ## Важные замечания
 
