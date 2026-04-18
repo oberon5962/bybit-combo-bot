@@ -1305,7 +1305,7 @@ export class ComboManager {
       currentCapital: currentCapital.toFixed(2),
       startingCapital: this.state.startingCapital.toFixed(2),
       peakCapital: this.state.peakCapital.toFixed(2),
-      PnL: `${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)} USDT (${pnl >= 0 ? '+' : ''}${pnlPct.toFixed(1)}%)`,
+      PnL: `${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)} (${pnl >= 0 ? '+' : ''}${pnlPct.toFixed(1)}%)`,
       drawdown: `${drawdown.toFixed(1)}%`,
       totalTrades: trades.length,
       buys: buys.length,
@@ -1337,75 +1337,58 @@ export class ComboManager {
 
       // Grid levels info
       const gridLevels = this.state.getGridLevels(sym);
-      const gridCenter = this.state.getGridCenterPrice(sym);
       const buyLevels = gridLevels.filter((l) => l.side === 'buy');
       const sellLevels = gridLevels.filter((l) => l.side === 'sell');
       const activeBuys = buyLevels.filter((l) => !l.filled && l.orderId);
       const activeSells = sellLevels.filter((l) => !l.filled && l.orderId);
       const pendingSells = sellLevels.filter((l) => !l.filled && !l.orderId);
 
-      const buyPrices = activeBuys.map((l) => l.price).sort((a, b) => a - b);
-      const sellPrices = [...activeSells, ...pendingSells].map((l) => l.price).sort((a, b) => a - b);
-
-      // Compact log line
-      const logParts: string[] = [];
-      logParts.push(`${pairBuys.length}B/${pairSells.length}S`);
+      // Single aligned log line (monospace columns)
+      const st = this.state.getPairStats(sym);
+      const stPnl = st.pnl >= 0 ? `+${st.pnl.toFixed(2)}` : st.pnl.toFixed(2);
+      const stPnlPct = st.spent > 0 ? (st.pnl / st.spent) * 100 : 0;
+      const stPnlStr = `${stPnl} (${st.pnl >= 0 ? '+' : ''}${stPnlPct.toFixed(1)}%)`;
 
       const lastInd = this.lastIndicatorsPerPair.get(sym);
-      if (lastInd) {
-        logParts.push(`RSI: ${lastInd.rsi.toFixed(1)} EMA: ${lastInd.emaCrossover} BB: ${lastInd.pricePosition}`);
-      }
+      const rsiStr  = lastInd ? lastInd.rsi.toFixed(1).padStart(4)        : '   ?';
+      const emaAbbr: Record<string, string> = { neutral: 'neut', bullish: 'bull', bearish: 'bear' };
+      const bbAbbr:  Record<string, string> = { above_upper: 'overbought', above_middle: 'bull', below_middle: 'bear', below_lower: 'oversold' };
+      const emaStr  = (emaAbbr[lastInd?.emaCrossover  ?? ''] ?? lastInd?.emaCrossover  ?? '?').padEnd(4);
+      const bbStr   = (bbAbbr [lastInd?.pricePosition ?? ''] ?? lastInd?.pricePosition ?? '?').padEnd(10);
 
-      if (buyPrices.length > 0) {
-        const buyCost = activeBuys.reduce((s, l) => s + l.price * l.amount, 0).toFixed(0);
-        logParts.push(`buys: ${activeBuys.length} [${buyPrices[0].toFixed(4)}-${buyPrices[buyPrices.length - 1].toFixed(4)}] ${buyCost}$`);
-      } else {
-        logParts.push('buys: 0');
-      }
+      const buyCostVal  = activeBuys.reduce((s, l) => s + l.price * l.amount, 0);
+      const sellCostVal = activeSells.reduce((s, l) => s + l.price * l.amount, 0);
+      const buyCol  = (activeBuys.length  > 0 ? `${activeBuys.length}B [${buyCostVal.toFixed(0)}$]`   : '0B').padEnd(11);
+      const sellCol = (activeSells.length > 0 ? `${activeSells.length}S [${sellCostVal.toFixed(0)}$]` :
+                      pendingSells.length > 0  ? `${pendingSells.length}S pend`                        : '0S').padEnd(11);
 
-      if (activeSells.length > 0 || pendingSells.length > 0) {
-        const sellInfo = activeSells.length > 0 ? `${activeSells.length} active` : '';
-        const pendInfo = pendingSells.length > 0 ? `${pendingSells.length} pending` : '';
-        const sellStr = [sellInfo, pendInfo].filter(Boolean).join('+');
-        if (sellPrices.length > 0) {
-          const activeSellCost = activeSells.reduce((s, l) => s + l.price * l.amount, 0).toFixed(0);
-          const pendSellCost = pendingSells.reduce((s, l) => s + l.price * l.amount, 0).toFixed(0);
-          const costStr = pendingSells.length > 0 ? `${activeSellCost}$+${pendSellCost}$` : `${activeSellCost}$`;
-          logParts.push(`sells: ${sellStr} [${sellPrices[0].toFixed(4)}-${sellPrices[sellPrices.length - 1].toFixed(4)}] ${costStr}`);
-        } else {
-          logParts.push(`sells: ${sellStr}`);
-        }
-      } else {
-        logParts.push('sells: 0');
-      }
-
-      if (gridCenter > 0) {
-        logParts.push(`center: ${gridCenter.toFixed(4)}`);
-      }
-
-      // SL / Trailing SL / TP
-      if (slTrades.length > 0) logParts.push(`SL: ${slTrades.length}x`);
-      if (tslTrades.length > 0) logParts.push(`TSL: ${tslTrades.length}x`);
-      if (tpTrades.length > 0) logParts.push(`TP: ${tpTrades.length}x`);
-
-      // Status
+      // Status / events suffix
       const cooldownUntil = this.state.getCooldownUntil(sym);
-      if (isHalted) {
-        logParts.push(`HALTED — ${haltReason ?? 'unknown'}`);
-      } else if (cooldownUntil > 0 && Date.now() < cooldownUntil) {
-        const minLeft = Math.ceil((cooldownUntil - Date.now()) / 60000);
-        logParts.push(`COOLDOWN — ${minLeft} min left`);
-      }
+      const extras: string[] = [];
+      if (slTrades.length  > 0) extras.push(`SL:${slTrades.length}x`);
+      if (tslTrades.length > 0) extras.push(`TSL:${tslTrades.length}x`);
+      if (tpTrades.length  > 0) extras.push(`TP:${tpTrades.length}x`);
+      if (isHalted) extras.push(`HALTED:${haltReason ?? '?'}`);
+      else if (cooldownUntil > 0 && Date.now() < cooldownUntil)
+        extras.push(`COOL:${Math.ceil((cooldownUntil - Date.now()) / 60000)}min`);
 
       const level = (isHalted || cooldownUntil > Date.now()) ? 'warn' : 'info';
-      this.log[level](`  ${sym}: ${logParts.join(' | ')}`);
-      // Compact stats line under each pair
-      const st = this.state.getPairStats(sym);
-      if (st.buys > 0 || st.sells > 0) {
-        const stPnl = st.pnl >= 0 ? `+${st.pnl.toFixed(2)}` : st.pnl.toFixed(2);
-        this.log[level](`         spent: ${st.spent.toFixed(2)} | earned: ${st.earned.toFixed(2)} | fees: ${st.totalFees.toFixed(3)} | PnL: ${stPnl}`);
-      }
-      pairLogLines.push(`${sym}: ${logParts.join(' | ')}`);
+      const symPad = sym.padEnd(11);
+      const logLine = [
+        `  ${symPad}`,
+        `PnL ${stPnlStr.padStart(18)}`,
+        `Spent ${st.spent.toFixed(2).padStart(7)}`,
+        `Earned ${st.earned.toFixed(2).padStart(7)}`,
+        `Fees ${st.totalFees.toFixed(3).padStart(6)}`,
+        `RSI ${rsiStr}`,
+        `EMA ${emaStr}`,
+        `BB ${bbStr}`,
+        buyCol,
+        sellCol,
+        ...extras,
+      ].join(' | ');
+      this.log[level](logLine);
+      pairLogLines.push(logLine.trim());
 
       // Telegram per-pair
       const tgPairParts: string[] = [];
@@ -1414,6 +1397,11 @@ export class ComboManager {
       const summarySellgrid = this.state.isSellGridActive(summaryBase);
       const summaryMarker = (summarySellgrid ? ' 🔻' : '') + (summaryFrozen ? ' 🧊' : '');
       tgPairParts.push(`<b>${sym}</b> (${pairBuys.length}B/${pairSells.length}S)${summaryMarker}`);
+      if (st.buys > 0 || st.sells > 0) {
+        const stPnlSign = st.pnl >= 0 ? '+' : '';
+        const stPnlPct = st.spent > 0 ? (st.pnl / st.spent) * 100 : 0;
+        tgPairParts.push(` PnL: ${stPnlSign}${st.pnl.toFixed(2)} (${stPnlSign}${stPnlPct.toFixed(1)}%)`);
+      }
       if (activeBuys.length > 0) {
         const buyCost = activeBuys.reduce((s, l) => s + l.price * l.amount, 0).toFixed(2);
         tgPairParts.push(` ${activeBuys.length}B [${buyCost}$]`);
@@ -1429,12 +1417,6 @@ export class ComboManager {
         }
         tgPairParts.push(` ${parts.join(' + ')}`);
       }
-      if (st.buys > 0 || st.sells > 0) {
-        const stPnlSign = st.pnl >= 0 ? '+' : '';
-        const stPnlPct = st.spent > 0 ? (st.pnl / st.spent) * 100 : 0;
-        tgPairParts.push(` PnL: ${stPnlSign}${st.pnl.toFixed(2)} (${stPnlSign}${stPnlPct.toFixed(1)}%)`);
-      }
-      // center removed from telegram per user request
       if (slTrades.length > 0) tgPairParts.push(` SL: ${slTrades.length}x`);
       if (tslTrades.length > 0) tgPairParts.push(` TSL: ${tslTrades.length}x`);
       if (tpTrades.length > 0) tgPairParts.push(` TP: ${tpTrades.length}x`);
@@ -2510,7 +2492,7 @@ export class ComboManager {
         `<b>${pair.symbol}</b> (${s.buys}B / ${s.sells}S)${statsMarker}`,
         ` Spent: ${s.spent.toFixed(2)} | Earned: ${s.earned.toFixed(2)}`,
         ` Fees: ${s.buyFees.toFixed(3)} (buy) + ${s.sellFees.toFixed(3)} (sell)`,
-        ` Realized PnL: ${pnlSign}${s.pnl.toFixed(2)} USDT (${pnlSign}${pnlPct.toFixed(1)}%)`,
+        ` Realized PnL: ${pnlSign}${s.pnl.toFixed(2)} (${pnlSign}${pnlPct.toFixed(1)}%)`,
         marketLine,
         '',
       );
@@ -2530,7 +2512,7 @@ export class ComboManager {
       ` Start: ${this.state.startingCapital.toFixed(2)} USDT`,
       ` Spent: ${totalSpent.toFixed(2)} | Earned: ${totalEarned.toFixed(2)}`,
       ` Fees: ${totalBuyFees.toFixed(3)} (buy) + ${totalSellFees.toFixed(3)} (sell) = ${totalFees.toFixed(3)}`,
-      ` Portfolio PnL: ${portfolioSign}${portfolioPnl.toFixed(2)} USDT (${portfolioSign}${portfolioPnlPct.toFixed(1)}%)`,
+      ` Portfolio PnL: ${portfolioSign}${portfolioPnl.toFixed(2)} (${portfolioSign}${portfolioPnlPct.toFixed(1)}%)`,
     );
 
     this.tg.sendReply(lines.join('\n'));
