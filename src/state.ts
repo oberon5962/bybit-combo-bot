@@ -352,7 +352,10 @@ export class StateManager {
     return this.getPairState(symbol).gridLevels;
   }
   setGridLevels(symbol: string, levels: GridLevelState[]): void {
-    this.getPairState(symbol).gridLevels = levels;
+    // Отфильтровать zombie sell-уровни: amount=0, не заполнены, нет orderId — нечего продавать
+    this.getPairState(symbol).gridLevels = levels.filter(
+      l => !(l.side === 'sell' && l.amount <= 0 && !l.filled && !l.orderId),
+    );
     this.save();
   }
   isGridInitialized(symbol: string): boolean {
