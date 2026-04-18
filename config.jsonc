@@ -3,6 +3,7 @@
   // Trading Pairs & Allocation (сумма <= 100%)
   // ============================================================
   // gridSpacingPercent / gridSpacingSellPercent — опционально для каждой пары (иначе берётся из grid.gridSpacingPercent)
+  // state — опционально: "freeze" | "freezebuy" | "sellgrid" | "unfreeze" (default). Синхронизируется с Telegram-командами и hot-reload.
   "pairs": [
     { "symbol": "DOT/USDT", "allocationPercent": 13, "gridSpacingPercent": 1.32, "gridSpacingSellPercent": 1.62 },
     { "symbol": "NEAR/USDT", "allocationPercent": 12, "gridSpacingPercent": 1.16, "gridSpacingSellPercent": 1.46 },
@@ -18,14 +19,14 @@
   // Risk Management — управление рисками
   // ============================================================
   "risk": {
-    "maxDrawdownPercent": 12,           // HALT если портфель упал (-% от пика)
-    "stopLossPercent": 8,              // Стоп-лосс на позицию (-% от entry)
+    "maxDrawdownPercent": 8,           // HALT если портфель упал (-% от пика)
+    "stopLossPercent": 7,              // StopLoss на позицию (-% от entry)
     "takeProfitPercent": 100,            // Тейк-профит на позицию (+% от entry)
     "portfolioTakeProfitPercent": 100,  // Продать ВСЁ когда портфель (+% от старта)
-    "cooldownAfterSLSec": 1800,         // Пауза после SL (1800 = 30 мин, 0 = halt навсегда)
-    "cooldownMaxSL": 3,                 // Макс SL подряд до полного halt
-    "trailingSLPercent": 5,             // Trailing SL: продаём если цена упала на 5% от пика
-    "trailingSLActivationPercent": 3    // Trailing SL включается после +3% от entry
+    "cooldownAfterSLSec": 1800,         // Пауза после StopLoss (SL) (1800 = 30 мин, 0 = halt навсегда)
+    "cooldownMaxSL": 3,                 // Макс кол-во SL подряд до полного halt
+    "trailingSLPercent": 999,             // Trailing SL: продаём если цена упала на -5% (рекомендуемое) от пика (999 - выключено)
+    "trailingSLActivationPercent": 999    // Trailing SL включается после +3% (рекомендуемое) от entry (999 - выключено)
   },
 
   // ============================================================
@@ -38,13 +39,17 @@
     "gridSpacingSellPercent": 1.4,      // DEFAULT расстояние между SELL-уровнями (% от текущей цены при построении сетки). Fallback если пара не задаёт свой
     "orderSizePercent": 15,             // Размер ордера (% от аллокации пары)
     "rebalancePercent": 2,              // Перестроить сетку если цена ушла >2% от центра
-    "rsiOverboughtThreshold": 70,       // Пропускаем grid-buy при RSI > 70 (100 = отключить)
-    "useEmaFilter": false,              // true = блокировать buy при bearish EMA crossover
+    "rsiOverboughtThreshold": 65,       // Пропускаем grid-buy при RSI > 70 (рекомендуемое) (100 = отключить)
+    "useEmaFilter": true,              // true = блокировать buy при bearish EMA crossover
     "useBollingerAdaptive": true,       // Адаптивный grid по Bollinger Bands
     "bollingerBuyMultiplier": 1.5,      // orderSize * 1.5 при покупке у нижней полосы BB или все, что есть
     "bollingerSellMultiplier": 1.5,     // orderSize * 1.5 при продаже у верхней полосы BB или все, что есть
     "bollingerShiftLevels": 2,          // Перекинуть 2 уровня в пользу buy/sell по BB
-    "counterSellTrailStepHours": 4,     // Шаг midpoint-halving для counter-sell при split rebalance DOWN (часы). >0 = halving (двоичный поиск к virtualNewSellPrice с защитой oldBreakEven на первом шаге). 0 = halving выкл, при ребалансе counter-sell ставится сразу на virtualNewSellPrice без защиты. <0 = trailing полностью выкл, sell остаются на своих ценах
+
+    "counterSellTrailStepHours": 4,     // Шаг midpoint-halving для counter-sell при split rebalance DOWN (часы). 
+                                        // >0 = halving (двоичный поиск к virtualNewSellPrice с защитой oldBreakEven на первом шаге)
+                                        // 0 = halving выкл, при ребалансе counter-sell ставится сразу на virtualNewSellPrice без защиты
+                                        // <0 = trailing полностью выкл, sell остаются на своих ценах
 
     // Защита от продажи в убыток (используется в Counter-Sell Guard и Grid Sell Guard).
     // Если рассчитанная цена sell (по spacing) ниже безубыточной (avgEntry * (1 + minSellProfitPercent/100)) —

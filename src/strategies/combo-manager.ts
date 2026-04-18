@@ -16,6 +16,7 @@ import { TelegramNotifier, TelegramCommand } from '../telegram';
 import { ExchangeSync } from '../sync';
 import { analyzeAllSymbols, round as volRound, FEE_ROUND_TRIP_PCT as VOL_FEE } from '../volatility';
 import type { CandleFetcher } from '../volatility';
+import { updatePairStateInConfig, updatePairSpacingInConfig } from '../config-writer';
 import { createHash } from 'crypto';
 import { readFileSync } from 'fs';
 import { resolve } from 'path';
@@ -135,6 +136,15 @@ export class ComboManager {
     const cfgPath = resolve(__dirname, '../../config.jsonc');
     this.lastConfigHash = createHash('md5').update(readFileSync(cfgPath, 'utf-8')).digest('hex');
 
+    // Apply initial per-pair state from config (hot-reload может пропустить первый старт)
+    for (const pair of this.config.pairs) {
+      const st = pair.state;
+      if (!st || st === 'unfreeze') continue;
+      const base = pair.symbol.split('/')[0];
+      this.log.info(`Startup: applying pair state ${st} for ${pair.symbol}`);
+      await this.applyPairState(base, st, false);
+    }
+
     // Register Telegram menu commands (updates /command list in Telegram UI)
     this.tg.registerCommands();
 
@@ -202,6 +212,17 @@ export class ComboManager {
       }
       this.grid.setAutoSpacing(newMap);
 
+      // Auto-spacing priority=auto → синхронизировать новые значения в config.jsonc
+      if (this.config.grid.autoSpacingPriority === 'auto') {
+        const cfgPathAs = resolve(__dirname, '../../config.jsonc');
+        for (const [sym, spacing] of newMap) {
+          try { updatePairSpacingInConfig(cfgPathAs, sym, spacing.buy, spacing.sell); }
+          catch (e) { this.log.warn(`config-writer spacing ${sym}: ${sanitizeError(e)}`); }
+        }
+        this.lastConfigHash = createHash('md5').update(readFileSync(cfgPathAs, 'utf-8')).digest('hex');
+        this.log.info('Auto-spacing: values written back to config.jsonc');
+      }
+
       // Первый расчёт после старта + priority=auto → принудительный ребаланс всех пар
       if (!this.autoSpacingFirstDone && this.config.grid.autoSpacingPriority === 'auto') {
         this.grid.forceRebalanceAll();
@@ -266,6 +287,18 @@ export class ComboManager {
           this.dca.updateConfig(newConfig);
           this.tg.updateConfig(newConfig.telegram);
           if (this.sync) this.sync.updateConfig(newConfig);
+
+          // Hot-reload: обработка per-pair state изменений
+          for (const newPair of newConfig.pairs) {
+            const oldPair = this.config.pairs.find(p => p.symbol === newPair.symbol);
+            const oldState = oldPair?.state ?? 'unfreeze';
+            const newState = newPair.state ?? 'unfreeze';
+            if (oldState !== newState) {
+              const base = newPair.symbol.split('/')[0];
+              this.log.info(`Config hot-reload: ${newPair.symbol} state changed ${oldState} → ${newState}`);
+              await this.applyPairState(base, newState, false);
+            }
+          }
 
           // Hot-reload: обработка auto-spacing изменений
           if (newConfig.grid.autoSpacingPriority === 'off' && this.autoSpacingMap.size > 0) {
@@ -499,6 +532,12 @@ export class ComboManager {
     const slTriggered = await this.checkPositionStopLossTakeProfit(symbol, ticker.last);
     if (slTriggered) {
       // Position was closed by SL/TP — skip normal strategy evaluation this tick
+      return;
+    }
+
+    // ---- Freeze check: пара полностью заморожена — только SL/TP (выше), торговля пропускается ----
+    if (this.state.isPairFrozen(symbol.split('/')[0])) {
+      this.log.debug(`${symbol}: pair is frozen — skipping grid/dca/meta this tick`);
       return;
     }
 
@@ -1307,6 +1346,11 @@ export class ComboManager {
       const logParts: string[] = [];
       logParts.push(`${pairBuys.length}B/${pairSells.length}S`);
 
+      const lastInd = this.lastIndicatorsPerPair.get(sym);
+      if (lastInd) {
+        logParts.push(`RSI: ${lastInd.rsi.toFixed(1)} EMA: ${lastInd.emaCrossover} BB: ${lastInd.pricePosition}`);
+      }
+
       if (buyPrices.length > 0) {
         const buyCost = activeBuys.reduce((s, l) => s + l.price * l.amount, 0).toFixed(0);
         logParts.push(`buys: ${activeBuys.length} [${buyPrices[0].toFixed(4)}-${buyPrices[buyPrices.length - 1].toFixed(4)}] ${buyCost}$`);
@@ -1438,7 +1482,7 @@ export class ComboManager {
       this.log.info(`Telegram command: /${cmd.command} ${cmd.args}${cmd.confirmed ? ' [confirmed]' : ''}`);
       try {
         // Commands requiring confirmation: stop, sellall, buy
-        const needsConfirm = ['stop', 'sellall', 'buy', 'cancelorders', 'regrid', 'freezebuy', 'unfreezebuy', 'sellgrid', 'unsellgrid'].includes(cmd.command);
+        const needsConfirm = ['stop', 'sellall', 'buy', 'cancelorders', 'regrid', 'freezebuy', 'unfreezebuy', 'sellgrid', 'unsellgrid', 'freeze', 'unfreeze'].includes(cmd.command);
 
         // /freezebuy: empty args → wizard, unknown currency → reject
         if (cmd.command === 'freezebuy' && !cmd.confirmed) {
@@ -1653,8 +1697,14 @@ export class ComboManager {
             this.tg.sendConfirmation(`✅ Отключить sellgrid для ${base} и разморозить buy?`, `unsellgrid:${base}`);
             break;
           }
+          case 'freeze':
+            await this.cmdFreeze(cmd.args.trim().toUpperCase());
+            break;
+          case 'unfreeze':
+            await this.cmdUnfreeze(cmd.args.trim().toUpperCase());
+            break;
           default:
-            this.tg.sendReply(`Неизвестная команда /${cmd.command}\nДоступные: /start /status /stop /run /sellall /buy /orders /cancelorders /stats /regrid /freezebuy /unfreezebuy /sellgrid /unsellgrid`);
+            this.tg.sendReply(`Неизвестная команда /${cmd.command}\nДоступные: /start /status /stop /run /sellall /buy /orders /cancelorders /stats /regrid /freezebuy /unfreezebuy /sellgrid /unsellgrid /freeze /unfreeze`);
         }
       } catch (err) {
         this.log.error(`Telegram command /${cmd.command} failed: ${sanitizeError(err)}`);
@@ -1738,6 +1788,10 @@ export class ComboManager {
       reply += `\n⚠️ Не удалось отменить ${stillOpen} ордер(ов). Повтори /freezebuy ${base} или отмени вручную через /cancelorders.`;
     }
     this.tg.sendReply(reply);
+    const cfgPathFb = resolve(__dirname, '../../config.jsonc');
+    const sym = this.config.pairs.find(p => p.symbol.split('/')[0] === base)?.symbol ?? `${base}/USDT`;
+    try { updatePairStateInConfig(cfgPathFb, sym, 'freezebuy'); } catch (e) { this.log.warn(`config-writer freezebuy: ${sanitizeError(e)}`); }
+    this.lastConfigHash = createHash('md5').update(readFileSync(cfgPathFb, 'utf-8')).digest('hex');
   }
 
   private async cmdSellGrid(base: string): Promise<void> {
@@ -1786,6 +1840,10 @@ export class ComboManager {
     }
     this.log.info(`/sellgrid ${base}: enabled (freeze=${addedFreeze ? 'new' : 'existed'}), cancelled ${cancelled} buy-orders. Ladder-mode active.`);
     this.tg.sendReply(`🔻 ${base} в sellgrid-режиме. Buy заморожены (${cancelled} ордер(ов) отменено). После каждого sell fill — новый sell выше. Завершится автоматически при исчерпании крипты.`);
+    const cfgPathSg = resolve(__dirname, '../../config.jsonc');
+    const symSg = this.config.pairs.find(p => p.symbol.split('/')[0] === base)?.symbol ?? `${base}/USDT`;
+    try { updatePairStateInConfig(cfgPathSg, symSg, 'sellgrid'); } catch (e) { this.log.warn(`config-writer sellgrid: ${sanitizeError(e)}`); }
+    this.lastConfigHash = createHash('md5').update(readFileSync(cfgPathSg, 'utf-8')).digest('hex');
   }
 
   private async cmdUnsellGrid(base: string): Promise<void> {
@@ -1811,6 +1869,10 @@ export class ComboManager {
     }
     this.log.info(`/unsellgrid ${base}: sellgrid disabled, freeze also removed (${removedFreeze}), force-rebalance for ${forced} pair(s)`);
     this.tg.sendReply(`✅ ${base}: sellgrid отключён, buy разморожен. Сетки восстановятся в ближайшем тике.`);
+    const cfgPathUsg = resolve(__dirname, '../../config.jsonc');
+    const symUsg = this.config.pairs.find(p => p.symbol.split('/')[0] === base)?.symbol ?? `${base}/USDT`;
+    try { updatePairStateInConfig(cfgPathUsg, symUsg, 'unfreeze'); } catch (e) { this.log.warn(`config-writer unsellgrid: ${sanitizeError(e)}`); }
+    this.lastConfigHash = createHash('md5').update(readFileSync(cfgPathUsg, 'utf-8')).digest('hex');
   }
 
   private async cmdUnfreezeBuy(base: string): Promise<void> {
@@ -1836,6 +1898,152 @@ export class ComboManager {
     }
     this.log.info(`/unfreezebuy ${base}: unblocked, force-rebalance scheduled for ${forced} pair(s) on next tick`);
     this.tg.sendReply(`✅ ${base} разморожен. Force-rebalance сетки — buy-ордера будут выставлены по актуальной цене в ближайшем тике.`);
+    const cfgPathUfb = resolve(__dirname, '../../config.jsonc');
+    const symUfb = this.config.pairs.find(p => p.symbol.split('/')[0] === base)?.symbol ?? `${base}/USDT`;
+    try { updatePairStateInConfig(cfgPathUfb, symUfb, 'unfreeze'); } catch (e) { this.log.warn(`config-writer unfreezebuy: ${sanitizeError(e)}`); }
+    this.lastConfigHash = createHash('md5').update(readFileSync(cfgPathUfb, 'utf-8')).digest('hex');
+  }
+
+  // Применить состояние пары: freeze/freezebuy/sellgrid/unfreeze.
+  // writeConfig=false при вызове из hot-reload (конфиг уже обновлён), true при вызове из Telegram.
+  private async applyPairState(base: string, newState: string, writeConfig: boolean): Promise<void> {
+    const configPath = resolve(__dirname, '../../config.jsonc');
+    const pair = this.config.pairs.find(p => p.symbol.split('/')[0] === base);
+    const symbol = pair?.symbol ?? `${base}/USDT`;
+
+    if (newState === 'freeze') {
+      // Снять все ордера (buy + sell), выставить frozen
+      this.state.addFrozenPair(base);
+      this.state.addBlockedBuyBase(base);
+      let cancelled = 0;
+      try {
+        const openOrders = await this.exchange.fetchOpenOrders(symbol);
+        for (const o of openOrders) {
+          try { await this.exchange.cancelOrder(o.id, symbol); cancelled++; }
+          catch (err) { this.log.warn(`/freeze: cancel ${o.id} failed: ${sanitizeError(err)}`); }
+        }
+        const levels = this.state.getGridLevels(symbol);
+        let mutated = false;
+        for (const l of levels) {
+          if (l.orderId) { l.orderId = undefined; l.placedAt = undefined; mutated = true; }
+        }
+        if (mutated) this.state.setGridLevels(symbol, levels);
+      } catch (err) {
+        this.log.warn(`/freeze: fetchOpenOrders ${symbol} failed: ${sanitizeError(err)}`);
+      }
+      this.log.info(`/freeze ${base}: full freeze applied, cancelled ${cancelled} orders`);
+      if (writeConfig) {
+        try { updatePairStateInConfig(configPath, symbol, 'freeze'); } catch (e) { this.log.warn(`config-writer freeze: ${sanitizeError(e)}`); }
+        this.lastConfigHash = createHash('md5').update(readFileSync(configPath, 'utf-8')).digest('hex');
+        this.tg.sendReply(`🔒 ${base} полностью заморожен. Все ордера отменены (${cancelled}). Только SL/TP работают.`);
+      }
+    } else if (newState === 'freezebuy') {
+      this.state.removeFrozenPair(base);
+      await this.cmdFreezeBuyInternal(base);
+      if (writeConfig) {
+        try { updatePairStateInConfig(configPath, symbol, 'freezebuy'); } catch (e) { this.log.warn(`config-writer freezebuy: ${sanitizeError(e)}`); }
+        this.lastConfigHash = createHash('md5').update(readFileSync(configPath, 'utf-8')).digest('hex');
+      }
+    } else if (newState === 'sellgrid') {
+      this.state.removeFrozenPair(base);
+      await this.cmdSellGridInternal(base);
+      if (writeConfig) {
+        try { updatePairStateInConfig(configPath, symbol, 'sellgrid'); } catch (e) { this.log.warn(`config-writer sellgrid: ${sanitizeError(e)}`); }
+        this.lastConfigHash = createHash('md5').update(readFileSync(configPath, 'utf-8')).digest('hex');
+      }
+    } else {
+      // unfreeze: снять всё
+      this.state.removeFrozenPair(base);
+      this.state.removeBlockedBuyBase(base);
+      this.state.removeSellGridBase(base);
+      // Force rebalance для пересборки сетки
+      if (pair && this.state.isGridInitialized(symbol)) {
+        this.state.setGridCenterPrice(symbol, 0);
+      }
+      this.log.info(`/unfreeze ${base}: all freezes removed, grid will rebalance`);
+      if (writeConfig) {
+        try { updatePairStateInConfig(configPath, symbol, 'unfreeze'); } catch (e) { this.log.warn(`config-writer unfreeze: ${sanitizeError(e)}`); }
+        this.lastConfigHash = createHash('md5').update(readFileSync(configPath, 'utf-8')).digest('hex');
+        this.tg.sendReply(`✅ ${base} разморожен полностью. Сетка пересоберётся в ближайшем тике.`);
+      }
+    }
+  }
+
+  private async cmdFreeze(base: string): Promise<void> {
+    if (!base) { this.tg.sendReply('Формат: /freeze XRP'); return; }
+    const available = this.collectBuyMenuCurrencies();
+    if (!available.includes(base)) {
+      this.tg.sendReply(`❌ Валюта ${base} не найдена в торгуемых парах.`);
+      return;
+    }
+    await this.applyPairState(base, 'freeze', true);
+  }
+
+  private async cmdUnfreeze(base: string): Promise<void> {
+    if (!base) { this.tg.sendReply('Формат: /unfreeze XRP'); return; }
+    const available = this.collectBuyMenuCurrencies();
+    if (!available.includes(base)) {
+      this.tg.sendReply(`❌ Валюта ${base} не найдена в торгуемых парах.`);
+      return;
+    }
+    await this.applyPairState(base, 'unfreeze', true);
+  }
+
+  // Внутренняя версия cmdFreezeBuy без Telegram-вывода (используется из applyPairState)
+  private async cmdFreezeBuyInternal(base: string): Promise<void> {
+    this.state.addBlockedBuyBase(base);
+    const affectedSymbols = this.config.pairs
+      .map(p => p.symbol)
+      .concat(this.state.getManualPairs())
+      .filter((s, i, arr) => arr.indexOf(s) === i)
+      .filter(sym => sym.split('/')[0] === base);
+    for (const sym of affectedSymbols) {
+      try {
+        const openOrders = await this.exchange.fetchOpenOrders(sym);
+        const buyOrders = openOrders.filter(o => o.side === 'buy');
+        for (const o of buyOrders) {
+          try { await this.exchange.cancelOrder(o.id, sym); }
+          catch (err) { this.log.warn(`freezebuy: cancel ${o.id} failed: ${sanitizeError(err)}`); }
+        }
+        const levels = this.state.getGridLevels(sym);
+        let mutated = false;
+        for (const l of levels) {
+          if (l.side === 'buy' && l.orderId) { l.orderId = undefined; l.placedAt = undefined; mutated = true; }
+        }
+        if (mutated) this.state.setGridLevels(sym, levels);
+      } catch (err) {
+        this.log.warn(`freezebuy: fetchOpenOrders ${sym} failed: ${sanitizeError(err)}`);
+      }
+    }
+  }
+
+  // Внутренняя версия cmdSellGrid без Telegram-вывода (используется из applyPairState)
+  private async cmdSellGridInternal(base: string): Promise<void> {
+    this.state.addSellGridBase(base);
+    this.state.addBlockedBuyBase(base);
+    const affectedSymbols = this.config.pairs
+      .map(p => p.symbol)
+      .concat(this.state.getManualPairs())
+      .filter((s, i, arr) => arr.indexOf(s) === i)
+      .filter(sym => sym.split('/')[0] === base);
+    for (const sym of affectedSymbols) {
+      try {
+        const openOrders = await this.exchange.fetchOpenOrders(sym);
+        const buyOrders = openOrders.filter(o => o.side === 'buy');
+        for (const o of buyOrders) {
+          try { await this.exchange.cancelOrder(o.id, sym); }
+          catch (err) { this.log.warn(`sellgrid: cancel ${o.id} failed: ${sanitizeError(err)}`); }
+        }
+        const levels = this.state.getGridLevels(sym);
+        let mutated = false;
+        for (const l of levels) {
+          if (l.side === 'buy' && l.orderId) { l.orderId = undefined; l.placedAt = undefined; mutated = true; }
+        }
+        if (mutated) this.state.setGridLevels(sym, levels);
+      } catch (err) {
+        this.log.warn(`sellgrid: fetchOpenOrders ${sym} failed: ${sanitizeError(err)}`);
+      }
+    }
   }
 
   private cmdStartWelcome(): void {
@@ -1857,7 +2065,9 @@ export class ComboManager {
       '',
       '<b>🧊 Заморозка:</b>',
       '/freezebuy — заморозить покупки по валюте',
-      '/unfreezebuy — разморозить',
+      '/unfreezebuy — разморозить покупки',
+      '/freeze — заморозить всё (только SL/TP работают)',
+      '/unfreeze — полностью разморозить',
       '',
       '<b>🔻 Распродажа по торговой сетке без покупки новой:</b>',
       '/sellgrid — продавать по торговой сетке + freezebuy',

@@ -49,6 +49,10 @@ export interface PairConfig {
   allocationPercent: number; // % of total capital for this pair
   gridSpacingPercent?: number;     // per-pair override for buy grid spacing (% от цены)
   gridSpacingSellPercent?: number; // per-pair override for sell grid spacing (% от цены)
+  // Режим торговли парой (hot-reload + Telegram sync):
+  // 'freezebuy' — заморозить покупки; 'sellgrid' — режим распродажи;
+  // 'freeze' — заморозить всё (SL/TP работают); 'unfreeze' — штатный режим (default)
+  state?: 'freezebuy' | 'sellgrid' | 'freeze' | 'unfreeze';
 }
 
 export interface RiskConfig {

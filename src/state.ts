@@ -91,6 +91,9 @@ export interface BotState {
   // Base currencies with sellgrid mode enabled — after each sell fill, place new sell higher (ladder)
   sellGridBases: string[];
 
+  // Base currencies with full freeze: no buy/sell orders placed, only SL/TP allowed
+  frozenPairs: string[];
+
   // Telegram lastUpdateId — persisted to avoid replaying commands on restart
   telegramUpdateId: number;
 }
@@ -122,6 +125,7 @@ function createEmptyState(): BotState {
     manualPairs: [],
     blockedBuyBases: [],
     sellGridBases: [],
+    frozenPairs: [],
     telegramUpdateId: 0,
   };
 }
@@ -197,6 +201,7 @@ export class StateManager {
         state.manualPairs = Array.isArray(parsed.manualPairs) ? parsed.manualPairs : [];
         state.blockedBuyBases = Array.isArray(parsed.blockedBuyBases) ? parsed.blockedBuyBases.map((s: string) => String(s).toUpperCase()) : [];
         state.sellGridBases = Array.isArray(parsed.sellGridBases) ? parsed.sellGridBases.map((s: string) => String(s).toUpperCase()) : [];
+        state.frozenPairs = Array.isArray(parsed.frozenPairs) ? parsed.frozenPairs.map((s: string) => String(s).toUpperCase()) : [];
         state.telegramUpdateId = typeof parsed.telegramUpdateId === 'number' ? parsed.telegramUpdateId : 0;
 
         // Restore per-pair state with validation
@@ -580,6 +585,26 @@ export class StateManager {
     const before = this.state.sellGridBases?.length ?? 0;
     this.state.sellGridBases = (this.state.sellGridBases ?? []).filter(b => b !== up);
     if (this.state.sellGridBases.length === before) return false;
+    this.saveCritical();
+    return true;
+  }
+
+  // Full freeze per base currency (no buy/sell orders, only SL/TP allowed)
+  getFrozenPairs(): string[] { return this.state.frozenPairs ?? []; }
+  isPairFrozen(base: string): boolean { return (this.state.frozenPairs ?? []).includes(base.toUpperCase()); }
+  addFrozenPair(base: string): boolean {
+    const up = base.toUpperCase();
+    if (!this.state.frozenPairs) this.state.frozenPairs = [];
+    if (this.state.frozenPairs.includes(up)) return false;
+    this.state.frozenPairs.push(up);
+    this.saveCritical();
+    return true;
+  }
+  removeFrozenPair(base: string): boolean {
+    const up = base.toUpperCase();
+    const before = this.state.frozenPairs?.length ?? 0;
+    this.state.frozenPairs = (this.state.frozenPairs ?? []).filter(b => b !== up);
+    if (this.state.frozenPairs.length === before) return false;
     this.saveCritical();
     return true;
   }

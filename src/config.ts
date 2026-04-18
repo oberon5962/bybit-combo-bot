@@ -51,6 +51,7 @@ export function loadConfig(): BotConfig {
       allocationPercent: p.allocationPercent,
       ...(p.gridSpacingPercent != null && { gridSpacingPercent: p.gridSpacingPercent }),
       ...(p.gridSpacingSellPercent != null && { gridSpacingSellPercent: p.gridSpacingSellPercent }),
+      ...(p.state != null && ['freezebuy', 'sellgrid', 'freeze', 'unfreeze'].includes(p.state) && { state: p.state }),
     })),
 
     risk: {
@@ -189,14 +190,11 @@ function validateConfig(config: BotConfig): void {
   if (config.risk.cooldownMaxSL < 1) {
     errors.push('cooldownMaxSL must be >= 1');
   }
-  if (config.risk.trailingSLPercent <= 0 || config.risk.trailingSLPercent > 50) {
-    errors.push('trailingSLPercent must be between 0 and 50');
+  if (config.risk.trailingSLPercent <= 0) {
+    errors.push('trailingSLPercent must be > 0 (use 999 to disable TSL)');
   }
   if (config.risk.trailingSLActivationPercent < 0) {
-    errors.push('trailingSLActivationPercent must be >= 0');
-  }
-  if (config.risk.trailingSLActivationPercent >= config.risk.takeProfitPercent) {
-    errors.push('trailingSLActivationPercent must be < takeProfitPercent (otherwise TP fires first)');
+    errors.push('trailingSLActivationPercent must be >= 0 (use 999 to disable TSL)');
   }
 
   // Grid
