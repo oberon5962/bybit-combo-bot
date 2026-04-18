@@ -1316,10 +1316,13 @@ export class ComboManager {
       btcWatchdog: this.btcPaused ? 'PAUSED — BTC drop detected' : 'ok',
     });
 
-    // Per-pair summary line
+    // Per-pair summary line (sorted by PnL descending)
     const pairLogLines: string[] = [];
     const pairTgLines: string[] = [];
-    for (const pair of this.config.pairs) {
+    const sortedPairs = [...this.config.pairs].sort((a, b) =>
+      this.state.getPairStats(b.symbol).pnl - this.state.getPairStats(a.symbol).pnl,
+    );
+    for (const pair of sortedPairs) {
       const sym = pair.symbol;
       const pairTrades = trades.filter((t) => t.symbol === sym);
       const isHalted = this.state.isPairHalted(sym);
