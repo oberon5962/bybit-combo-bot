@@ -984,6 +984,49 @@ Per-pair state control, bidirectional config sync, RSI/EMA/BB в summary, фик
 - Расширена таблица Telegram-команд: добавлены `/addtoken`, `/removetoken`, уточнено поведение `/buy` и `/regrid`
 - Новая подсекция «Поведение `/freeze` и `/buy` на замороженной паре»
 
+### v2.5.0 (2026-04-19)
+
+Унификация формата логов, фикс allocationPercent при удалении пары, выравнивание auto-spacing.
+
+**Единый формат логов (все ордера и сделки):**
+
+Вместо трёх несовместимых стилей — единая схема с префиксом источника:
+
+```
+[grid]   SUI/USDT    buy  filled   6.09 @ 0.9581
+[grid]   SUI/USDT    sell filled   6.08 @ 1.0999
+[grid]   SOL/USDT    buy  placed   0.0673 @ 88.43    (counter-order)
+[grid]   AAVE/USDT   sell placed   0.0564 @ 105.29   (counter-order)
+[grid]   SUI/USDT    sell placed   6.08 @ 0.9921     (orphan-sell)
+[grid]   RENDER/USDT sell placed   3.01 @ 1.920      (sellgrid-ladder)
+[grid]   SUI/USDT    buy  placed   6.09 @ 0.9581     (grid-init)
+[grid]   DOT/USDT    sell trailed  1.400 → 1.365     (counter-sell, protected halving, goal=1.318)
+[grid]   DOT/USDT    sell trailed  1.329 → 1.324     (counter-sell, halving, goal=1.318)
+[grid]   DOT/USDT    sell trailed  1.329 → 1.318     (counter-sell, halving done)
+[grid]   DOT/USDT    sell trailed  1.329 → 1.318     (counter-sell, direct)
+[dca]    AAVE/USDT   buy  market   0.0565
+[meta]   SUI/USDT    buy  market   5.0
+[meta]   SUI/USDT    sell market   6.08
+[risk]   SUI/USDT    sell market   6.08              (stop-loss)
+[risk]   SUI/USDT    sell market   6.08              (take-profit)
+[risk]   SUI/USDT    sell market   6.08              (trailing-stop-loss)
+[risk]   SUI/USDT    sell market   6.08              (portfolio take-profit)
+[manual] SUI/USDT    buy  market   10.0
+[manual] SUI/USDT    sell market   6.08              (sell-all)
+```
+
+Изменения:
+- `exchange.ts`: убраны логи `LIMIT BUY/SELL` (grid.ts логирует с контекстом), `MARKET BUY/SELL` → новый формат с prefix+label, `cancelOrder` → DEBUG уровень
+- `grid.ts`: все fill/placed/trailed логи переведены на новый формат; `counterOrderLabel` различает `counter-order` vs `sellgrid-ladder`
+- `combo-manager.ts`: market-ордера получают label: `stop-loss`, `take-profit`, `trailing-stop-loss`, `portfolio take-profit`, `sell-all`
+
+**Фикс `allocationPercent` при удалении пары:**
+- `cmdRemoveToken` и `applyPairState('deleted')`: удалённая пара теперь получает `allocationPercent: 0` в config.jsonc (раньше оставалось старое значение)
+- Оставшиеся активные пары пересчитываются как прежде
+
+**Выравнивание auto-spacing лога:**
+- `1.2%/1.7%` → `1.20%/1.70%` (`.toFixed(2)` на все значения); обе колонки `auto=` и `cfg=` теперь одинаковой ширины
+
 ## Важные замечания
 
 - Обязательно начинайте с `USE_TESTNET=true` и небольших сумм

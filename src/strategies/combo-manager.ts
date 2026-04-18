@@ -197,12 +197,17 @@ export class ComboManager {
         const cfgSell = pair?.gridSpacingSellPercent ?? this.config.grid.gridSpacingSellPercent;
         const active = this.config.grid.autoSpacingPriority === 'auto' ? 'AUTO' : 'CFG';
 
+        const buyStr = buy.toFixed(2);
+        const sellStr = sell.toFixed(2);
+        const cfgBuyStr = cfgBuy.toFixed(2);
+        const cfgSellStr = cfgSell.toFixed(2);
+
         const symPaddedLog = (r.symbol + ':').padEnd(maxSymLen + 2);
         const regLog = regimeShort[r.regime] ?? r.regime;
-        logLines.push(`  ${symPaddedLog}auto=${buy}%/${sell}% cfg=${cfgBuy}%/${cfgSell}% regime=${regLog} [${active}]`);
+        logLines.push(`  ${symPaddedLog}auto=${buyStr}%/${sellStr}% cfg=${cfgBuyStr}%/${cfgSellStr}% regime=${regLog} [${active}]`);
         const symPadded = (r.symbol + ':').padEnd(maxSymLen + 2);
         const reg = regimeShort[r.regime] ?? r.regime;
-        tgLines.push(`${symPadded}${buy}%/${sell}% (${reg})`);
+        tgLines.push(`${symPadded}${buyStr}%/${sellStr}% (${reg})`);
       }
 
       this.autoSpacingMap = newMap;
@@ -550,12 +555,12 @@ export class ComboManager {
         const heldValueUSDT = heldBase && heldBase.total > 0 ? heldBase.total * ticker.last : 0;
         const dustThreshold = this.config.dustThresholdUSDT ?? 1;
         if (heldValueUSDT < dustThreshold) {
-          this.log.info(`[sellgrid] ${symbol}: dust detected (${heldValueUSDT.toFixed(4)} USDT < ${dustThreshold} USDT) — auto-freeze`);
+          this.log.info(`[sellgrid] ${symbol}: dust detected (${heldValueUSDT.toFixed(4)} USDT < ${dustThreshold} USDT) — auto-freezebuy`);
           const configPathDust = resolve(__dirname, '../../config.jsonc');
-          await this.applyPairState(pairBase, 'freeze', false);
-          try { updatePairStateInConfig(configPathDust, symbol, 'freeze'); } catch { /* ignore */ }
+          await this.applyPairState(pairBase, 'freezebuy', false);
+          try { updatePairStateInConfig(configPathDust, symbol, 'freezebuy'); } catch { /* ignore */ }
           this.lastConfigHash = createHash('md5').update(readFileSync(configPathDust, 'utf-8')).digest('hex');
-          this.tg.sendAlert(`🧊 <b>${symbol}</b> — sellgrid завершён (остаток < ${dustThreshold}$). Пара автоматически заморожена.`);
+          this.tg.sendAlert(`🧊 <b>${symbol}</b> — sellgrid завершён (остаток &lt; ${dustThreshold}$). Покупки заморожены, оставшиеся продажи активны.`);
           return;
         }
       } catch (dustErr) {
@@ -936,7 +941,8 @@ export class ComboManager {
         this.log.warn(`${reason}: Failed to get precision for ${symbol}, using raw amount: ${precErr}`);
       }
 
-      const order = await this.exchange.createMarketSell(symbol, sellAmount, 'risk');
+      const riskLabel = reason === 'trailing-stop' ? 'trailing-stop-loss' : reason;
+      const order = await this.exchange.createMarketSell(symbol, sellAmount, 'risk', riskLabel);
       this.exchange.deductCachedBalance(symbol.split('/')[0], sellAmount);
       const filledAmount = order.filled > 0 ? order.filled : sellAmount;
       const fillPrice = order.price || currentPrice;
@@ -1119,7 +1125,7 @@ export class ComboManager {
           } catch { /* precision already checked above */ }
           this.log.info(`Selling ${roundedSellAmount} ${base} (~${valueUSDT.toFixed(2)} USDT)`);
 
-          const order = await this.exchange.createMarketSell(pair.symbol, roundedSellAmount, 'risk');
+          const order = await this.exchange.createMarketSell(pair.symbol, roundedSellAmount, 'risk', 'portfolio take-profit');
           this.exchange.deductCachedBalance(base, roundedSellAmount);
           const filledAmount = order.filled > 0 ? order.filled : roundedSellAmount;
           const tpPrice = order.price || ticker.last;
@@ -1177,7 +1183,7 @@ export class ComboManager {
           const ticker = await this.exchange.fetchTicker(sym);
           if (sellAmount * ticker.last < mp.minCost) continue;
 
-          const order = await this.exchange.createMarketSell(sym, sellAmount, 'manual');
+          const order = await this.exchange.createMarketSell(sym, sellAmount, 'manual', 'sell-all');
           this.exchange.deductCachedBalance(sym.split('/')[0], sellAmount);
           const filledAmount = order.filled > 0 ? order.filled : sellAmount;
           const sellPrice = order.price || ticker.last;
@@ -2001,16 +2007,17 @@ export class ComboManager {
       this.log.info(`Pair ${mainSymbol} marked deleted: cancelled ${cancelled} orders, grid cleared`);
       this.tg.sendAlert(`🗑 <b>${mainSymbol}</b> удалена из торговли. Отменено ордеров: ${cancelled}. Пара скрыта из статистики.`);
 
-      // При auto-режиме пересчитать аллокации оставшихся активных пар
+      // При auto-режиме пересчитать аллокации оставшихся активных пар + обнулить удалённую
       if (this.config.allocationPercentMode === 'auto') {
         try {
           const configPath = resolve(__dirname, '../../config.jsonc');
           const remaining = this.config.pairs.filter(p => p.state !== 'deleted' && !this.state.isPairDeleted(p.symbol));
-          if (remaining.length > 0) {
-            const equalAlloc = Math.floor(100 / remaining.length);
-            rewritePairAllocations(configPath, remaining.map(p => ({ symbol: p.symbol, allocationPercent: equalAlloc })));
-            this.lastConfigHash = createHash('md5').update(readFileSync(configPath, 'utf-8')).digest('hex');
-          }
+          const equalAlloc = remaining.length > 0 ? Math.floor(100 / remaining.length) : 0;
+          rewritePairAllocations(configPath, [
+            { symbol: mainSymbol, allocationPercent: 0 },
+            ...remaining.map(p => ({ symbol: p.symbol, allocationPercent: equalAlloc })),
+          ]);
+          this.lastConfigHash = createHash('md5').update(readFileSync(configPath, 'utf-8')).digest('hex');
         } catch (err) {
           this.log.warn(`applyPairState deleted: rewritePairAllocations failed: ${sanitizeError(err)}`);
         }
@@ -2046,6 +2053,7 @@ export class ComboManager {
       }
     } else if (newState === 'freezebuy') {
       this.state.removeFrozenPair(base);
+      this.state.removeSellGridBase(base);
       await this.cmdFreezeBuyInternal(base);
       if (writeConfig) {
         try { updatePairStateInConfig(configPath, mainSymbol, 'freezebuy'); } catch (e) { this.log.warn(`config-writer freezebuy: ${sanitizeError(e)}`); }
@@ -2256,13 +2264,14 @@ export class ComboManager {
     try {
       markPairDeletedInConfig(configPath, symbol);
 
-      // При auto-режиме пересчитать аллокации оставшихся активных пар
+      // При auto-режиме пересчитать аллокации оставшихся активных пар + обнулить удалённую
       if (this.config.allocationPercentMode === 'auto') {
         const remaining = this.config.pairs.filter(p => p.symbol !== symbol && p.state !== 'deleted' && !this.state.isPairDeleted(p.symbol));
-        if (remaining.length > 0) {
-          const equalAlloc = Math.floor(100 / remaining.length);
-          rewritePairAllocations(configPath, remaining.map(p => ({ symbol: p.symbol, allocationPercent: equalAlloc })));
-        }
+        const equalAlloc = remaining.length > 0 ? Math.floor(100 / remaining.length) : 0;
+        rewritePairAllocations(configPath, [
+          { symbol, allocationPercent: 0 },
+          ...remaining.map(p => ({ symbol: p.symbol, allocationPercent: equalAlloc })),
+        ]);
       }
 
       this.lastConfigHash = createHash('md5').update(readFileSync(configPath, 'utf-8')).digest('hex');
@@ -2761,11 +2770,18 @@ export class ComboManager {
       const sym = pair.symbol;
       try {
         await this.grid.cancelAll(sym);
-        this.state.setGridLevels(sym, []);
+        // Сохраняем sell-уровни с counter-sell metadata (oldBreakEven/originalPlannedSellPrice)
+        // чтобы initGrid на следующем тике подхватил их и не потерял trailing-контекст.
+        // virtualNewSellPrice и nextStepAt сбрасываются — trailing начнётся заново при следующем downshift.
+        const levelsBeforeReset = this.state.getGridLevels(sym);
+        const preservedSells = levelsBeforeReset
+          .filter(l => l.side === 'sell' && l.oldBreakEven)
+          .map(l => ({ ...l, orderId: undefined, filled: false, virtualNewSellPrice: undefined, nextStepAt: undefined }));
+        this.state.setGridLevels(sym, preservedSells);
         this.state.setGridInitialized(sym, false);
         this.state.setGridCenterPrice(sym, 0);
         cancelled++;
-        this.log.info(`  ${sym}: orders cancelled, grid reset`);
+        this.log.info(`  ${sym}: orders cancelled, grid reset (preserved ${preservedSells.length} sell level(s) with counter-sell metadata)`);
       } catch (err) {
         this.log.error(`  ${sym}: reset failed — ${sanitizeError(err)}`);
       }

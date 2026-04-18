@@ -7,6 +7,16 @@ import {
   BotConfig, OHLCV, Ticker, Balance, BotOrder, Logger, sanitizeError
 } from './types';
 
+function strategyPrefix(strategy: string): string {
+  switch (strategy) {
+    case 'dca':    return 'dca';
+    case 'meta':   return 'meta';
+    case 'risk':   return 'risk';
+    case 'manual': return 'manual';
+    default:       return 'grid';
+  }
+}
+
 export class BybitExchange {
   private exchange: Exchange;
   private log: Logger;
@@ -174,7 +184,6 @@ export class BybitExchange {
     price: number,
     strategy: BotOrder['strategy'],
   ): Promise<BotOrder> {
-    this.log.info(`LIMIT BUY ${symbol}: ${amount} @ ${price}`, { strategy });
     const order = await this.exchange.createLimitBuyOrder(symbol, amount, price);
     return this.mapOrder(order, strategy);
   }
@@ -185,7 +194,6 @@ export class BybitExchange {
     price: number,
     strategy: BotOrder['strategy'],
   ): Promise<BotOrder> {
-    this.log.info(`LIMIT SELL ${symbol}: ${amount} @ ${price}`, { strategy });
     const order = await this.exchange.createLimitSellOrder(symbol, amount, price);
     return this.mapOrder(order, strategy);
   }
@@ -194,8 +202,11 @@ export class BybitExchange {
     symbol: string,
     amount: number,
     strategy: BotOrder['strategy'],
+    label?: string,
   ): Promise<BotOrder> {
-    this.log.info(`MARKET BUY ${symbol}: ${amount}`, { strategy });
+    const prefix = strategyPrefix(strategy);
+    const suffix = label ? `  (${label})` : '';
+    this.log.info(`[${prefix}] ${symbol}  buy  market   ${amount}${suffix}`);
     const order = await this.exchange.createMarketBuyOrder(symbol, amount);
     return this.mapOrder(order, strategy);
   }
@@ -204,14 +215,17 @@ export class BybitExchange {
     symbol: string,
     amount: number,
     strategy: BotOrder['strategy'],
+    label?: string,
   ): Promise<BotOrder> {
-    this.log.info(`MARKET SELL ${symbol}: ${amount}`, { strategy });
+    const prefix = strategyPrefix(strategy);
+    const suffix = label ? `  (${label})` : '';
+    this.log.info(`[${prefix}] ${symbol}  sell market   ${amount}${suffix}`);
     const order = await this.exchange.createMarketSellOrder(symbol, amount);
     return this.mapOrder(order, strategy);
   }
 
   async cancelOrder(orderId: string, symbol: string): Promise<void> {
-    this.log.info(`CANCEL order ${orderId} on ${symbol}`);
+    this.log.debug(`cancel order ${orderId} on ${symbol}`);
     await this.exchange.cancelOrder(orderId, symbol);
   }
 

@@ -509,6 +509,7 @@ export class GridStrategy {
           pending.level.orderId = order.id;
           pending.level.amount = pending.amount;
           if (pending.side === 'sell') pending.level.placedAt = Date.now();
+          this.log.info(`[grid] ${symbol}  ${pending.side === 'buy' ? 'buy ' : 'sell'}  placed   ${pending.amount} @ ${pending.level.price}  (grid-init)`);
           ordersPlaced++;
         } catch (err) {
           const errStr = String(err);
@@ -619,7 +620,7 @@ export class GridStrategy {
           }
 
           levelsChanged = true;
-          this.log.info(`Grid ${filledSide} filled at ${actualPrice}`, { symbol, amount: filledAmount });
+          this.log.info(`[grid] ${symbol}  ${filledSide === 'buy' ? 'buy ' : 'sell'}  filled   ${filledAmount} @ ${actualPrice}`);
 
           // Record filled trade with actual amounts
           const tradeCost = filledAmount * actualPrice;
@@ -674,6 +675,7 @@ export class GridStrategy {
             : filledPrice * (1 - counterBuyPct / 100);
           let counterPrice = this.roundPriceForMarket(rawCounterPrice, precision.pricePrecision);
           let counterSide: 'buy' | 'sell' = filledSide === 'buy' ? 'sell' : 'buy';
+          let counterOrderLabel = 'counter-order';
 
           // Sellgrid mode: after a sell fill, place a NEW SELL higher (ladder), not counter-buy.
           // Overrides buy-freeze skip below. Sellgrid ~= freeze + ladder-up.
@@ -681,7 +683,7 @@ export class GridStrategy {
           if (counterSide === 'buy' && this.state.isSellGridActive(base)) {
             counterSide = 'sell';
             counterPrice = this.roundPriceForMarket(filledPrice * (1 + counterSellPct / 100), precision.pricePrecision);
-            this.log.info(`Sellgrid: sell fill @ ${filledPrice} → new sell @ ${counterPrice} (ladder up, ${symbol})`);
+            counterOrderLabel = 'sellgrid-ladder';
           }
 
           // Buy-freeze: skip counter-buy when base is frozen; retire the level to sell-side so it doesn't retry.
@@ -802,7 +804,7 @@ export class GridStrategy {
               this.exchange.deductCachedBalance('USDT', counterCost);
             }
 
-            this.log.info(`Grid counter-order placed: ${counterSide} ${counterAmount} @ ${counterPrice}`, { symbol });
+            this.log.info(`[grid] ${symbol}  ${counterSide === 'buy' ? 'buy ' : 'sell'}  placed   ${counterAmount} @ ${counterPrice}  (${counterOrderLabel})`);
 
             // Only update level state AFTER counter-order confirmed placed
             level.orderId = counterOrderId;
@@ -949,7 +951,7 @@ export class GridStrategy {
             levels.push({ price: sellPrice, amount: sellAmount, side: 'sell', orderId: order.id, filled: false, placedAt: Date.now() });
             this.exchange.deductCachedBalance(base, sellAmount);
             orphanPlaced++;
-            this.log.info(`Grid orphan-sell placed for ${symbol}: ${sellAmount} @ ${sellPrice} (uncovered position)`);
+            this.log.info(`[grid] ${symbol}  sell  placed   ${sellAmount} @ ${sellPrice}  (orphan-sell)`);
             remaining -= sellAmount;
             priceStep++;
 
@@ -1005,7 +1007,7 @@ export class GridStrategy {
               () => this.exchange.createLimitSell(symbol, level.amount, target, 'grid'),
               `Counter-sell trail flush ${symbol} @ ${target}`,
             );
-            this.log.info(`Counter-sell trail flush (stepHours=0): ${symbol} ${level.price.toFixed(6)} → ${target.toFixed(6)}`, { symbol });
+            this.log.info(`[grid] ${symbol}  sell  trailed  ${level.price.toFixed(6)} → ${target.toFixed(6)}  (counter-sell, direct)`);
             level.price = target;
             level.orderId = order.id;
             level.placedAt = Date.now();
@@ -1062,7 +1064,7 @@ export class GridStrategy {
             () => this.exchange.createLimitSell(symbol, level.amount, newPrice, 'grid'),
             `Counter-sell trail ${symbol} @ ${newPrice}`,
           );
-          this.log.info(`Counter-sell trail: ${symbol} ${level.price.toFixed(6)} → ${newPrice.toFixed(6)} (target=${v.toFixed(6)}${finish ? ', finished' : ''})`, { symbol });
+          this.log.info(`[grid] ${symbol}  sell  trailed  ${level.price.toFixed(6)} → ${newPrice.toFixed(6)}  (counter-sell, ${finish ? 'halving done' : `halving, goal=${v.toFixed(6)}`})`);
           level.price = newPrice;
           level.orderId = order.id;
           level.placedAt = Date.now();
@@ -1171,7 +1173,7 @@ export class GridStrategy {
               () => this.exchange.createLimitSell(symbol, level.amount, newPrice, 'grid'),
               `Counter-sell trail init ${symbol} @ ${newPrice}`,
             );
-            this.log.info(`Counter-sell trail init (step 2): ${symbol} ${level.price.toFixed(6)} → ${newPrice.toFixed(6)} (oldBE=${level.oldBreakEven.toFixed(6)}, target=${virtualNewSellPrice.toFixed(6)})`, { symbol });
+            this.log.info(`[grid] ${symbol}  sell  trailed  ${level.price.toFixed(6)} → ${newPrice.toFixed(6)}  (counter-sell, protected halving, goal=${virtualNewSellPrice.toFixed(6)})`);
             level.price = newPrice;
             level.orderId = order.id;
             level.placedAt = Date.now();
@@ -1202,7 +1204,7 @@ export class GridStrategy {
               () => this.exchange.createLimitSell(symbol, level.amount, virtualNewSellPrice, 'grid'),
               `Counter-sell trail step3 ${symbol} @ ${virtualNewSellPrice}`,
             );
-            this.log.info(`Counter-sell trail (step 3): ${symbol} ${level.price.toFixed(6)} → ${virtualNewSellPrice.toFixed(6)} (${halvingDisabled ? 'halving disabled' : 'above oldBE'}, direct)`, { symbol });
+            this.log.info(`[grid] ${symbol}  sell  trailed  ${level.price.toFixed(6)} → ${virtualNewSellPrice.toFixed(6)}  (counter-sell, direct)`);
             level.price = virtualNewSellPrice;
             level.orderId = order.id;
             level.placedAt = Date.now();
