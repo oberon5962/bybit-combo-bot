@@ -44,7 +44,7 @@
     "bollingerBuyMultiplier": 1.5,      // orderSize * 1.5 при покупке у нижней полосы BB или все, что есть
     "bollingerSellMultiplier": 1.5,     // orderSize * 1.5 при продаже у верхней полосы BB или все, что есть
     "bollingerShiftLevels": 2,          // Перекинуть 2 уровня в пользу buy/sell по BB
-    "counterSellTrailStepHours": 4,     // Шаг midpoint-halving для counter-sell при split rebalance DOWN (часы, 0 = выкл). Старый ордер двоичным поиском приближается к virtualNewSellPrice, защита oldBreakEven только на первом шаге
+    "counterSellTrailStepHours": 4,     // Шаг midpoint-halving для counter-sell при split rebalance DOWN (часы). >0 = halving (двоичный поиск к virtualNewSellPrice с защитой oldBreakEven на первом шаге). 0 = halving выкл, при ребалансе counter-sell ставится сразу на virtualNewSellPrice без защиты. <0 = trailing полностью выкл, sell остаются на своих ценах
 
     // Защита от продажи в убыток (используется в Counter-Sell Guard и Grid Sell Guard).
     // Если рассчитанная цена sell (по spacing) ниже безубыточной (avgEntry * (1 + minSellProfitPercent/100)) —

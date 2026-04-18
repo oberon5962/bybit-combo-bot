@@ -1116,7 +1116,7 @@ export class GridStrategy {
    * virtualNewSellPrice = currentPrice × (1 + sellSpacing/100) и выполняем шаг 2 спецификации.
    */
   private async initCounterSellTrailing(symbol: string, currentPrice: number): Promise<void> {
-    if (this.config.counterSellTrailStepHours <= 0) return;
+    if (this.config.counterSellTrailStepHours < 0) return;
     const levels = this.state.getGridLevels(symbol);
     const { sellSpacingPct } = this.getSpacing(symbol);
     const precision = await this.getPrecision(symbol);
@@ -1125,6 +1125,7 @@ export class GridStrategy {
       precision.pricePrecision,
     );
     const stepMs = this.config.counterSellTrailStepHours * 3600000;
+    const halvingDisabled = this.config.counterSellTrailStepHours === 0;
     let changed = false;
 
     for (const level of levels) {
@@ -1135,7 +1136,7 @@ export class GridStrategy {
 
       level.virtualNewSellPrice = virtualNewSellPrice;
 
-      if (virtualNewSellPrice < level.oldBreakEven) {
+      if (!halvingDisabled && virtualNewSellPrice < level.oldBreakEven) {
         // Шаг 2: новая цена = max(oldBreakEven, midpoint(originalPlanned, virtualNew))
         const midpoint = (level.originalPlannedSellPrice + virtualNewSellPrice) / 2;
         const newPrice = this.roundPriceForMarket(
