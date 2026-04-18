@@ -154,6 +154,7 @@ export async function analyzeSymbol(
   timeframe: string,
   periodHours: number,
   periodName: string,
+  feeRoundTripPct: number = FEE_ROUND_TRIP_PCT,
 ): Promise<CandleStats | null> {
   const since = Date.now() - periodHours * 60 * 60 * 1000;
 
@@ -230,7 +231,7 @@ export async function analyzeSymbol(
   //                  каждый buy fill = реальное движение, не внутрисвечной шум.
   // recSellSpacing = P70, но не меньше buy + 0.3% (комиссии round-trip).
   const recBuySpacing = Math.round(percentile(ranges, 55) * 100) / 100;
-  const minSellForProfit = recBuySpacing + FEE_ROUND_TRIP_PCT;
+  const minSellForProfit = recBuySpacing + feeRoundTripPct;
   const recSellRaw = Math.round(percentile(ranges, 70) * 100) / 100;
   const recSellSpacing = Math.max(recSellRaw, minSellForProfit);
 
@@ -265,6 +266,7 @@ export async function analyzeSymbol(
 // 14d/15m → вес 0.05: слишком далёкое прошлое и слишком мелкий шум.
 export function computeRecommendation(
   details: CandleStats[],
+  feeRoundTripPct: number = FEE_ROUND_TRIP_PCT,
 ): { buySpacing: number; sellSpacing: number; regime: 'low' | 'normal' | 'high' } {
   const weights: Record<string, Record<string, number>> = {
     '24h': { '15m': 0.5, '1h': 2.0, '4h': 0.8 },
@@ -287,7 +289,7 @@ export function computeRecommendation(
     if (d.period === '7d' && d.timeframe === '1h') atr7d = d.atrPct;
   }
 
-  if (weightSum === 0) return { buySpacing: FEE_ROUND_TRIP_PCT, sellSpacing: FEE_ROUND_TRIP_PCT * 2, regime: 'normal' };
+  if (weightSum === 0) return { buySpacing: feeRoundTripPct, sellSpacing: feeRoundTripPct * 2, regime: 'normal' };
 
   const buySpacing = round(buySum / weightSum, 2);
   const sellSpacing = round(sellSum / weightSum, 2);
@@ -314,6 +316,7 @@ export async function analyzeAllSymbols(
   fetchCandles: CandleFetcher,
   symbols: string[],
   onProgress?: (symbol: string, done: number, total: number) => void,
+  feeRoundTripPct: number = FEE_ROUND_TRIP_PCT,
 ): Promise<SymbolRecommendation[]> {
   const total = symbols.length * PERIODS.length * TIMEFRAMES.length;
   let done = 0;
@@ -326,7 +329,7 @@ export async function analyzeAllSymbols(
     for (const period of PERIODS) {
       for (const { tf } of TIMEFRAMES) {
         try {
-          const stats = await analyzeSymbol(fetchCandles, symbol, tf, period.hours, period.name);
+          const stats = await analyzeSymbol(fetchCandles, symbol, tf, period.hours, period.name, feeRoundTripPct);
           if (stats) {
             details.push(stats);
             currentPrice = stats.currentPrice;
@@ -344,7 +347,7 @@ export async function analyzeAllSymbols(
 
     if (details.length === 0) continue;
 
-    const { buySpacing, sellSpacing, regime } = computeRecommendation(details);
+    const { buySpacing, sellSpacing, regime } = computeRecommendation(details, feeRoundTripPct);
     results.push({ symbol, currentPrice, buySpacing, sellSpacing, volatilityRank: 0, regime, details });
   }
 

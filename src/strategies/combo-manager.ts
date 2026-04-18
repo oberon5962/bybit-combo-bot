@@ -14,7 +14,7 @@ import { DCAStrategy } from './dca';
 import { StateManager } from '../state';
 import { TelegramNotifier, TelegramCommand } from '../telegram';
 import { ExchangeSync } from '../sync';
-import { analyzeAllSymbols, round as volRound, FEE_ROUND_TRIP_PCT as VOL_FEE } from '../volatility';
+import { analyzeAllSymbols, round as volRound } from '../volatility';
 import type { CandleFetcher } from '../volatility';
 import { updatePairStateInConfig, updatePairSpacingInConfig } from '../config-writer';
 import { createHash } from 'crypto';
@@ -170,9 +170,10 @@ export class ComboManager {
       const fetcher: CandleFetcher = (symbol, tf, since, limit) =>
         this.exchange.fetchOHLCVRaw(symbol, tf, since, limit);
 
+      const minSellProfitPct = this.config.grid.minSellProfitPercent;
       const results = await analyzeAllSymbols(fetcher, symbols, (sym, done, total) => {
         this.log.debug(`Auto-spacing: ${sym} (${done}/${total})`);
-      });
+      }, minSellProfitPct);
 
       const safetyMultiplier = 1 - (this.config.grid.autoSpacingSafetyMarginPercent / 100);
       const newMap = new Map<string, { buy: number; sell: number }>();
@@ -185,9 +186,9 @@ export class ComboManager {
         let buy = volRound(r.buySpacing * safetyMultiplier, 2);
         let sell = volRound(r.sellSpacing * safetyMultiplier, 2);
 
-        // Floor: never below fee round-trip
-        buy = Math.max(buy, VOL_FEE);
-        sell = volRound(Math.max(sell, buy + VOL_FEE), 2);
+        // Floor: never below minSellProfitPercent (covers fees + buffer)
+        buy = Math.max(buy, minSellProfitPct);
+        sell = volRound(Math.max(sell, buy + minSellProfitPct), 2);
 
         newMap.set(r.symbol, { buy, sell });
 
