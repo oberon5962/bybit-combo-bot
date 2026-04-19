@@ -415,10 +415,10 @@ export class ComboManager {
         // External buy: Bybit has more than state. The delta was purchased at ~current price,
         // not at the old avgEntryPrice. Blend costs: old position at old avg + delta at current price.
         const delta = bybitTotal - stateAmt;
-        const currentPrice = allBalances[base]?.total ?? 0 > 0
-          ? (this.exchange['tickerCache']?.get?.(pair.symbol)?.ticker?.last ?? statePos.avgEntryPrice)
+        const cachedTicker = this.exchange.getCachedTicker(pair.symbol);
+        const priceForDelta = cachedTicker?.last && cachedTicker.last > 0
+          ? cachedTicker.last
           : statePos.avgEntryPrice;
-        const priceForDelta = currentPrice > 0 ? currentPrice : statePos.avgEntryPrice;
         newCost = statePos.costBasis + delta * priceForDelta;
         const newAvg = newCost / bybitTotal;
         note = `external buy +${delta.toFixed(6)} @ ~${priceForDelta.toFixed(4)}, avgEntry ${statePos.avgEntryPrice.toFixed(4)} → ${newAvg.toFixed(4)}`;

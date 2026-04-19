@@ -80,6 +80,13 @@ export class BybitExchange {
     return this.fetchTicker(symbol);
   }
 
+  /** Get cached ticker without fetching. Returns undefined if missing or older than maxAgeMs. */
+  getCachedTicker(symbol: string, maxAgeMs: number = 15000): Ticker | undefined {
+    const cached = this.tickerCache.get(symbol);
+    if (cached && Date.now() - cached.timestamp < maxAgeMs) return cached.ticker;
+    return undefined;
+  }
+
   async fetchOHLCV(
     symbol: string,
     timeframe: string = '5m',
