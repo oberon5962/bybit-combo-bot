@@ -577,7 +577,8 @@ export class GridStrategy {
       }));
     }
 
-    // Log skip summary every tick so user always sees current skip reason.
+    // Skip reasons are surfaced in BOT SUMMARY (per-pair line "skip buy:/skip sell:!").
+    // Per-tick skip log was too noisy; only log transitions (skip→resumed).
     const buySummary  = buySkipReasons.size  > 0 ? [...buySkipReasons].sort().join(', ')  : '';
     const sellSummary = sellSkipReasons.size > 0 ? [...sellSkipReasons].sort().join(', ') : '';
     const combinedParts: string[] = [];
@@ -585,7 +586,6 @@ export class GridStrategy {
     if (sellSummary) combinedParts.push(`sell: ${sellSummary}`);
 
     if (combinedParts.length > 0) {
-      this.log.info(`Grid skip ${symbol}: ${combinedParts.join(' | ')}`);
       this.lastSkipSummary.set(symbol, combinedParts.join(' | '));
     } else if (this.lastSkipSummary.has(symbol)) {
       this.log.info(`Grid orders resumed for ${symbol} — all levels placed`);
