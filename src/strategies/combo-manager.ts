@@ -1491,7 +1491,7 @@ export class ComboManager {
       const noParts: string[] = [];
       if (buySkip)  noParts.push(`no buy: ${buySkip}`);
       if (sellSkip) noParts.push(`no sell: ${sellSkip}`);
-      const noCol = noParts.join(' | ').padEnd(22);
+      const noCol = noParts.join(' ').padEnd(22);
 
       // State column: directly from config.pairs[].state (deleted/freeze/freezebuy/sellgrid/unfreeze)
       const pairCfg = this.config.pairs.find(p => p.symbol === sym);
