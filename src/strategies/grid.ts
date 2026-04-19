@@ -397,6 +397,38 @@ export class GridStrategy {
       this.log.warn(`Failed to fetch balances for grid checks: ${sanitizeError(err)}`);
     }
 
+    // Per-pair USDT budget for BUYS: fair-share based on allocationPercent.
+    // Prevents one pair hogging all USDT when multiple pairs compete for limited cash.
+    // Pool = freeUSDT + all USDT currently locked in buy orders across active pairs.
+    // Fair share = pair.allocationPercent / totalActiveAlloc × pool.
+    // Available budget = max(0, fairShare - thisPairAlreadyLockedInBuys), clamped to freeUSDT.
+    const thisPair = this.pairsConfig.find(p => p.symbol === symbol);
+    let pairBuyBudget = freeUSDT; // fallback
+    if (thisPair) {
+      const activePairs = this.pairsConfig.filter(p =>
+        p.state !== 'deleted' && !this.state.isBuyBlocked(p.symbol.split('/')[0]),
+      );
+      const totalActiveAlloc = activePairs.reduce((s, p) => s + p.allocationPercent, 0);
+      if (totalActiveAlloc > 0 && activePairs.some(p => p.symbol === symbol)) {
+        let totalLockedInBuys = 0;
+        let thisPairLockedInBuys = 0;
+        for (const p of this.pairsConfig) {
+          const pLevels = this.state.getGridLevels(p.symbol);
+          const locked = pLevels
+            .filter(l => l.side === 'buy' && l.orderId && l.amount > 0)
+            .reduce((s, l) => s + l.price * l.amount, 0);
+          totalLockedInBuys += locked;
+          if (p.symbol === symbol) thisPairLockedInBuys = locked;
+        }
+        const pool = freeUSDT + totalLockedInBuys;
+        const fairShare = (thisPair.allocationPercent / totalActiveAlloc) * pool;
+        pairBuyBudget = Math.min(freeUSDT, Math.max(0, fairShare - thisPairLockedInBuys));
+      } else if (!activePairs.some(p => p.symbol === symbol)) {
+        // This pair is not active (deleted or buy-blocked) — no budget
+        pairBuyBudget = 0;
+      }
+    }
+
     // Enforce maxOpenOrdersPerPair
     const currentOpenOrders = levels.filter(l => l.orderId).length;
     const maxNewOrders = Math.max(0, this.maxOpenOrdersPerPair - currentOpenOrders);
@@ -441,18 +473,19 @@ export class GridStrategy {
         const buyCheck = this.isBuyAllowed(symbol);
         if (!buyCheck.allowed) { addSkip(buyCheck.reason); continue; }
         let orderCost = amount * level.price;
-        if (freeUSDT < orderCost) {
-          const availableAmount = this.roundAmountForMarket(freeUSDT / level.price, precision.amountPrecision);
+        if (pairBuyBudget < orderCost) {
+          const availableAmount = this.roundAmountForMarket(pairBuyBudget / level.price, precision.amountPrecision);
           const availableCost = availableAmount * level.price;
           if (availableAmount >= precision.minAmount && availableCost >= precision.minCost) {
-            this.log.info(`Buy reduced (low USDT): ${amount} → ${availableAmount} (${(availableAmount/amount*100).toFixed(0)}% of target)`, { symbol });
+            this.log.info(`Buy reduced (pair budget): ${amount} → ${availableAmount} (${(availableAmount/amount*100).toFixed(0)}% of target, budget=$${pairBuyBudget.toFixed(2)})`, { symbol });
             amount = availableAmount;
             orderCost = availableCost;
           } else {
-            addSkip('low USDT');
+            addSkip('pair USDT budget exhausted');
             continue;
           }
         }
+        pairBuyBudget -= orderCost;
         freeUSDT -= orderCost;
         this.exchange.deductCachedBalance('USDT', orderCost);
         pendingOrders.push({ level, side: 'buy', amount });
