@@ -20,7 +20,9 @@ export class GridStrategy {
   private restoredLogged: Set<string> = new Set(); // prevent repeated "Grid restored" logs
   // BUG #12 fix: cache market precision per symbol
   private precisionCache: Map<string, { pricePrecision: number; amountPrecision: number; minAmount: number; minCost: number }> = new Map();
-  private lastSkipSummary: Map<string, string> = new Map(); // suppress repeated skip logs
+  private lastSkipSummary: Map<string, string> = new Map(); // combined skip log (buy+sell)
+  private lastBuySkipSummary: Map<string, string> = new Map(); // skip reasons for BUY side only
+  private lastSellSkipSummary: Map<string, string> = new Map(); // skip reasons for SELL side only
   private lastEmaCrossover: Map<string, 'bearish' | 'bullish' | 'neutral'> = new Map(); // dedup EMA crossover logs
   private lastRebalanceTime: Map<string, number> = new Map(); // cooldown between rebalances
   private _marketProtectionActive: boolean = false;
@@ -48,6 +50,16 @@ export class GridStrategy {
   /** Get current skip reason for a pair (from last tick), or undefined if not skipping */
   getSkipReason(symbol: string): string | undefined {
     return this.lastSkipSummary.get(symbol);
+  }
+
+  /** Skip reason for BUY-side placement (from last tick) */
+  getBuySkipReason(symbol: string): string | undefined {
+    return this.lastBuySkipSummary.get(symbol);
+  }
+
+  /** Skip reason for SELL-side placement (from last tick) */
+  getSellSkipReason(symbol: string): string | undefined {
+    return this.lastSellSkipSummary.get(symbol);
   }
 
   /** Hot-reload: обновить конфиг без перестроения сетки. Новые параметры применятся к новым ордерам. */
@@ -445,9 +457,13 @@ export class GridStrategy {
       Math.abs(a.price - currentPrice) - Math.abs(b.price - currentPrice),
     );
 
-    // Track skip reasons for summary log (generic keys — no volatile values like RSI or balance)
-    const skipReasons: Set<string> = new Set();
-    const addSkip = (reason: string) => { skipReasons.add(reason); };
+    // Track skip reasons per side (buy/sell) for visible summary markers
+    const buySkipReasons: Set<string> = new Set();
+    const sellSkipReasons: Set<string> = new Set();
+    const addSkip = (reason: string, side: 'buy' | 'sell') => {
+      if (side === 'buy') buySkipReasons.add(reason);
+      else sellSkipReasons.add(reason);
+    };
 
     // Pass 1: compute eligible orders sequentially (no API calls).
     // Reserves balance (freeUSDT / freeCrypto) and mutates level.price for midpoint sells.
@@ -456,27 +472,27 @@ export class GridStrategy {
 
     for (const level of sortedLevels) {
       if (level.orderId || level.filled) continue;
-      if (pendingOrders.length >= maxNewOrders) { addSkip('max orders'); break; }
+      if (pendingOrders.length >= maxNewOrders) { addSkip('max orders', level.side); break; }
 
       const sideMultiplier = level.side === 'buy' ? bbAdaptive.buyMultiplier : bbAdaptive.sellMultiplier;
       const orderBudget = baseOrderBudget * sideMultiplier;
       let amount = this.roundAmountForMarket(orderBudget / level.price, precision.amountPrecision);
 
       if (amount < precision.minAmount) {
-        if (precision.minAmount * level.price > orderBudget * 1.5) { addSkip('budget too small'); continue; }
+        if (precision.minAmount * level.price > orderBudget * 1.5) { addSkip('budget too small', level.side); continue; }
         amount = precision.minAmount;
       }
       if (amount * level.price < precision.minCost) {
         const minAmountForCost = Math.ceil((precision.minCost / level.price) * Math.pow(10, precision.amountPrecision)) / Math.pow(10, precision.amountPrecision);
-        if (minAmountForCost * level.price > orderBudget * 1.5) { addSkip('below minCost'); continue; }
+        if (minAmountForCost * level.price > orderBudget * 1.5) { addSkip('below minCost', level.side); continue; }
         amount = Math.max(amount, minAmountForCost);
       }
 
       if (level.side === 'buy' && level.price < currentPrice) {
-        if (this.state.isBuyBlocked(base)) { addSkip('buy frozen'); continue; }
-        if (this._marketProtectionActive) { addSkip('market protection'); continue; }
+        if (this.state.isBuyBlocked(base)) { addSkip('buy frozen', 'buy'); continue; }
+        if (this._marketProtectionActive) { addSkip('BTC watchdog occured', 'buy'); continue; }
         const buyCheck = this.isBuyAllowed(symbol);
-        if (!buyCheck.allowed) { addSkip(buyCheck.reason); continue; }
+        if (!buyCheck.allowed) { addSkip(buyCheck.reason, 'buy'); continue; }
         let orderCost = amount * level.price;
         if (pairBuyBudget < orderCost) {
           const availableAmount = this.roundAmountForMarket(pairBuyBudget / level.price, precision.amountPrecision);
@@ -486,7 +502,7 @@ export class GridStrategy {
             amount = availableAmount;
             orderCost = availableCost;
           } else {
-            addSkip('pair USDT budget exhausted');
+            addSkip('low USDT (pair budget)', 'buy');
             continue;
           }
         }
@@ -501,7 +517,7 @@ export class GridStrategy {
         const lossMult = 1 - (this.config.maxSellLossPercent / 100);
         const minSellPrice = pos.avgEntryPrice * breakEvenMult;
         if (pos.avgEntryPrice > 0 && level.price < minSellPrice) {
-          if (minSellPrice <= currentPrice) { addSkip('below entry'); continue; }
+          if (minSellPrice <= currentPrice) { addSkip('below entry', 'sell'); continue; }
           const midpoint = (level.price + minSellPrice) / 2;
           const lossThreshold = pos.avgEntryPrice * lossMult;
           if (midpoint > lossThreshold) {
@@ -511,7 +527,7 @@ export class GridStrategy {
               level.price = midPrice;
             }
           } else {
-            addSkip(`midpoint >${this.config.maxSellLossPercent}% loss`);
+            addSkip(`midpoint >${this.config.maxSellLossPercent}% loss`, 'sell');
             continue;
           }
         }
@@ -521,7 +537,7 @@ export class GridStrategy {
             this.log.info(`Sell reduced (low ${base}): ${amount} → ${availableAmount} (${(availableAmount/amount*100).toFixed(0)}% of target)`, { symbol });
             amount = availableAmount;
           } else {
-            addSkip(`low ${base}`);
+            addSkip(`low ${base}`, 'sell');
             continue;
           }
         }
@@ -553,7 +569,7 @@ export class GridStrategy {
         } catch (err) {
           const errStr = String(err);
           if (errStr.includes('InsufficientFunds') || errStr.includes('Insufficient balance')) {
-            addSkip('insufficient balance');
+            addSkip('insufficient balance', pending.side);
           } else {
             this.log.error(`Failed to place grid order: ${err}`, { symbol });
           }
@@ -562,15 +578,24 @@ export class GridStrategy {
     }
 
     // Log skip summary every tick so user always sees current skip reason.
-    // Transition to "resumed" is logged once when all levels get placed.
-    if (skipReasons.size > 0) {
-      const summary = [...skipReasons].sort().join(', ');
-      this.log.info(`Grid skip ${symbol}: ${summary}`);
-      this.lastSkipSummary.set(symbol, summary);
+    const buySummary  = buySkipReasons.size  > 0 ? [...buySkipReasons].sort().join(', ')  : '';
+    const sellSummary = sellSkipReasons.size > 0 ? [...sellSkipReasons].sort().join(', ') : '';
+    const combinedParts: string[] = [];
+    if (buySummary)  combinedParts.push(`buy: ${buySummary}`);
+    if (sellSummary) combinedParts.push(`sell: ${sellSummary}`);
+
+    if (combinedParts.length > 0) {
+      this.log.info(`Grid skip ${symbol}: ${combinedParts.join(' | ')}`);
+      this.lastSkipSummary.set(symbol, combinedParts.join(' | '));
     } else if (this.lastSkipSummary.has(symbol)) {
       this.log.info(`Grid orders resumed for ${symbol} — all levels placed`);
       this.lastSkipSummary.delete(symbol);
     }
+
+    if (buySummary) this.lastBuySkipSummary.set(symbol, buySummary);
+    else this.lastBuySkipSummary.delete(symbol);
+    if (sellSummary) this.lastSellSkipSummary.set(symbol, sellSummary);
+    else this.lastSellSkipSummary.delete(symbol);
 
     // Save updated order IDs
     this.state.setGridLevels(symbol, levels);

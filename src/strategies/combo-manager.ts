@@ -1409,9 +1409,11 @@ export class ComboManager {
       else if (cooldownUntil > 0 && Date.now() < cooldownUntil)
         extras.push(`COOL:${Math.ceil((cooldownUntil - Date.now()) / 60000)}min`);
 
-      // Grid skip reason — visible marker so user knows WHY no orders placed this tick
-      const skipReason = this.grid.getSkipReason(sym);
-      if (skipReason) extras.push(`skip buy: ${skipReason}!`);
+      // Grid skip reasons per side — user sees WHY no buy and/or sell orders placed this tick
+      const buySkip  = this.grid.getBuySkipReason(sym);
+      const sellSkip = this.grid.getSellSkipReason(sym);
+      if (buySkip)  extras.push(`skip buy: ${buySkip}!`);
+      if (sellSkip) extras.push(`skip sell: ${sellSkip}!`);
 
       const level = (isHalted || cooldownUntil > Date.now()) ? 'warn' : 'info';
       const symPad = sym.padEnd(11);
