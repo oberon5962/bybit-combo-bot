@@ -79,6 +79,12 @@ export class ExchangeSync {
     // 1b. Enforce buy-freeze: cancel any live buy-orders for frozen bases
     await this.enforceBuyFreezeAfterSync();
 
+    // 1c. Reconcile position.amount with exchange balance per pair.
+    // Bot tracks position only through its own fills; crypto held before bot start,
+    // manual buys via Bybit UI, or untracked partial fills create desync over time.
+    // SL/TP/closePosition read position.amount — desync means undersized emergency sells.
+    await this.reconcilePositionsWithBalance();
+
     // 2. Build portfolio snapshot
     const snapshot = await this.buildPortfolioSnapshot();
 
@@ -86,6 +92,60 @@ export class ExchangeSync {
     this.logPortfolio(snapshot);
 
     return snapshot;
+  }
+
+  /**
+   * For each pair, compare state.positionAmount with actual Bybit balance (free + used).
+   * If they diverge by more than 5%, adopt Bybit balance as truth:
+   *   new positionAmount = Bybit total
+   *   new costBasis = new amount × existing avgEntryPrice (preserves PnL baseline)
+   * If bot had no position in state but crypto exists on Bybit, use current market price.
+   */
+  private async reconcilePositionsWithBalance(): Promise<void> {
+    let allBalances: Record<string, { free: number; used: number; total: number }>;
+    try {
+      allBalances = await this.exchange.fetchAllBalances();
+    } catch (err) {
+      this.log.warn(`[sync] position reconcile: fetchAllBalances failed: ${sanitizeError(err)}`);
+      return;
+    }
+
+    for (const pair of this.config.pairs) {
+      if (pair.state === 'deleted') continue;
+      const base = pair.symbol.split('/')[0];
+      const bybitTotal = allBalances[base]?.total ?? 0;
+      const statePos = this.state.getPosition(pair.symbol);
+      const stateAmt = statePos.amount;
+
+      // Skip if both near zero (dust)
+      if (bybitTotal < 1e-8 && stateAmt < 1e-8) continue;
+
+      const ref = Math.max(bybitTotal, stateAmt, 1e-8);
+      const diffPct = Math.abs(bybitTotal - stateAmt) / ref * 100;
+      if (diffPct <= 5) continue; // within tolerance
+
+      let newCost: number;
+      if (statePos.avgEntryPrice > 0) {
+        // Preserve avgEntry (conservative for SL/TP math)
+        newCost = bybitTotal * statePos.avgEntryPrice;
+      } else {
+        // No prior avgEntry — use current market price as baseline
+        try {
+          const ticker = await this.exchange.fetchTicker(pair.symbol);
+          newCost = bybitTotal * ticker.last;
+        } catch {
+          newCost = bybitTotal * 1; // last-resort fallback
+        }
+      }
+
+      this.log.warn(
+        `[sync] ${pair.symbol} position desync: state=${stateAmt.toFixed(6)}, ` +
+        `Bybit=${bybitTotal.toFixed(6)} (${diffPct.toFixed(1)}% diff). ` +
+        `Adopting Bybit: amount=${bybitTotal.toFixed(6)}, costBasis=${newCost.toFixed(4)} ` +
+        `(avgEntry ${statePos.avgEntryPrice > 0 ? statePos.avgEntryPrice.toFixed(4) + ' preserved' : 'set to market'})`,
+      );
+      this.state.setPosition(pair.symbol, bybitTotal, newCost);
+    }
   }
 
   /** Cancel any live buy-orders on exchange for currencies in blockedBuyBases. Called after sync. */

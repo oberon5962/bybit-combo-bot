@@ -422,6 +422,13 @@ export class StateManager {
     ps.positionCostBasis = 0;
     this.saveCritical();
   }
+  /** Overwrite position directly (used by sync reconciliation with exchange balance). */
+  setPosition(symbol: string, amount: number, costBasis: number): void {
+    const ps = this.getPairState(symbol);
+    ps.positionAmount = amount;
+    ps.positionCostBasis = costBasis;
+    this.saveCritical();
+  }
 
   // Trade statistics
   recordTradeStat(symbol: string, side: 'buy' | 'sell', cost: number, fee: number): void {
