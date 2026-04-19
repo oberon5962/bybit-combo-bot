@@ -1430,6 +1430,21 @@ export class ComboManager {
     const sortedPairs = [...this.config.pairs].sort((a, b) =>
       this.state.getPairStats(b.symbol).pnl - this.state.getPairStats(a.symbol).pnl,
     );
+
+    // Pre-pass: собрать raw skip-reason строки для всех пар, чтобы padEnd выровнял колонку
+    // ровно по самой длинной строке текущего summary (dynamic alignment).
+    const rawNoColBySymbol = new Map<string, string>();
+    for (const pair of sortedPairs) {
+      const sym = pair.symbol;
+      const buySkip  = this.grid.getBuySkipReason(sym);
+      const sellSkip = this.grid.getSellSkipReason(sym);
+      const parts: string[] = [];
+      if (buySkip)  parts.push(`buy:${buySkip}`);
+      if (sellSkip) parts.push(`sell:${sellSkip}`);
+      rawNoColBySymbol.set(sym, parts.join(' '));
+    }
+    const noColPadLen = Math.max(0, ...Array.from(rawNoColBySymbol.values()).map(s => s.length));
+
     for (const pair of sortedPairs) {
       const sym = pair.symbol;
       const pairTrades = trades.filter((t) => t.symbol === sym);
@@ -1487,11 +1502,8 @@ export class ComboManager {
       const buySkip  = this.grid.getBuySkipReason(sym);
       const sellSkip = this.grid.getSellSkipReason(sym);
 
-      // Front-of-line "buy/sell: reason" column (compact, padded 22) — see skip cause without scanning to end.
-      const noParts: string[] = [];
-      if (buySkip)  noParts.push(`buy: ${buySkip}`);
-      if (sellSkip) noParts.push(`sell: ${sellSkip}`);
-      const noCol = noParts.join(' ').padEnd(22);
+      // Front-of-line "buy:/sell:" skip-reason column — padding автоматически по длиннейшей строке текущего summary (см. pre-pass выше).
+      const noCol = (rawNoColBySymbol.get(sym) ?? '').padEnd(noColPadLen);
 
       // State column: directly from config.pairs[].state (deleted/freeze/freezebuy/sellgrid/unfreeze)
       const pairCfg = this.config.pairs.find(p => p.symbol === sym);
@@ -1561,8 +1573,8 @@ export class ComboManager {
         reason.split(', ').filter(part => !LOW_SKIP_RE.test(part)).join(', ');
       const buySkipTg  = buySkip  ? filterLowSkip(buySkip)  : '';
       const sellSkipTg = sellSkip ? filterLowSkip(sellSkip) : '';
-      if (buySkipTg)  tgPairParts.push(` ⛔ buy: ${buySkipTg}`);
-      if (sellSkipTg) tgPairParts.push(` ⛔ sell: ${sellSkipTg}`);
+      if (buySkipTg)  tgPairParts.push(` ⛔ buy:${buySkipTg}`);
+      if (sellSkipTg) tgPairParts.push(` ⛔ sell:${sellSkipTg}`);
       // Pair state marker (only if non-default, to avoid noise)
       if (pairStateStr !== 'unfreeze') tgPairParts.push(` state: ${pairStateStr}`);
       pairTgLines.push(tgPairParts.join('\n'));

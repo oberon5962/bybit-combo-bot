@@ -5,13 +5,13 @@
   // gridSpacingPercent / gridSpacingSellPercent — опционально для каждой пары (иначе берётся из grid.gridSpacingPercent)
   // state — опционально: "freeze" | "freezebuy" | "sellgrid" | "unfreeze" (default). Синхронизируется с Telegram-командами и hot-reload.
   "pairs": [
-    { "symbol": "DOT/USDT",    "allocationPercent": 14, "gridSpacingPercent": 1.24, "gridSpacingSellPercent": 1.74, "state": "unfreeze" },
-    { "symbol": "NEAR/USDT",   "allocationPercent": 14, "gridSpacingPercent": 1.21, "gridSpacingSellPercent": 1.71, "state": "sellgrid" },
-    { "symbol": "ADA/USDT",    "allocationPercent": 14, "gridSpacingPercent": 0.99, "gridSpacingSellPercent": 1.49, "state": "unfreeze" },
-    { "symbol": "SUI/USDT",    "allocationPercent": 14, "gridSpacingPercent": 1.13,  "gridSpacingSellPercent": 1.63,  "state": "unfreeze" },
-    { "symbol": "SOL/USDT",    "allocationPercent": 14, "gridSpacingPercent": 0.8, "gridSpacingSellPercent": 1.3, "state": "unfreeze" },
-    { "symbol": "XRP/USDT",    "allocationPercent": 0, "gridSpacingPercent": 0.79,  "gridSpacingSellPercent": 1.29,  "state": "deleted" },
-    { "symbol": "AAVE/USDT",   "allocationPercent": 14, "gridSpacingPercent": 2.08, "gridSpacingSellPercent": 2.59, "state": "unfreeze" },
+    { "symbol": "DOT/USDT",    "allocationPercent": 14, "gridSpacingPercent": 1.23, "gridSpacingSellPercent": 1.73, "state": "unfreeze" },
+    { "symbol": "NEAR/USDT",   "allocationPercent": 14, "gridSpacingPercent": 1.24, "gridSpacingSellPercent": 1.74, "state": "sellgrid" },
+    { "symbol": "ADA/USDT",    "allocationPercent": 14, "gridSpacingPercent": 1, "gridSpacingSellPercent": 1.5, "state": "unfreeze" },
+    { "symbol": "SUI/USDT",    "allocationPercent": 14, "gridSpacingPercent": 1.14,  "gridSpacingSellPercent": 1.64,  "state": "unfreeze" },
+    { "symbol": "SOL/USDT",    "allocationPercent": 14, "gridSpacingPercent": 0.79, "gridSpacingSellPercent": 1.29, "state": "unfreeze" },
+    { "symbol": "XRP/USDT",    "allocationPercent": 0, "gridSpacingPercent": 0.8,  "gridSpacingSellPercent": 1.31,  "state": "deleted" },
+    { "symbol": "AAVE/USDT",   "allocationPercent": 14, "gridSpacingPercent": 2.09, "gridSpacingSellPercent": 2.6, "state": "unfreeze" },
     { "symbol": "RENDER/USDT", "allocationPercent": 14, "gridSpacingPercent": 1.32, "gridSpacingSellPercent": 1.82, "state": "sellgrid" }
   ],
 
@@ -51,14 +51,25 @@
                                         // 0 = halving выкл, при ребалансе counter-sell ставится сразу на virtualNewSellPrice без защиты
                                         // <0 = trailing полностью выкл, sell остаются на своих ценах
 
-    // Защита от продажи в убыток (используется в Counter-Sell Guard и Grid Sell Guard).
-    // Если рассчитанная цена sell (по spacing) ниже безубыточной (avgEntry * (1 + minSellProfitPercent/100)) —
+    // Counter-Sell Guard и Grid Sell Guard
+    // Защита от продажи в убыток.
+    // Если рассчитанная цена counter-sell / grid-sell (по spacing) ниже безубыточной (avgEntry * (1 + minSellProfitPercent/100)) —
     // бот берёт середину между spacing-ценой и безубыточной (midpoint). Но если midpoint даёт убыток больше
-    // maxSellLossPercent% от avgEntry — sell вообще не ставится, бот полагается либо на существующие более
-    // высокие sell-ордера, либо orphan-sell механизм автоматически поставит sell на прибыльной цене
-    // (max(avgEntry*(1+sellSpacing%), currentPrice*(1+sellSpacing%))) в следующем тике — позиция никогда не остаётся без покрытия.
+    // maxSellLossPercent% от avgEntry — sell вообще не ставится. Бот полагается либо на существующие более
+    // высокие sell-ордера, либо orphan-sell механизм на следующем тике поставит sell(-ы) на прибыльной цене:
+    //
+    //   rawEffectivePct = sellSpacing% × priceStep            // базовый процент от spacing
+    //   effectivePct    = Math.max(rawEffectivePct, minSellProfitPercent%)   // FLOOR: если rawEffectivePct < minSellProfitPercent, используется minSellProfitPercent
+    //   sellPrice       = Math.max(avgEntry, currentPrice) × (1 + effectivePct / 100)
+    //
+    // FLOOR гарантирует: orphan-sell никогда не размещается ниже минимальной прибыльной разницы (покрывает round-trip комиссии + запас).
+    // priceStep начинается с 1 (первая orphan-sell) и растёт (2, 3, ...) для каждой следующей orphan-sell в том же тике —
+    // либо когда уже существует sell на вычисленной цене, либо для разнесения нескольких orphan'ов по ладдеру (до orphanSellMaxPerTick).
+    // FLOOR срабатывает редко — только при очень маленьком sellSpacing (например от auto-spacing при низкой волатильности и autoSpacingSafetyMarginPercent=0).
+    // При срабатывании в лог пишется: "[grid] SYMBOL  orphan-sell floor activated: sellSpacingPct=X% × priceStep=N = Y% < minSellProfitPercent=Z% → using Z%".
+    // Позиция практически не остаётся без покрытия (исключения: достигнут maxOpenOrdersPerPair, или остаток баланса ниже minCost биржи).
     "minSellProfitPercent": 0.5,        // Минимальная прибыль для безубыточного sell (% над avgEntry). Покрывает комиссии round-trip (0.2%) + запас (0.3%)
-    "maxSellLossPercent": 1,            // Максимально допустимый убыток в midpoint-режиме (% ниже avgEntry). Если midpoint ниже этого порога — sell не ставится
+    "maxSellLossPercent": 0,            // Максимально допустимый убыток в midpoint-режиме (% ниже avgEntry). Если midpoint ниже этого порога — sell не ставится
 
     "orphanSellMaxPerTick": 30,         // Максимум orphan-sell ордеров за один тик (защита от спама при рассинхроне позиции)
 

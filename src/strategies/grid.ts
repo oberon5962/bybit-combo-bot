@@ -1003,8 +1003,16 @@ export class GridStrategy {
 
           while (remaining > 0 && orphanPlaced < orphanOrderBudget) {
             const { sellSpacingPct: orphanSellPct } = this.getSpacing(symbol);
-            const entryBased = position.avgEntryPrice * (1 + orphanSellPct * priceStep / 100);
-            const priceBased = ticker.last * (1 + orphanSellPct * priceStep / 100);
+            // Floor: гарантировать что orphan-sell поставлен не ниже break-even (покрывает round-trip комиссии + запас).
+            // Без floor — при маленьком sellSpacingPct (например от auto-spacing при низкой волатильности с margin=0)
+            // orphan-sell мог оказаться в убыток после комиссий. Floor срабатывает только когда orphanSellPct × priceStep < minSellProfitPercent.
+            const rawEffectivePct = orphanSellPct * priceStep;
+            const effectivePct = Math.max(rawEffectivePct, this.config.minSellProfitPercent);
+            if (effectivePct > rawEffectivePct) {
+              this.log.info(`[grid] ${symbol}  orphan-sell floor activated: sellSpacingPct=${orphanSellPct}% × priceStep=${priceStep} = ${rawEffectivePct.toFixed(2)}% < minSellProfitPercent=${this.config.minSellProfitPercent}% → using ${effectivePct}%`);
+            }
+            const entryBased = position.avgEntryPrice * (1 + effectivePct / 100);
+            const priceBased = ticker.last * (1 + effectivePct / 100);
             const sellPrice = this.roundPriceForMarket(
               Math.max(entryBased, priceBased),
               precision.pricePrecision,
