@@ -1227,6 +1227,155 @@ Grid orders resumed for SUI/USDT — all levels placed
 - `market protection` → `BTC watchdog occured`
 - `pair USDT budget exhausted` → `low USDT (pair budget)`
 
+## Справочник текстовок (формат логов и сообщений)
+
+### Grid события ([grid.ts](src/strategies/grid.ts) / [exchange.ts](src/exchange.ts))
+
+```
+[grid]   SUI/USDT    buy  filled   6.09 @ 0.9581
+[grid]   SUI/USDT    sell filled   6.08 @ 1.0999
+[grid]   SOL/USDT    buy  placed   0.0673 @ 88.43    (counter-order)
+[grid]   AAVE/USDT   sell placed   0.0564 @ 105.29   (counter-order)
+[grid]   SUI/USDT    sell placed   6.08 @ 0.9921     (orphan-sell)
+[grid]   RENDER/USDT sell placed   3.01 @ 1.920      (sellgrid-ladder)
+[grid]   SUI/USDT    buy  placed   6.09 @ 0.9581     (grid-init)
+[grid]   SUI/USDT    buy  reduced  6.09 → 4.50       (73% of target, budget=$4.32)
+```
+
+### Counter-sell trailing (4 варианта)
+
+```
+[grid]   DOT/USDT    sell trailed  1.400 → 1.365     (counter-sell, protected halving, goal=1.318)
+[grid]   DOT/USDT    sell trailed  1.329 → 1.324     (counter-sell, halving, goal=1.318)
+[grid]   DOT/USDT    sell trailed  1.329 → 1.318     (counter-sell, halving done)
+[grid]   DOT/USDT    sell trailed  1.329 → 1.318     (counter-sell, direct)
+```
+
+- `protected halving` — первый шаг (step 2) с защитой `oldBreakEven`
+- `halving, goal=X` — промежуточные midpoint-шаги (step 4) к целевой цене X
+- `halving done` — финальный шаг, достигли `virtualNewSellPrice`
+- `direct` — шаг 3, целевая цена выше `oldBreakEven`, сразу на цель
+
+### EMA crossover (только при смене тренда)
+
+```
+[grid]   DOT/USDT    EMA crossover: bearish (buys blocked by filter)
+[grid]   DOT/USDT    EMA crossover: bullish
+```
+
+Логируется только при переходе `bearish↔bullish↔neutral` (дедуп по `lastEmaCrossover`).
+
+### Market orders ([exchange.ts](src/exchange.ts))
+
+```
+[dca]    AAVE/USDT   buy  market   0.0565
+[meta]   SUI/USDT    buy  market   5.0
+[meta]   SUI/USDT    sell market   6.08
+[risk]   SUI/USDT    sell market   6.08              (stop-loss)
+[risk]   SUI/USDT    sell market   6.08              (take-profit)
+[risk]   SUI/USDT    sell market   6.08              (trailing-stop-loss)
+[risk]   SUI/USDT    sell market   6.08              (portfolio take-profit)
+[manual] SUI/USDT    buy  market   10.0
+[manual] SUI/USDT    sell market   6.08              (sell-all)
+```
+
+Префикс = стратегия (`dca`/`meta`/`risk`/`manual`), label в скобках = подпричина для risk/manual.
+
+### Grid skip (каждый тик, раздельно buy/sell)
+
+```
+Grid skip SUI/USDT: buy: EMA bearish, max orders | sell: low SUI
+Grid orders resumed for SUI/USDT — all levels placed
+```
+
+### Все возможные skip причины
+
+| Причина | Сторона | Когда срабатывает |
+|---|---|---|
+| `EMA bearish` | buy | `useEmaFilter=true` + `emaFast < emaSlow` |
+| `overbought` | buy | RSI > `rsiOverboughtThreshold` |
+| `buy frozen` | buy | пара в `/freezebuy` или `sellgrid` |
+| `BTC watchdog occured` | buy | BTC упал >3% за час |
+| `low USDT (pair budget)` | buy | исчерпан per-pair лимит бюджета |
+| `max orders` | buy/sell | достигнут `gridLevels + 4` открытых ордеров |
+| `budget too small` | buy/sell | orderSize < minAmount биржи |
+| `below minCost` | buy/sell | стоимость < minCost биржи |
+| `insufficient balance` | buy/sell | API-ошибка при размещении |
+| `below entry` | sell | цена sell ниже `avgEntry` (защита от убытка) |
+| `midpoint >1% loss` | sell | midpoint-guard блокирует sell (убыток > `maxSellLossPercent`) |
+| `low <BASE>` (например `low AAVE`) | sell | недостаточно крипты для sell |
+
+### BOT SUMMARY — per-pair строка
+
+```
+AAVE/USDT | PnL -11.90 (-30.7%) | Spent 38.77 | Earned 26.90 | Fees 0.027 | RSI 31.4 | EMA bear | BB oversold | 0B | 2S [12$] | SL 0x | TSL 1x | TP 0x | skip buy: EMA bearish, low USDT (pair budget)! | skip sell: low AAVE!
+```
+
+Колонки:
+- **EMA**: `bull/bear/flat` — persistent тренд (`emaFast vs emaSlow`), совпадает с логикой фильтра
+- **BB**: `oversold/bear/bull/overbought` — позиция цены относительно Bollinger bands
+- **B/S**: активные buy/sell ордера на бирже (`8B [50$]`, `11S [76$]`) или `0B`/`0S`/`3Pend`
+- **SL/TSL/TP Nx**: счётчики сработавших Stop-Loss / Trailing SL / Take-Profit (всегда показаны с пробелом, включая 0x)
+- **HALTED:reason** или **COOL:Nmin** — если пара остановлена или в cooldown
+- **skip buy: ...!** / **skip sell: ...!** — причины пропуска размещения (с `!` в конце)
+
+### Halt-события (лог + Telegram)
+
+Все halt-события включают подсказку `Для возобновления: /run или halted→false в bot-state.json`:
+
+```
+🚨 MAX DRAWDOWN 15.3%  Peak: 314.91 → 266.79 USDT  Bot HALTED!
+🎉 PORTFOLIO TAKE-PROFIT! Start: 300.00 → 600.00 USDT (+100.0%)  All sold. Bot halted.
+🛑 AAVE/USDT HALTED  3x SL подряд — пара остановлена.
+🛑 AAVE/USDT HALTED  SL сработал, cooldown=0 — пара остановлена навсегда.
+🔴 STOP-LOSS AAVE/USDT  Entry: 104.13 → 83.31  PnL: -20.0%
+🟡 TRAILING SL AAVE/USDT  Entry: 104.13 | Peak: 110.00 → 104.50  Drop: -5.0%  PnL: +0.4%
+🟢 TAKE-PROFIT AAVE/USDT  Entry: 104.13 → 116.62  PnL: +12.0%
+```
+
+### Auto-spacing (выровнен через `.toFixed(2)`)
+
+```
+  DOT/USDT:    auto=1.38%/1.88% cfg=1.38%/1.88% regime=norm [AUTO]
+  NEAR/USDT:   auto=1.19%/1.69% cfg=1.19%/1.69% regime=norm [AUTO]
+  ADA/USDT:    auto=1.02%/1.52% cfg=1.02%/1.52% regime=norm [AUTO]
+  AAVE/USDT:   auto=1.45%/1.95% cfg=1.45%/1.95% regime=high [AUTO]
+  RENDER/USDT: auto=1.32%/1.82% cfg=1.32%/1.82% regime=norm [AUTO]
+```
+
+- `regime`: `norm` (normal), `high` (high volatility), `low ` (low volatility)
+- `[AUTO]` — autoSpacingPriority=`auto` (применяется к торговле); `[CFG]` — `config` (только лог)
+
+### Telegram-алерты
+
+**Fill notifications** (при каждом исполнении grid-ордера):
+```
+🔵 BUY AAVE/USDT 0.0565 @ 103.2800  Cost: 5.84 USDT
+🔴 SELL AAVE/USDT 0.0564 @ 105.29   Earned: 5.94 USDT (+0.10)
+```
+
+**State changes** (команды/авто-переводы):
+```
+🧊 XRP/USDT — покупки заморожены
+🔻 XRP/USDT — sellgrid включён, позиция распродаётся ladder-up
+🧊❄️ XRP/USDT — полная заморозка, SL/TP остаются
+🗑 XRP/USDT удалена. Отменено ордеров: 5.
+✅ XRP/USDT — полностью разморожена
+```
+
+**Dust auto-detection**:
+```
+🧊 XRP/USDT — sellgrid завершён (остаток &lt; 1$). Покупки заморожены, оставшиеся продажи активны.
+```
+
+**Auto-spacing report** (каждые N минут):
+```
+📐 Auto-spacing report (safetyMargin=0%, qtySigmas=1)
+DOT/USDT:    1.38%/1.88% (norm)
+NEAR/USDT:   1.19%/1.69% (norm)
+...
+```
+
 ## Важные замечания
 
 - Обязательно начинайте с `USE_TESTNET=true` и небольших сумм
