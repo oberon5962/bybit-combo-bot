@@ -1483,18 +1483,16 @@ export class ComboManager {
       else if (cooldownUntil > 0 && Date.now() < cooldownUntil)
         extras.push(`COOL:${Math.ceil((cooldownUntil - Date.now()) / 60000)}min`);
 
-      // Grid skip reasons per side — user sees WHY no buy and/or sell orders placed this tick
+      // Grid skip reasons per side — surfaced ONLY in front-of-line noCol, not duplicated in extras
       const buySkip  = this.grid.getBuySkipReason(sym);
       const sellSkip = this.grid.getSellSkipReason(sym);
-      if (buySkip)  extras.push(`no buy: ${buySkip}!`);
-      if (sellSkip) extras.push(`no sell: ${sellSkip}!`);
 
-      // Front-of-line "no buy/sell: reason" column (compact, padded) — see skip cause without scanning to end.
+      // Front-of-line "no buy/sell: reason" column (compact, padded 22) — see skip cause without scanning to end.
       const baseSym = sym.split('/')[0];
       const noParts: string[] = [];
       if (buySkip)  noParts.push(`no buy: ${buySkip}`);
       if (sellSkip) noParts.push(`no sell: ${sellSkip}`);
-      const noCol = noParts.join(' | ').padEnd(34);
+      const noCol = noParts.join(' | ').padEnd(22);
 
       // State column: FROZEN (full) / SELLGRID / FREEZEBUY / active
       let pairStateStr: string;
