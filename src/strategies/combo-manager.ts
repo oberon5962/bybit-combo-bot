@@ -344,17 +344,29 @@ export class ComboManager {
     const { single: currentBalance, all: allBalances } = await this.exchange.fetchBalanceAndAll('USDT');
     let totalPortfolioUSDT = currentBalance.total;
 
-    // Add value of held crypto to portfolio total (skip deleted pairs)
-    for (const pair of this.config.pairs) {
-      if (pair.state === 'deleted' || this.state.isPairDeleted(pair.symbol)) continue;
-      const base = pair.symbol.split('/')[0]; // "BTC" from "BTC/USDT"
-      const held = allBalances[base];
-      if (held && held.total > 0) {
-        try {
-          const ticker = await this.exchange.fetchTicker(pair.symbol);
-          totalPortfolioUSDT += held.total * ticker.last;
-        } catch (err) {
-          this.log.error(`Failed to fetch ticker for ${pair.symbol} during portfolio calc: ${sanitizeError(err)}`);
+    // Add value of held crypto to portfolio total (skip deleted pairs).
+    // Tickers fetched in parallel batches of parallelPairs — ~1 API "wave" instead of N sequential.
+    // Each fetchTicker writes to tickerCache, so processPair() downstream reuses it via getCachedOrFreshTicker.
+    {
+      const pairsToPrice = this.config.pairs.filter(p =>
+        p.state !== 'deleted' && !this.state.isPairDeleted(p.symbol) &&
+        (allBalances[p.symbol.split('/')[0]]?.total ?? 0) > 0,
+      );
+      const batchSize = Math.max(1, this.config.parallelPairs || 1);
+      for (let i = 0; i < pairsToPrice.length; i += batchSize) {
+        const batch = pairsToPrice.slice(i, i + batchSize);
+        const results = await Promise.allSettled(
+          batch.map(p => this.exchange.fetchTicker(p.symbol)),
+        );
+        for (let j = 0; j < batch.length; j++) {
+          const r = results[j];
+          const pair = batch[j];
+          const held = allBalances[pair.symbol.split('/')[0]];
+          if (r.status === 'fulfilled' && held) {
+            totalPortfolioUSDT += held.total * r.value.last;
+          } else if (r.status === 'rejected') {
+            this.log.error(`Failed to fetch ticker for ${pair.symbol} during portfolio calc: ${sanitizeError(r.reason)}`);
+          }
         }
       }
     }
@@ -533,8 +545,10 @@ export class ComboManager {
     // Grid internally checks free balance before placing sells, so over-allocation is safe.
     const allocationUSDT = totalUSDT * (pair.allocationPercent / 100);
 
+    // Ticker: reuse cache from portfolio calc (same tick, ~<1s old) — avoids duplicate API call.
+    // OHLCV always fetched fresh (candles needed for RSI/EMA/BB).
     const [ticker, candles] = await Promise.all([
-      this.exchange.fetchTicker(symbol),
+      this.exchange.getCachedOrFreshTicker(symbol),
       this.exchange.fetchOHLCV(symbol, '5m', 100),
     ]);
 
