@@ -1028,18 +1028,8 @@ export class GridStrategy {
       }
     }
 
-    // Log EMA crossover state only on transitions (bearish↔bullish↔none) to avoid per-tick spam.
-    // Informational only — grid behavior is driven by useEmaFilter (blocks buys) and per-level midpoint guards.
-    const currentEma = indicators.emaCrossover ?? 'neutral';
-    const prevEma = this.lastEmaCrossover.get(symbol) ?? 'neutral';
-    if (currentEma !== prevEma) {
-      if (currentEma === 'bearish') {
-        this.log.info(`[grid] ${symbol}  EMA crossover: bearish${this.config.useEmaFilter ? ' (buys blocked by filter)' : ''}`);
-      } else if (currentEma === 'bullish') {
-        this.log.info(`[grid] ${symbol}  EMA crossover: bullish`);
-      }
-      this.lastEmaCrossover.set(symbol, currentEma);
-    }
+    // EMA crossover is one-tick event — spams on whipsaw when emaFast≈emaSlow.
+    // Current trend is in BOT SUMMARY (EMA col: bull/bear/flat) and in skip buy marker, so no separate log needed.
 
     // Counter-sell midpoint-halving trailing (после split rebalance DOWN).
     // Шаг 4 из спецификации: каждый nextStepAt-таймер делим пополам расстояние до virtualNewSellPrice.
