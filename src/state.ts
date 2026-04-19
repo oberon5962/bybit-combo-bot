@@ -357,11 +357,11 @@ export class StateManager {
     return this.getPairState(symbol).gridLevels;
   }
   setGridLevels(symbol: string, levels: GridLevelState[], critical: boolean = false): void {
-    // Filter zombie sell-levels: amount=0, not filled, no orderId, no counter-sell metadata.
-    // Keep levels with oldBreakEven set — they're freshly flipped counter-sells awaiting placement
-    // (amount will be computed by placeGridOrders from orderBudget/price on next tick).
+    // Previous zombie filter dropped sells with amount=0 + no orderId + no filled + no metadata.
+    // That also removed legit grid-init sells awaiting placement (placeGridOrders sets amount later).
+    // Levels without price or with NaN are still invalid; other states are valid in-progress.
     this.getPairState(symbol).gridLevels = levels.filter(
-      l => !(l.side === 'sell' && l.amount <= 0 && !l.filled && !l.orderId && !l.oldBreakEven),
+      l => typeof l.price === 'number' && isFinite(l.price) && l.price > 0,
     );
     if (critical) this.saveCritical();
     else this.save();
