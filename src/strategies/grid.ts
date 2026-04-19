@@ -556,16 +556,13 @@ export class GridStrategy {
       }));
     }
 
-    // Log skip summary — only when reasons change from last tick
+    // Log skip summary every tick so user always sees current skip reason.
+    // Transition to "resumed" is logged once when all levels get placed.
     if (skipReasons.size > 0) {
       const summary = [...skipReasons].sort().join(', ');
-      const prevSummary = this.lastSkipSummary.get(symbol);
-      if (summary !== prevSummary) {
-        this.log.info(`Grid skip ${symbol}: ${summary}`);
-        this.lastSkipSummary.set(symbol, summary);
-      }
+      this.log.info(`Grid skip ${symbol}: ${summary}`);
+      this.lastSkipSummary.set(symbol, summary);
     } else if (this.lastSkipSummary.has(symbol)) {
-      // Was skipping, now all orders placed — log resume
       this.log.info(`Grid orders resumed for ${symbol} — all levels placed`);
       this.lastSkipSummary.delete(symbol);
     }
