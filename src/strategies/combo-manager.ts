@@ -1488,18 +1488,14 @@ export class ComboManager {
       const sellSkip = this.grid.getSellSkipReason(sym);
 
       // Front-of-line "no buy/sell: reason" column (compact, padded 22) — see skip cause without scanning to end.
-      const baseSym = sym.split('/')[0];
       const noParts: string[] = [];
       if (buySkip)  noParts.push(`no buy: ${buySkip}`);
       if (sellSkip) noParts.push(`no sell: ${sellSkip}`);
       const noCol = noParts.join(' | ').padEnd(22);
 
-      // State column: FROZEN (full) / SELLGRID / FREEZEBUY / active
-      let pairStateStr: string;
-      if (this.state.isPairFrozen(baseSym))         pairStateStr = 'FROZEN';
-      else if (this.state.isSellGridActive(baseSym)) pairStateStr = 'SELLGRID';
-      else if (this.state.isBuyBlocked(baseSym))     pairStateStr = 'FREEZEBUY';
-      else                                            pairStateStr = 'active';
+      // State column: directly from config.pairs[].state (deleted/freeze/freezebuy/sellgrid/unfreeze)
+      const pairCfg = this.config.pairs.find(p => p.symbol === sym);
+      const pairStateStr = pairCfg?.state ?? 'unfreeze';
       const stateCol = pairStateStr.padEnd(9);
 
       const level = (isHalted || cooldownUntil > Date.now()) ? 'warn' : 'info';
@@ -1561,7 +1557,7 @@ export class ComboManager {
       if (buySkip)  tgPairParts.push(` ⛔ no buy: ${buySkip}`);
       if (sellSkip) tgPairParts.push(` ⛔ no sell: ${sellSkip}`);
       // Pair state marker (only if non-default, to avoid noise)
-      if (pairStateStr !== 'active') tgPairParts.push(` state: ${pairStateStr}`);
+      if (pairStateStr !== 'unfreeze') tgPairParts.push(` state: ${pairStateStr}`);
       pairTgLines.push(tgPairParts.join('\n'));
     }
 
