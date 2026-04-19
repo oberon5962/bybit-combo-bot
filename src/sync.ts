@@ -210,23 +210,10 @@ export class ExchangeSync {
       const savedLevels = this.state.getGridLevels(symbol);
 
       if (savedLevels.length === 0) {
-        // No saved grid levels — adopt exchange orders as grid levels
+        // No saved grid levels. Any orders on exchange are user-manual — do NOT adopt.
+        // Grid will init fresh on first tick; manual orders live independently.
         if (exchangeOrders.length > 0) {
-          this.log.info(`[sync] ${symbol}: no saved grid levels, adopting ${exchangeOrders.length} orders from Bybit`);
-          const adoptedLevels = exchangeOrders.map((o) => ({
-            price: o.price,
-            amount: o.amount ?? 0,
-            side: o.side as 'buy' | 'sell',
-            orderId: o.id,
-            filled: false,
-          }));
-          adoptedLevels.sort((a, b) => a.price - b.price);
-          this.state.setGridLevels(symbol, adoptedLevels);
-          this.state.setGridInitialized(symbol, true);
-          // Set center price from adopted levels midpoint (best estimate without original center)
-          const adoptedCenter = (adoptedLevels[0].price + adoptedLevels[adoptedLevels.length - 1].price) / 2;
-          this.state.setGridCenterPrice(symbol, adoptedCenter);
-          this.log.info(`[sync] ${symbol}: adopted ${adoptedLevels.length} orders as grid levels (center: ${adoptedCenter.toFixed(4)})`);
+          this.log.info(`[sync] ${symbol}: no saved grid levels, ${exchangeOrders.length} manual order(s) on exchange — left untouched`);
         } else {
           this.log.info(`[sync] ${symbol}: no saved grid levels, no orders on exchange`);
         }
@@ -321,40 +308,35 @@ export class ExchangeSync {
         }
       }
 
-      // Check if exchange has orders we don't know about
+      // Check if exchange has orders we don't know about (user-manual via Bybit UI).
+      // Do NOT adopt them — they belong to the user, not the bot. They live independently.
+      // However, if a manual order matches an EXISTING unplaced level (bot had it planned
+      // but never got orderId), reconnect — this recovers from a fill-during-downtime where
+      // the bot's own orderId was lost but the order itself is bot's creation.
       const knownIds = new Set(savedLevels.map((l) => l.orderId).filter(Boolean));
       const unknownOrders = exchangeOrders.filter((o) => !knownIds.has(o.id));
-
-      // Adopt unknown orders into grid levels instead of cancelling
-      if (unknownOrders.length > 0) {
-        this.log.info(`[sync] ${symbol}: found ${unknownOrders.length} untracked orders on Bybit — adopting into grid:`);
-        for (const o of unknownOrders) {
-          // Try to match to an existing unplaced level at the same price and side
-          const match = savedLevels.find(
-            (l) => !l.orderId && l.side === o.side && Math.abs(l.price - o.price) / o.price < 0.001,
-          );
-          if (match) {
-            match.orderId = o.id;
-            this.log.info(`  → matched ${o.side} @ ${o.price} to existing level (id: ${o.id})`);
-          } else {
-            // No matching level — add as new level
-            savedLevels.push({
-              price: o.price,
-              amount: o.amount ?? 0,
-              side: o.side as 'buy' | 'sell',
-              orderId: o.id,
-              filled: false,
-            });
-            this.log.info(`  → adopted ${o.side} @ ${o.price} as new level (id: ${o.id})`);
-          }
+      let reconnectedCount = 0;
+      let untouchedCount = 0;
+      for (const o of unknownOrders) {
+        const match = savedLevels.find(
+          (l) => !l.orderId && l.side === o.side && Math.abs(l.price - o.price) / o.price < 0.001,
+        );
+        if (match) {
+          match.orderId = o.id;
+          reconnectedCount++;
+          this.log.info(`[sync] ${symbol}: reconnected ${o.side} @ ${o.price} to existing bot level (id: ${o.id})`);
+        } else {
+          untouchedCount++;
         }
-        savedLevels.sort((a, b) => a.price - b.price);
+      }
+      if (untouchedCount > 0) {
+        this.log.info(`[sync] ${symbol}: ${untouchedCount} manual order(s) on exchange — left untouched (not bot levels)`);
       }
 
       // Save cleaned state
       this.state.setGridLevels(symbol, savedLevels);
 
-      this.log.info(`[sync] ${symbol}: ${validCount} orders confirmed, ${removedCount} stale removed, ${unknownOrders.length} adopted from exchange`);
+      this.log.info(`[sync] ${symbol}: ${validCount} confirmed, ${removedCount} stale removed, ${reconnectedCount} reconnected, ${untouchedCount} manual ignored`);
     }
   }
 
