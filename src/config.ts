@@ -8,7 +8,7 @@
 
 import fs from 'fs';
 import path from 'path';
-import { BotConfig } from './types';
+import { BotConfig, GRID_SELL_LEVELS } from './types';
 import dotenv from 'dotenv';
 dotenv.config();
 
@@ -56,7 +56,7 @@ export function loadConfig(): BotConfig {
 
     risk: {
       maxDrawdownPercent: json.risk?.maxDrawdownPercent ?? defaultNum,
-      maxOpenOrdersPerPair: gridLevels + 4,
+      maxOpenOrdersPerPair: gridLevels + GRID_SELL_LEVELS + 4,
       stopLossPercent: json.risk?.stopLossPercent ?? defaultNum,
       takeProfitPercent: json.risk?.takeProfitPercent ?? defaultNum,
       portfolioTakeProfitPercent: json.risk?.portfolioTakeProfitPercent ?? defaultNum,
@@ -206,12 +206,12 @@ function validateConfig(config: BotConfig): void {
   if (config.grid.enabled) {
     if (config.grid.gridSpacingPercent <= 0) errors.push('gridSpacingPercent (buy) must be > 0');
     if (config.grid.gridSpacingSellPercent <= 0) errors.push('gridSpacingSellPercent must be > 0');
-    if (config.grid.gridLevels < 2) errors.push('gridLevels must be >= 2');
+    if (config.grid.gridLevels < 1) errors.push('gridLevels must be >= 1 (определяет только количество buy-уровней; sell-уровней всегда ' + GRID_SELL_LEVELS + ')');
     if (config.grid.orderSizePercent <= 0) errors.push('grid.orderSizePercent must be > 0');
     if (config.grid.rebalancePercent <= 0 || config.grid.rebalancePercent > 50) errors.push('grid.rebalancePercent must be between 0 and 50');
     if (config.grid.minSellProfitPercent <= 0 || config.grid.minSellProfitPercent > 5) errors.push('grid.minSellProfitPercent must be between 0 and 5 (typical 0.3)');
     if (config.grid.maxSellLossPercent <= 0 || config.grid.maxSellLossPercent > 10) errors.push('grid.maxSellLossPercent must be between 0 and 10 (typical 1)');
-    if (config.grid.orphanSellMaxPerTick < 1 || config.grid.orphanSellMaxPerTick > 20) errors.push('grid.orphanSellMaxPerTick must be between 1 and 20 (typical 5)');
+    if (config.grid.orphanSellMaxPerTick < 1 || config.grid.orphanSellMaxPerTick > 100) errors.push('grid.orphanSellMaxPerTick must be between 1 and 100');
     if (config.grid.counterSellTrailStepHours > 72) errors.push('grid.counterSellTrailStepHours must be ≤ 72 (typical 4; 0 = no halving, just snap; <0 = trailing fully off)');
     if (config.grid.rsiOverboughtThreshold < 50 || config.grid.rsiOverboughtThreshold > 100) {
       errors.push('grid.rsiOverboughtThreshold must be between 50 and 100');
@@ -223,8 +223,8 @@ function validateConfig(config: BotConfig): void {
       if (config.grid.bollingerSellMultiplier < 1 || config.grid.bollingerSellMultiplier > 3) {
         errors.push('bollingerSellMultiplier must be between 1 and 3');
       }
-      if (config.grid.bollingerShiftLevels < 0 || config.grid.bollingerShiftLevels > Math.floor(config.grid.gridLevels / 2)) {
-        errors.push(`bollingerShiftLevels must be between 0 and ${Math.floor(config.grid.gridLevels / 2)}`);
+      if (config.grid.bollingerShiftLevels < 0 || config.grid.bollingerShiftLevels >= config.grid.gridLevels) {
+        errors.push(`bollingerShiftLevels must be between 0 and ${config.grid.gridLevels - 1} (shift применяется к buyLevels=gridLevels; при bullish shift вычитается, buyLevels должен остаться >= 1)`);
       }
     }
     // Auto-spacing validation (always, even when off — user may switch to auto via hot-reload)

@@ -5,26 +5,26 @@
   // gridSpacingPercent / gridSpacingSellPercent — опционально для каждой пары (иначе берётся из grid.gridSpacingPercent)
   // state — опционально: "freeze" | "freezebuy" | "sellgrid" | "unfreeze" (default). Синхронизируется с Telegram-командами и hot-reload.
   "pairs": [
-    { "symbol": "DOT/USDT", "allocationPercent": 13, "gridSpacingPercent": 1.24, "gridSpacingSellPercent": 1.74, "state": "unfreeze" },
-    { "symbol": "NEAR/USDT", "allocationPercent": 12, "gridSpacingPercent": 1.13, "gridSpacingSellPercent": 1.63, "state": "sellgrid" },
-    { "symbol": "ADA/USDT", "allocationPercent": 12, "gridSpacingPercent": 0.95, "gridSpacingSellPercent": 1.45, "state": "unfreeze" },
-    { "symbol": "SUI/USDT", "allocationPercent": 13, "gridSpacingPercent": 1.11, "gridSpacingSellPercent": 1.61, "state": "unfreeze" },
-    { "symbol": "SOL/USDT", "allocationPercent": 13, "gridSpacingPercent": 0.75, "gridSpacingSellPercent": 1.25, "state": "unfreeze" },
-    { "symbol": "XRP/USDT", "allocationPercent": 12, "gridSpacingPercent": 0.76, "gridSpacingSellPercent": 1.26, "state": "sellgrid" },
-    { "symbol": "AAVE/USDT", "allocationPercent": 13, "gridSpacingPercent": 1.27, "gridSpacingSellPercent": 1.77, "state": "unfreeze" },
-    { "symbol": "RENDER/USDT", "allocationPercent": 12, "gridSpacingPercent": 1.21, "gridSpacingSellPercent": 1.71, "state": "sellgrid" }
+    { "symbol": "DOT/USDT",    "allocationPercent": 14, "gridSpacingPercent": 1.24, "gridSpacingSellPercent": 1.74, "state": "unfreeze" },
+    { "symbol": "NEAR/USDT",   "allocationPercent": 14, "gridSpacingPercent": 1.21, "gridSpacingSellPercent": 1.71, "state": "sellgrid" },
+    { "symbol": "ADA/USDT",    "allocationPercent": 14, "gridSpacingPercent": 0.99, "gridSpacingSellPercent": 1.49, "state": "unfreeze" },
+    { "symbol": "SUI/USDT",    "allocationPercent": 14, "gridSpacingPercent": 1.13,  "gridSpacingSellPercent": 1.63,  "state": "unfreeze" },
+    { "symbol": "SOL/USDT",    "allocationPercent": 14, "gridSpacingPercent": 0.8, "gridSpacingSellPercent": 1.3, "state": "unfreeze" },
+    { "symbol": "XRP/USDT",    "allocationPercent": 0, "gridSpacingPercent": 0.79,  "gridSpacingSellPercent": 1.29,  "state": "deleted" },
+    { "symbol": "AAVE/USDT",   "allocationPercent": 14, "gridSpacingPercent": 2.08, "gridSpacingSellPercent": 2.59, "state": "unfreeze" },
+    { "symbol": "RENDER/USDT", "allocationPercent": 14, "gridSpacingPercent": 1.32, "gridSpacingSellPercent": 1.82, "state": "sellgrid" }
   ],
 
   // ============================================================
   // Risk Management — управление рисками
   // ============================================================
   "risk": {
-    "maxDrawdownPercent": 15,           // HALT если портфель упал (-% от пика)
-    "stopLossPercent": 10,              // StopLoss на позицию (-% от entry)
+    "maxDrawdownPercent": 25,           // HALT если портфель упал (-% от пика) 25% даёт бот пережить декабрь-2024 уровня
+    "stopLossPercent": 20,              // StopLoss на позицию (-% от entry)
     "takeProfitPercent": 100,            // Тейк-профит на позицию (+% от entry)
     "portfolioTakeProfitPercent": 100,  // Продать ВСЁ когда портфель (+% от старта)
     "cooldownAfterSLSec": 1800,         // Пауза после StopLoss (SL) (1800 = 30 мин, 0 = halt навсегда)
-    "cooldownMaxSL": 3,                 // Макс кол-во SL подряд до полного halt
+    "cooldownMaxSL": 2,                 // Макс кол-во SL подряд до полного halt
     "trailingSLPercent": 999,             // Trailing SL: продаём если цена упала на -5% (рекомендуемое) от пика (999 - выключено)
     "trailingSLActivationPercent": 999    // Trailing SL включается после +3% (рекомендуемое) от entry (999 - выключено)
   },
@@ -34,7 +34,7 @@
   // ============================================================
   "grid": {
     "enabled": true,                    // true = grid включен, false = выключить grid
-    "gridLevels": 14,                    // Кол-во уровней (делятся на buy/sell)
+    "gridLevels": 5,                    // Кол-во уровней (только для buy / sell ограничены константой 50)
     "gridSpacingPercent": 1.0,          // DEFAULT расстояние между BUY-уровнями (% от текущей цены при построении сетки). Fallback если пара не задаёт свой
     "gridSpacingSellPercent": 1.4,      // DEFAULT расстояние между SELL-уровнями (% от текущей цены при построении сетки). Fallback если пара не задаёт свой
     "orderSizePercent": 15,             // Размер ордера (% от аллокации пары)
@@ -46,7 +46,7 @@
     "bollingerSellMultiplier": 1.5,     // orderSize * 1.5 при продаже у верхней полосы BB или все, что есть
     "bollingerShiftLevels": 2,          // Перекинуть 2 уровня в пользу buy/sell по BB
 
-    "counterSellTrailStepHours": 4,     // Шаг midpoint-halving для counter-sell при split rebalance DOWN (часы). 
+    "counterSellTrailStepHours": 24,   // Шаг midpoint-halving для counter-sell при split rebalance DOWN (часы). 
                                         // >0 = halving (двоичный поиск к virtualNewSellPrice с защитой oldBreakEven на первом шаге)
                                         // 0 = halving выкл, при ребалансе counter-sell ставится сразу на virtualNewSellPrice без защиты
                                         // <0 = trailing полностью выкл, sell остаются на своих ценах
@@ -64,7 +64,7 @@
 
     // Auto-adaptive spacing (на основе статистики волатильности)
     "autoSpacingIntervalMin": 180,       // Как часто пересчитывать в минутах (180 = каждые 3ч)
-    "autoSpacingSafetyMarginPercent": 15,  // Коэффициент недоверия — вычитать % из расчётных значений статистики волатильности
+    "autoSpacingSafetyMarginPercent": 0,  // Коэффициент недоверия — вычитать % из расчётных значений статистики волатильности
     "qtySigmas": 1,                        // Уровень уверенности для расчёта spacing: 1, 2 или 3 (другие значения запрещены)
     // "off"    — выключено, не считает, не тратит API
     // "config" — считает и пишет в лог/Telegram для сравнения, торгует по config
@@ -128,7 +128,7 @@
     "sendFills": true,                  // Уведомления о сделках
     "sendAlerts": true,                 // Алерты: SL/TP/halt/panic
     "summaryIntervalTicks": 120,         // Summary в Telegram раз в summaryIntervalTicks тиков (~20 мин)
-    "logSummaryIntervalTicks": 6,      // Summary в bot.log раз в logSummaryIntervalTicks тиков (~1 мин)
+    "logSummaryIntervalTicks": 15,      // Summary в bot.log раз в logSummaryIntervalTicks тиков (~2.5 мин)
     "commandPollIntervalTicks": 1,      // Проверять Telegram-команды каждый тик (~10с) — для плавного /buy wizard
     "confirmationTimeoutSec": 120        // Таймаут подтверждения команды в секундах (0 = без таймаута)
   },
@@ -138,7 +138,7 @@
   // ============================================================
   "tickIntervalSec": 10,               // Основной цикл бота (10 сек, НЕ hot-reload)
   "syncIntervalSec": 43200,            // Sync с Bybit каждые 12 часов ( 0 = выкл)
-  "configReloadIntervalTicks": 3,       // Перечитывать config.jsonc каждые 3 тика (~30с). 0 = выкл (fallback раз в 5 мин)
+  "configReloadIntervalTicks": 6,       // Перечитывать config.jsonc каждые 3 тика (~30с). 0 = выкл (fallback раз в 5 мин)
   "parallelPairs": 4,                   // Размер батча: сколько пар/ордеров запускается одновременно (1 = строго последовательно; 4 = волны по 4; 8 пар ÷ 4 = 2 волны)
 
   // ============================================================

@@ -1487,10 +1487,10 @@ export class ComboManager {
       const buySkip  = this.grid.getBuySkipReason(sym);
       const sellSkip = this.grid.getSellSkipReason(sym);
 
-      // Front-of-line "no buy/sell: reason" column (compact, padded 22) — see skip cause without scanning to end.
+      // Front-of-line "buy/sell: reason" column (compact, padded 22) — see skip cause without scanning to end.
       const noParts: string[] = [];
-      if (buySkip)  noParts.push(`no buy: ${buySkip}`);
-      if (sellSkip) noParts.push(`no sell: ${sellSkip}`);
+      if (buySkip)  noParts.push(`buy: ${buySkip}`);
+      if (sellSkip) noParts.push(`sell: ${sellSkip}`);
       const noCol = noParts.join(' ').padEnd(22);
 
       // State column: directly from config.pairs[].state (deleted/freeze/freezebuy/sellgrid/unfreeze)
@@ -1553,9 +1553,16 @@ export class ComboManager {
         const minLeft = Math.ceil((cooldownUntil - Date.now()) / 60000);
         tgPairParts.push(` COOLDOWN — ${minLeft} min`);
       }
-      // Skip reasons per side (same as log summary — buySkip/sellSkip from grid)
-      if (buySkip)  tgPairParts.push(` ⛔ no buy: ${buySkip}`);
-      if (sellSkip) tgPairParts.push(` ⛔ no sell: ${sellSkip}`);
+      // Skip reasons per side (same as log summary — buySkip/sellSkip from grid).
+      // В Telegram скрываем чисто-"low USDT"/"low <BASE>" причины (ожидаемая ситуация, не требует внимания).
+      // Составные причины (напр. "low AAVE, midpoint >1% loss") — показываем оставшуюся НЕ-low часть.
+      const LOW_SKIP_RE = /^low\s+\S+(?:\s+\(pair budget\))?$/;
+      const filterLowSkip = (reason: string): string =>
+        reason.split(', ').filter(part => !LOW_SKIP_RE.test(part)).join(', ');
+      const buySkipTg  = buySkip  ? filterLowSkip(buySkip)  : '';
+      const sellSkipTg = sellSkip ? filterLowSkip(sellSkip) : '';
+      if (buySkipTg)  tgPairParts.push(` ⛔ buy: ${buySkipTg}`);
+      if (sellSkipTg) tgPairParts.push(` ⛔ sell: ${sellSkipTg}`);
       // Pair state marker (only if non-default, to avoid noise)
       if (pairStateStr !== 'unfreeze') tgPairParts.push(` state: ${pairStateStr}`);
       pairTgLines.push(tgPairParts.join('\n'));

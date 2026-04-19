@@ -2,6 +2,10 @@
 // Bybit Combo Bot — Type Definitions
 // ============================================================
 
+// gridLevels из config.jsonc определяет ТОЛЬКО количество buy-уровней.
+// Количество sell-уровней фиксировано этой константой и не зависит от config.
+export const GRID_SELL_LEVELS = 20;
+
 export interface BotConfig {
   // API
   apiKey: string;

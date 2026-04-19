@@ -4,7 +4,7 @@
 
 import {
   BotConfig, GridConfig, PairConfig, Ticker, IndicatorSnapshot,
-  StrategyDecision, Logger, sanitizeError,
+  StrategyDecision, Logger, sanitizeError, GRID_SELL_LEVELS,
 } from '../types';
 import { BybitExchange } from '../exchange';
 import { StateManager, GridLevelState } from '../state';
@@ -239,9 +239,10 @@ export class GridStrategy {
       const savedLevels = this.state.getGridLevels(symbol);
       if (savedLevels.length > 0) {
         // If saved levels are significantly fewer than configured, reinitialize
-        // (e.g. sync adopted only 2 orders but gridLevels=14)
-        if (savedLevels.length < this.config.gridLevels * 0.5) {
-          this.log.warn(`Grid for ${symbol}: only ${savedLevels.length}/${this.config.gridLevels} levels — reinitializing full grid`);
+        // (e.g. sync adopted only 2 orders but full grid = gridLevels buy + GRID_SELL_LEVELS sell)
+        const expectedFullGrid = this.config.gridLevels + GRID_SELL_LEVELS;
+        if (savedLevels.length < expectedFullGrid * 0.5) {
+          this.log.warn(`Grid for ${symbol}: only ${savedLevels.length}/${expectedFullGrid} levels — reinitializing full grid`);
           await this.cancelAll(symbol);
           // Fall through to reinitialize below
         } else {
@@ -312,12 +313,12 @@ export class GridStrategy {
     const { gridLevels } = this.config;
     const { buySpacingPct, sellSpacingPct } = this.getSpacing(symbol);
 
-    // Bollinger adaptive: shift buy/sell ratio
+    // gridLevels из config определяет ТОЛЬКО количество buy-уровней.
+    // Количество sell-уровней — фиксированная константа GRID_SELL_LEVELS (50) и не зависит от config.
+    // Bollinger adaptive сдвигает buyLevels: при bearish +shift (больше покупки), при bullish -shift.
     const bbAdaptive = this.getBollingerAdaptive(symbol);
-    const baseBuy = Math.floor(gridLevels / 2);
-    const baseSell = Math.ceil(gridLevels / 2);
-    const buyLevels = Math.max(1, Math.min(gridLevels - 1, baseBuy + bbAdaptive.buyLevelShift));
-    const sellLevels = gridLevels - buyLevels;
+    const buyLevels = Math.max(1, gridLevels + bbAdaptive.buyLevelShift);
+    const sellLevels = GRID_SELL_LEVELS;
 
     if (bbAdaptive.buyLevelShift !== 0) {
       this.log.info(`Grid Bollinger adaptive for ${symbol}: ${buyLevels}B/${sellLevels}S (${bbAdaptive.reason})`);
