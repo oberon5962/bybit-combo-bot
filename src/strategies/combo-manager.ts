@@ -1405,6 +1405,10 @@ export class ComboManager {
       else if (cooldownUntil > 0 && Date.now() < cooldownUntil)
         extras.push(`COOL:${Math.ceil((cooldownUntil - Date.now()) / 60000)}min`);
 
+      // Grid skip reason — visible marker so user knows WHY no orders placed this tick
+      const skipReason = this.grid.getSkipReason(sym);
+      if (skipReason) extras.push(`! skip: ${skipReason}`);
+
       const level = (isHalted || cooldownUntil > Date.now()) ? 'warn' : 'info';
       const symPad = sym.padEnd(11);
       const logLine = [

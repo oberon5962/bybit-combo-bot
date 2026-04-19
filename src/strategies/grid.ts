@@ -45,6 +45,11 @@ export class GridStrategy {
     this.telegram = tg;
   }
 
+  /** Get current skip reason for a pair (from last tick), or undefined if not skipping */
+  getSkipReason(symbol: string): string | undefined {
+    return this.lastSkipSummary.get(symbol);
+  }
+
   /** Hot-reload: обновить конфиг без перестроения сетки. Новые параметры применятся к новым ордерам. */
   updateConfig(config: BotConfig): void {
     const wasAutoOn = this.config.autoSpacingPriority !== 'off';
@@ -477,7 +482,7 @@ export class GridStrategy {
           const availableAmount = this.roundAmountForMarket(pairBuyBudget / level.price, precision.amountPrecision);
           const availableCost = availableAmount * level.price;
           if (availableAmount >= precision.minAmount && availableCost >= precision.minCost) {
-            this.log.info(`Buy reduced (pair budget): ${amount} → ${availableAmount} (${(availableAmount/amount*100).toFixed(0)}% of target, budget=$${pairBuyBudget.toFixed(2)})`, { symbol });
+            this.log.info(`[grid] ${symbol}  buy  reduced   ${amount} → ${availableAmount}  (${(availableAmount/amount*100).toFixed(0)}% of target, budget=$${pairBuyBudget.toFixed(2)})`);
             amount = availableAmount;
             orderCost = availableCost;
           } else {
