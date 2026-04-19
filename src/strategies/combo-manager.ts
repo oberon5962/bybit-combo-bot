@@ -358,6 +358,29 @@ export class ComboManager {
       }
     }
 
+    // Per-tick position reconciliation: detect manual Bybit UI buys/sells and untracked balance drift.
+    // Uses allBalances fetched above (essentially free). Catches desync within ~10 seconds.
+    // Preserves avgEntryPrice when known; skips pair if new position has no baseline (let 12h sync handle it).
+    for (const pair of this.config.pairs) {
+      if (pair.state === 'deleted' || this.state.isPairDeleted(pair.symbol)) continue;
+      const base = pair.symbol.split('/')[0];
+      const bybitTotal = allBalances[base]?.total ?? 0;
+      const statePos = this.state.getPosition(pair.symbol);
+      const stateAmt = statePos.amount;
+      if (bybitTotal < 1e-8 && stateAmt < 1e-8) continue;
+      const ref = Math.max(bybitTotal, stateAmt, 1e-8);
+      const diffPct = Math.abs(bybitTotal - stateAmt) / ref * 100;
+      if (diffPct <= 5) continue;
+      // Only reconcile if we have an avgEntry baseline — fallback to sync.ts for fresh positions
+      if (statePos.avgEntryPrice <= 0) continue;
+      const newCost = bybitTotal * statePos.avgEntryPrice;
+      this.log.warn(
+        `[tick-reconcile] ${pair.symbol}: state=${stateAmt.toFixed(6)}, Bybit=${bybitTotal.toFixed(6)} ` +
+        `(${diffPct.toFixed(1)}% diff). Adopting Bybit amount, avgEntry ${statePos.avgEntryPrice.toFixed(4)} preserved.`,
+      );
+      this.state.setPosition(pair.symbol, bybitTotal, newCost);
+    }
+
     // Deposit/withdrawal detection: compare with previous tick value
     // NOTE: Trigger on jumps >20%. False positives from flash crashes / unrecorded grid fills
     // are handled by checking recent trades AND open grid orders before adjusting capital.
