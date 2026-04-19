@@ -1467,14 +1467,31 @@ export class ComboManager {
       // Grid skip reasons per side — user sees WHY no buy and/or sell orders placed this tick
       const buySkip  = this.grid.getBuySkipReason(sym);
       const sellSkip = this.grid.getSellSkipReason(sym);
-      if (buySkip)  extras.push(`skip buy: ${buySkip}!`);
-      if (sellSkip) extras.push(`skip sell: ${sellSkip}!`);
+      if (buySkip)  extras.push(`no buy: ${buySkip}!`);
+      if (sellSkip) extras.push(`no sell: ${sellSkip}!`);
+
+      // Front-of-line "no buy/sell: reason" column (compact, padded) — see skip cause without scanning to end.
+      const baseSym = sym.split('/')[0];
+      const noParts: string[] = [];
+      if (buySkip)  noParts.push(`no buy: ${buySkip}`);
+      if (sellSkip) noParts.push(`no sell: ${sellSkip}`);
+      const noCol = noParts.join(' | ').padEnd(34);
+
+      // State column: FROZEN (full) / SELLGRID / FREEZEBUY / active
+      let pairStateStr: string;
+      if (this.state.isPairFrozen(baseSym))         pairStateStr = 'FROZEN';
+      else if (this.state.isSellGridActive(baseSym)) pairStateStr = 'SELLGRID';
+      else if (this.state.isBuyBlocked(baseSym))     pairStateStr = 'FREEZEBUY';
+      else                                            pairStateStr = 'active';
+      const stateCol = pairStateStr.padEnd(9);
 
       const level = (isHalted || cooldownUntil > Date.now()) ? 'warn' : 'info';
       const symPad = sym.padEnd(11);
       const logLine = [
         `  ${symPad}`,
         `PnL ${stPnlStr.padStart(18)}`,
+        noCol,
+        stateCol,
         `Spent ${st.spent.toFixed(2).padStart(7)}`,
         `Earned ${st.earned.toFixed(2).padStart(7)}`,
         `Fees ${st.totalFees.toFixed(3).padStart(6)}`,
