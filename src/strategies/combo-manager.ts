@@ -1399,19 +1399,19 @@ export class ComboManager {
       const sellCol = (activeSells.length > 0 ? `${activeSells.length}S [${sellCostVal.toFixed(0)}$]` :
                       pendingSells.length > 0  ? `${pendingSells.length}S pend`                        : '0S').padEnd(11);
 
-      // Status / events suffix
+      // Status / events suffix — always show counters even when zero
       const cooldownUntil = this.state.getCooldownUntil(sym);
       const extras: string[] = [];
-      if (slTrades.length  > 0) extras.push(`SL:${slTrades.length}x`);
-      if (tslTrades.length > 0) extras.push(`TSL:${tslTrades.length}x`);
-      if (tpTrades.length  > 0) extras.push(`TP:${tpTrades.length}x`);
+      extras.push(`SL ${slTrades.length}x`);
+      extras.push(`TSL ${tslTrades.length}x`);
+      extras.push(`TP ${tpTrades.length}x`);
       if (isHalted) extras.push(`HALTED:${haltReason ?? '?'}`);
       else if (cooldownUntil > 0 && Date.now() < cooldownUntil)
         extras.push(`COOL:${Math.ceil((cooldownUntil - Date.now()) / 60000)}min`);
 
       // Grid skip reason — visible marker so user knows WHY no orders placed this tick
       const skipReason = this.grid.getSkipReason(sym);
-      if (skipReason) extras.push(`! skip: ${skipReason}`);
+      if (skipReason) extras.push(`skip: ${skipReason}!`);
 
       const level = (isHalted || cooldownUntil > Date.now()) ? 'warn' : 'info';
       const symPad = sym.padEnd(11);
