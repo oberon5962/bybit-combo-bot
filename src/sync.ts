@@ -126,24 +126,40 @@ export class ExchangeSync {
       if (diffPct <= POSITION_RECONCILE_TOLERANCE_PERCENT) continue; // within tolerance
 
       let newCost: number;
-      if (statePos.avgEntryPrice > 0) {
-        // Preserve avgEntry (conservative for SL/TP math)
-        newCost = bybitTotal * statePos.avgEntryPrice;
-      } else {
-        // No prior avgEntry — use current market price as baseline
+      let note: string;
+
+      if (statePos.avgEntryPrice <= 0) {
+        // No prior avgEntry — use current market price as baseline.
+        // Skip entirely if ticker fetch fails (don't corrupt state with bogus costBasis=bybitTotal*1).
         try {
           const ticker = await this.exchange.fetchTicker(pair.symbol);
           newCost = bybitTotal * ticker.last;
-        } catch {
-          newCost = bybitTotal * 1; // last-resort fallback
+          note = `avgEntry set to market ${ticker.last.toFixed(4)}`;
+        } catch (err) {
+          this.log.warn(`[sync] ${pair.symbol} reconcile skipped — no avgEntry baseline and ticker fetch failed: ${sanitizeError(err)}`);
+          continue;
         }
+      } else if (bybitTotal < stateAmt) {
+        // External sell: scale costBasis proportionally (same as reducePosition).
+        const fraction = bybitTotal / stateAmt;
+        newCost = statePos.costBasis * fraction;
+        note = `avgEntry ${statePos.avgEntryPrice.toFixed(4)} preserved (external sell)`;
+      } else {
+        // External buy: delta purchased at current market price, blend cost basis.
+        const delta = bybitTotal - stateAmt;
+        let priceForDelta = statePos.avgEntryPrice; // fallback
+        try {
+          const ticker = await this.exchange.fetchTicker(pair.symbol);
+          if (ticker.last > 0) priceForDelta = ticker.last;
+        } catch { /* use fallback */ }
+        newCost = statePos.costBasis + delta * priceForDelta;
+        const newAvg = newCost / bybitTotal;
+        note = `external buy +${delta.toFixed(6)} @ ~${priceForDelta.toFixed(4)}, avgEntry ${statePos.avgEntryPrice.toFixed(4)} → ${newAvg.toFixed(4)}`;
       }
 
       this.log.warn(
         `[sync] ${pair.symbol} position desync: state=${stateAmt.toFixed(6)}, ` +
-        `Bybit=${bybitTotal.toFixed(6)} (${diffPct.toFixed(1)}% diff). ` +
-        `Adopting Bybit: amount=${bybitTotal.toFixed(6)}, costBasis=${newCost.toFixed(4)} ` +
-        `(avgEntry ${statePos.avgEntryPrice > 0 ? statePos.avgEntryPrice.toFixed(4) + ' preserved' : 'set to market'})`,
+        `Bybit=${bybitTotal.toFixed(6)} (${diffPct.toFixed(1)}% diff). ${note}`,
       );
       this.state.setPosition(pair.symbol, bybitTotal, newCost);
     }
@@ -348,8 +364,11 @@ export class ExchangeSync {
         this.log.info(`[sync] ${symbol}: ${untouchedCount} manual order(s) on exchange — left untouched (not bot levels)`);
       }
 
-      // Save cleaned state
-      this.state.setGridLevels(symbol, savedLevels);
+      // Save cleaned state. If any fill was processed (removedCount > 0, path flips level and calls
+      // addToPosition which saveCritical), the grid-level flip MUST also survive crash — otherwise
+      // restart would re-fetch the same orderId, see it filled, and double-count position.
+      const flipOccurred = removedCount > 0;
+      this.state.setGridLevels(symbol, savedLevels, flipOccurred);
 
       this.log.info(`[sync] ${symbol}: ${validCount} confirmed, ${removedCount} stale removed, ${reconnectedCount} reconnected, ${untouchedCount} manual ignored`);
       }));
@@ -369,8 +388,15 @@ export class ExchangeSync {
     const holdings: HoldingInfo[] = [];
 
     // Holdings: fetch tickers in parallel batches of parallelPairs.
+    // Include manualPairs (e.g., /buy DOGE/USDT without DOGE in config) so their holdings are counted.
     const batchSize = Math.max(1, this.config.parallelPairs || 1);
-    const pairsWithHoldings = this.config.pairs.filter(pair => {
+    const allSymbols = Array.from(new Set([
+      ...this.config.pairs.map(p => p.symbol),
+      ...this.state.getManualPairs(),
+    ]));
+    const pairsWithHoldings = allSymbols
+      .map(symbol => ({ symbol }))
+      .filter(pair => {
       const held = allBalances[pair.symbol.split('/')[0]];
       return held && held.total > 0;
     });
@@ -399,10 +425,11 @@ export class ExchangeSync {
       }
     }
 
-    // Open orders on all pairs: fetch in parallel batches of parallelPairs.
+    // Open orders: include config.pairs + manualPairs to catch manual positions.
+    const orderSymbols = allSymbols.map(symbol => ({ symbol }));
     const openOrders: OrderInfo[] = [];
-    for (let i = 0; i < this.config.pairs.length; i += batchSize) {
-      const batch = this.config.pairs.slice(i, i + batchSize);
+    for (let i = 0; i < orderSymbols.length; i += batchSize) {
+      const batch = orderSymbols.slice(i, i + batchSize);
       const results = await Promise.allSettled(
         batch.map(p => this.exchange.fetchOpenOrders(p.symbol)),
       );

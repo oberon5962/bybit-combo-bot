@@ -356,12 +356,15 @@ export class StateManager {
   getGridLevels(symbol: string): GridLevelState[] {
     return this.getPairState(symbol).gridLevels;
   }
-  setGridLevels(symbol: string, levels: GridLevelState[]): void {
-    // Отфильтровать zombie sell-уровни: amount=0, не заполнены, нет orderId — нечего продавать
+  setGridLevels(symbol: string, levels: GridLevelState[], critical: boolean = false): void {
+    // Filter zombie sell-levels: amount=0, not filled, no orderId, no counter-sell metadata.
+    // Keep levels with oldBreakEven set — they're freshly flipped counter-sells awaiting placement
+    // (amount will be computed by placeGridOrders from orderBudget/price on next tick).
     this.getPairState(symbol).gridLevels = levels.filter(
-      l => !(l.side === 'sell' && l.amount <= 0 && !l.filled && !l.orderId),
+      l => !(l.side === 'sell' && l.amount <= 0 && !l.filled && !l.orderId && !l.oldBreakEven),
     );
-    this.save();
+    if (critical) this.saveCritical();
+    else this.save();
   }
   isGridInitialized(symbol: string): boolean {
     return this.getPairState(symbol).gridInitialized;

@@ -46,7 +46,6 @@ export class ComboManager {
   private ticksSinceCommandPoll: number = 0;
   private lastAutoSpacingRun: number = 0;
   private autoSpacingRunning: boolean = false;
-  private autoSpacingFirstDone: boolean = false;
   private autoSpacingMap: Map<string, { buy: number; sell: number }> = new Map();
 
   constructor(config: BotConfig, exchange: BybitExchange, log: Logger, state: StateManager) {
@@ -247,12 +246,12 @@ export class ComboManager {
         this.log.info('Auto-spacing: no pairs changed — config.jsonc and grids untouched');
       }
 
-      // Первый расчёт после старта + priority=auto → force-rebalance ТОЛЬКО изменённых пар
-      if (!this.autoSpacingFirstDone && this.config.grid.autoSpacingPriority === 'auto' && changedPairs.length > 0) {
+      // Force-rebalance ТОЛЬКО изменённых пар. Раньше срабатывало только на первом запуске —
+      // периодические auto-spacing пересчёты не применялись. Теперь каждый раз при изменении.
+      if (this.config.grid.autoSpacingPriority === 'auto' && changedPairs.length > 0) {
         for (const sym of changedPairs) this.grid.forceRebalance(sym);
         this.log.info(`Auto-spacing: force-rebalancing ${changedPairs.length} pair(s) with new values`);
       }
-      this.autoSpacingFirstDone = true;
 
       const margin = this.config.grid.autoSpacingSafetyMarginPercent;
       this.log.info(`Auto-spacing done (${results.length} pairs, margin=${margin}%):\n${logLines.join('\n')}`);
@@ -403,10 +402,30 @@ export class ComboManager {
       if (diffPct <= POSITION_RECONCILE_TOLERANCE_PERCENT) continue;
       // Only reconcile if we have an avgEntry baseline — fallback to sync.ts for fresh positions
       if (statePos.avgEntryPrice <= 0) continue;
-      const newCost = bybitTotal * statePos.avgEntryPrice;
+
+      let newCost: number;
+      let note: string;
+      if (bybitTotal < stateAmt) {
+        // External sell: Bybit has less than state thinks. Scale costBasis proportionally,
+        // preserving avgEntryPrice (same logic as reducePosition).
+        const fraction = bybitTotal / stateAmt;
+        newCost = statePos.costBasis * fraction;
+        note = `avgEntry ${statePos.avgEntryPrice.toFixed(4)} preserved (external sell)`;
+      } else {
+        // External buy: Bybit has more than state. The delta was purchased at ~current price,
+        // not at the old avgEntryPrice. Blend costs: old position at old avg + delta at current price.
+        const delta = bybitTotal - stateAmt;
+        const currentPrice = allBalances[base]?.total ?? 0 > 0
+          ? (this.exchange['tickerCache']?.get?.(pair.symbol)?.ticker?.last ?? statePos.avgEntryPrice)
+          : statePos.avgEntryPrice;
+        const priceForDelta = currentPrice > 0 ? currentPrice : statePos.avgEntryPrice;
+        newCost = statePos.costBasis + delta * priceForDelta;
+        const newAvg = newCost / bybitTotal;
+        note = `external buy +${delta.toFixed(6)} @ ~${priceForDelta.toFixed(4)}, avgEntry ${statePos.avgEntryPrice.toFixed(4)} → ${newAvg.toFixed(4)}`;
+      }
       this.log.warn(
         `[tick-reconcile] ${pair.symbol}: state=${stateAmt.toFixed(6)}, Bybit=${bybitTotal.toFixed(6)} ` +
-        `(${diffPct.toFixed(1)}% diff). Adopting Bybit amount, avgEntry ${statePos.avgEntryPrice.toFixed(4)} preserved.`,
+        `(${diffPct.toFixed(1)}% diff). ${note}`,
       );
       this.state.setPosition(pair.symbol, bybitTotal, newCost);
     }
