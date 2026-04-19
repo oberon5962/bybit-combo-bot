@@ -156,31 +156,42 @@ export class ExchangeSync {
     const symbols = this.config.pairs.map(p => p.symbol).concat(this.state.getManualPairs())
       .filter((s, i, arr) => arr.indexOf(s) === i)
       .filter(sym => frozen.includes(sym.split('/')[0].toUpperCase()));
+    const batchSize = Math.max(1, this.config.parallelPairs || 1);
     let cancelled = 0;
-    for (const sym of symbols) {
-      try {
-        const orders = await this.exchange.fetchOpenOrders(sym);
-        for (const o of orders.filter(o => o.side === 'buy')) {
-          try {
-            await this.exchange.cancelOrder(o.id, sym);
-            cancelled++;
-          } catch (err) {
-            this.log.warn(`[sync] enforceBuyFreeze: cancel ${o.id} ${sym} failed: ${sanitizeError(err)}`);
+    // Process frozen pairs in parallel batches; within each pair, cancels for that pair's buys run in parallel too.
+    for (let i = 0; i < symbols.length; i += batchSize) {
+      const batch = symbols.slice(i, i + batchSize);
+      const results = await Promise.allSettled(
+        batch.map(async (sym) => {
+          const orders = await this.exchange.fetchOpenOrders(sym);
+          const buyOrders = orders.filter(o => o.side === 'buy');
+          const cancelResults = await Promise.allSettled(
+            buyOrders.map(o => this.exchange.cancelOrder(o.id, sym)),
+          );
+          let localCancelled = 0;
+          for (let k = 0; k < buyOrders.length; k++) {
+            const cr = cancelResults[k];
+            if (cr.status === 'fulfilled') localCancelled++;
+            else this.log.warn(`[sync] enforceBuyFreeze: cancel ${buyOrders[k].id} ${sym} failed: ${sanitizeError(cr.reason)}`);
           }
-        }
-        // Clear orderId on buy-levels in state so grid doesn't think they're still pending
-        const levels = this.state.getGridLevels(sym);
-        let mutated = false;
-        for (const l of levels) {
-          if (l.side === 'buy' && l.orderId) {
-            l.orderId = undefined;
-            l.placedAt = undefined;
-            mutated = true;
+          // Clear orderId on buy-levels in state so grid doesn't think they're still pending
+          const levels = this.state.getGridLevels(sym);
+          let mutated = false;
+          for (const l of levels) {
+            if (l.side === 'buy' && l.orderId) {
+              l.orderId = undefined;
+              l.placedAt = undefined;
+              mutated = true;
+            }
           }
-        }
-        if (mutated) this.state.setGridLevels(sym, levels);
-      } catch (err) {
-        this.log.warn(`[sync] enforceBuyFreeze: fetchOpenOrders ${sym} failed: ${sanitizeError(err)}`);
+          if (mutated) this.state.setGridLevels(sym, levels);
+          return localCancelled;
+        }),
+      );
+      for (let j = 0; j < batch.length; j++) {
+        const r = results[j];
+        if (r.status === 'fulfilled') cancelled += r.value;
+        else this.log.warn(`[sync] enforceBuyFreeze: fetchOpenOrders ${batch[j]} failed: ${sanitizeError(r.reason)}`);
       }
     }
     if (cancelled > 0 || frozen.length > 0) {
@@ -193,7 +204,10 @@ export class ExchangeSync {
   // ----------------------------------------------------------
 
   private async syncOrders(): Promise<void> {
-    for (const pair of this.config.pairs) {
+    const batchSize = Math.max(1, this.config.parallelPairs || 1);
+    for (let bi = 0; bi < this.config.pairs.length; bi += batchSize) {
+      const batch = this.config.pairs.slice(bi, bi + batchSize);
+      await Promise.allSettled(batch.map(async (pair) => {
       const { symbol } = pair;
 
       // Fetch real open orders from Bybit
@@ -202,7 +216,7 @@ export class ExchangeSync {
         exchangeOrders = await this.exchange.fetchOpenOrders(symbol);
       } catch (err) {
         this.log.error(`Failed to fetch open orders for ${symbol}: ${sanitizeError(err)}`);
-        continue;
+        return;
       }
 
       const exchangeOrderIds = new Set(exchangeOrders.map((o) => o.id));
@@ -218,7 +232,7 @@ export class ExchangeSync {
         } else {
           this.log.info(`[sync] ${symbol}: no saved grid levels, no orders on exchange`);
         }
-        continue;
+        return;
       }
 
       let removedCount = 0;
@@ -338,6 +352,7 @@ export class ExchangeSync {
       this.state.setGridLevels(symbol, savedLevels);
 
       this.log.info(`[sync] ${symbol}: ${validCount} confirmed, ${removedCount} stale removed, ${reconnectedCount} reconnected, ${untouchedCount} manual ignored`);
+      }));
     }
   }
 
@@ -353,48 +368,57 @@ export class ExchangeSync {
     const allBalances = await this.exchange.fetchAllBalances();
     const holdings: HoldingInfo[] = [];
 
-    for (const pair of this.config.pairs) {
-      const base = pair.symbol.split('/')[0]; // "BTC" from "BTC/USDT"
-      const held = allBalances[base];
-
-      if (held && held.total > 0) {
-        try {
-          const ticker = await this.exchange.fetchTicker(pair.symbol);
+    // Holdings: fetch tickers in parallel batches of parallelPairs.
+    const batchSize = Math.max(1, this.config.parallelPairs || 1);
+    const pairsWithHoldings = this.config.pairs.filter(pair => {
+      const held = allBalances[pair.symbol.split('/')[0]];
+      return held && held.total > 0;
+    });
+    for (let i = 0; i < pairsWithHoldings.length; i += batchSize) {
+      const batch = pairsWithHoldings.slice(i, i + batchSize);
+      const results = await Promise.allSettled(
+        batch.map(p => this.exchange.fetchTicker(p.symbol)),
+      );
+      for (let j = 0; j < batch.length; j++) {
+        const pair = batch[j];
+        const base = pair.symbol.split('/')[0];
+        const held = allBalances[base];
+        if (!held) continue;
+        const r = results[j];
+        if (r.status === 'fulfilled') {
           holdings.push({
             currency: base,
             amount: held.total,
-            valueUSDT: held.total * ticker.last,
-            currentPrice: ticker.last,
+            valueUSDT: held.total * r.value.last,
+            currentPrice: r.value.last,
           });
-        } catch (err) {
-          this.log.error(`Failed to get price for ${base}: ${sanitizeError(err)}`);
-          holdings.push({
-            currency: base,
-            amount: held.total,
-            valueUSDT: 0,
-            currentPrice: 0,
-          });
+        } else {
+          this.log.error(`Failed to get price for ${base}: ${sanitizeError(r.reason)}`);
+          holdings.push({ currency: base, amount: held.total, valueUSDT: 0, currentPrice: 0 });
         }
       }
     }
 
-    // Open orders on all pairs
+    // Open orders on all pairs: fetch in parallel batches of parallelPairs.
     const openOrders: OrderInfo[] = [];
-    for (const pair of this.config.pairs) {
-      try {
-        const orders = await this.exchange.fetchOpenOrders(pair.symbol);
-        for (const o of orders) {
-          openOrders.push({
-            id: o.id,
-            symbol: pair.symbol,
-            side: o.side,
-            price: o.price,
-            amount: o.amount,
-            valueUSDT: o.price * o.amount,
-          });
+    for (let i = 0; i < this.config.pairs.length; i += batchSize) {
+      const batch = this.config.pairs.slice(i, i + batchSize);
+      const results = await Promise.allSettled(
+        batch.map(p => this.exchange.fetchOpenOrders(p.symbol)),
+      );
+      for (let j = 0; j < batch.length; j++) {
+        const pair = batch[j];
+        const r = results[j];
+        if (r.status === 'fulfilled') {
+          for (const o of r.value) {
+            openOrders.push({
+              id: o.id, symbol: pair.symbol, side: o.side, price: o.price,
+              amount: o.amount, valueUSDT: o.price * o.amount,
+            });
+          }
+        } else {
+          this.log.error(`[sync] Failed to fetch open orders for ${pair.symbol} during portfolio build: ${sanitizeError(r.reason)}`);
         }
-      } catch (err) {
-        this.log.error(`[sync] Failed to fetch open orders for ${pair.symbol} during portfolio build: ${sanitizeError(err)}`);
       }
     }
 
