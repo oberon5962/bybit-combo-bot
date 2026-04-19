@@ -1384,9 +1384,13 @@ export class ComboManager {
 
       const lastInd = this.lastIndicatorsPerPair.get(sym);
       const rsiStr  = lastInd ? lastInd.rsi.toFixed(1).padStart(4)        : '   ?';
-      const emaAbbr: Record<string, string> = { neutral: 'neut', bullish: 'bull', bearish: 'bear' };
       const bbAbbr:  Record<string, string> = { above_upper: 'overbought', above_middle: 'bull', below_middle: 'bear', below_lower: 'oversold' };
-      const emaStr  = (emaAbbr[lastInd?.emaCrossover  ?? ''] ?? lastInd?.emaCrossover  ?? '?').padEnd(4);
+      // EMA: show persistent trend state (fast vs slow) — matches the filter in isBuyAllowed.
+      // emaCrossover is the one-tick event, not useful for summary; user sees conflicting state otherwise.
+      const emaTrend = lastInd
+        ? (lastInd.emaFast > lastInd.emaSlow ? 'bull' : lastInd.emaFast < lastInd.emaSlow ? 'bear' : 'flat')
+        : '?';
+      const emaStr  = emaTrend.padEnd(4);
       const bbStr   = (bbAbbr [lastInd?.pricePosition ?? ''] ?? lastInd?.pricePosition ?? '?').padEnd(10);
 
       const buyCostVal  = activeBuys.reduce((s, l) => s + l.price * l.amount, 0);
