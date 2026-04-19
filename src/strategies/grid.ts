@@ -248,10 +248,10 @@ export class GridStrategy {
             gridCenter = (sortedPrices[0] + sortedPrices[sortedPrices.length - 1]) / 2;
           }
           if (gridCenter <= 0) gridCenter = currentPrice;
-          // Принудительный ребаланс — отменить все и перестроить
+          // Принудительный ребаланс — отменить все и перестроить, сохранив counter-sell metadata
           this.log.info(`Grid force-rebalance for ${symbol}: center was reset`);
           this.lastRebalanceTime.set(symbol, Date.now());
-          await this.cancelAll(symbol);
+          await this.cancelAllPreserveCounterSellMeta(symbol);
           // Fall through to reinitialize below
         } else {
         const driftPercent = Math.abs(currentPrice - gridCenter) / gridCenter * 100;
@@ -281,8 +281,8 @@ export class GridStrategy {
               this.log.warn(`initCounterSellTrailing failed for ${symbol}: ${sanitizeError(err)}`);
             }
           } else {
-            // Full rebalance: cancel all and reinitialize
-            await this.cancelAll(symbol);
+            // Full rebalance UP: cancel all but preserve sell metadata across rebuild
+            await this.cancelAllPreserveCounterSellMeta(symbol);
           }
           // Fall through to reinitialize below
         } else {
@@ -1159,6 +1159,31 @@ export class GridStrategy {
     await this.exchange.cancelAllOrders(symbol);
     this.state.setGridLevels(symbol, []);
     this.state.setGridInitialized(symbol, false);
+  }
+
+  /**
+   * Cancel all orders on exchange, but preserve sell-levels with counter-sell metadata
+   * (oldBreakEven, originalPlannedSellPrice) so trailing halving continues after rebuild.
+   * Used for force-rebalance and full-rebalance UP where we don't want to lose the
+   * protection window on counter-sells that haven't completed their descent yet.
+   */
+  private async cancelAllPreserveCounterSellMeta(symbol: string): Promise<void> {
+    const levels = this.state.getGridLevels(symbol);
+    const preserved: GridLevelState[] = levels
+      .filter(l => l.side === 'sell' && l.oldBreakEven)
+      .map(l => ({
+        ...l,
+        orderId: undefined,
+        filled: false,
+        virtualNewSellPrice: undefined,
+        nextStepAt: undefined,
+      }));
+    await this.exchange.cancelAllOrders(symbol);
+    this.state.setGridLevels(symbol, preserved);
+    this.state.setGridInitialized(symbol, false);
+    if (preserved.length > 0) {
+      this.log.info(`[grid] ${symbol}  preserved ${preserved.length} sell level(s) with counter-sell metadata across rebalance`);
+    }
   }
 
   /** Cancel only buy-side orders, keep sell orders intact (for split rebalance down) */
