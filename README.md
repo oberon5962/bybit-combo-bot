@@ -1143,6 +1143,90 @@ Per-pair state control, bidirectional config sync, RSI/EMA/BB в summary, фик
 **Выравнивание auto-spacing лога:**
 - `1.2%/1.7%` → `1.20%/1.70%` (`.toFixed(2)` на все значения); обе колонки `auto=` и `cfg=` теперь одинаковой ширины
 
+### v2.6.0 (2026-04-19)
+
+Fair-share USDT budget, расширенный BOT SUMMARY, дедуп/унификация логов, HALT_HINT во всех halt-событиях.
+
+**Fair-share USDT budget per pair** ([grid.ts:400-430](src/strategies/grid.ts#L400-L430)):
+- Раньше: параллельная обработка пар позволяла первой паре в батче забрать весь свободный USDT, остальные получали `low USDT`
+- Теперь каждой паре выдаётся справедливая доля USDT на buy-ы:
+  ```
+  pool = freeUSDT + USDT locked in all pairs' buy orders
+  fairShare = (pair.allocationPercent / totalActiveAlloc) × pool
+  budget = min(freeUSDT, max(0, fairShare − thisPairLockedInBuys))
+  ```
+- Frozen/sellgrid/deleted пары исключены из `totalActiveAlloc`
+- Counter-buys, orphan-sells, trailing — используют `freeUSDT` напрямую (часть активного цикла, без квот)
+- Внутри бюджета пары размещается столько ордеров, сколько поместится
+
+**Разделение skip reasons на buy/sell** в BOT SUMMARY ([combo-manager.ts:1420](src/strategies/combo-manager.ts#L1420)):
+- Две независимые колонки: `skip buy: ...!` и `skip sell: ...!`
+- Могут быть обе одновременно: `| skip buy: EMA bearish! | skip sell: low AAVE!`
+- Grid.getBuySkipReason() / getSellSkipReason() — новые геттеры для ComboManager
+
+**Возможные skip причины:**
+
+| Причина | Сторона | Когда срабатывает |
+|---|---|---|
+| `EMA bearish` | buy | `useEmaFilter=true` + `emaFast < emaSlow` |
+| `overbought` | buy | RSI > `rsiOverboughtThreshold` |
+| `buy frozen` | buy | пара в `/freezebuy` или `sellgrid` |
+| `BTC watchdog occured` | buy | BTC упал >3% за час |
+| `low USDT (pair budget)` | buy | исчерпан лимит пары |
+| `max orders` | buy/sell | достигнут `gridLevels + 4` |
+| `budget too small` | buy/sell | orderSize < minAmount биржи |
+| `below minCost` | buy/sell | стоимость < minCost биржи |
+| `insufficient balance` | buy/sell | API-ошибка при размещении |
+| `below entry` | sell | цена ниже `avgEntry` (защита от убытка) |
+| `midpoint >1% loss` | sell | midpoint-guard блокирует sell |
+| `low <BASE>` (например `low AAVE`) | sell | недостаточно крипты для sell |
+
+**BOT SUMMARY — изменения per-pair строки:**
+- **EMA колонка** теперь показывает **persistent trend** (`bull/bear/flat` по `emaFast vs emaSlow`), а не одноразовое `emaCrossover` событие. Раньше можно было увидеть противоречие `EMA neut + skip: EMA bearish!` — теперь одно и то же состояние в обеих местах.
+- **Счётчики SL/TSL/TP всегда показаны** с пробелом: `SL 0x | TSL 1x | TP 0x` (раньше были `SL:1x`, при 0 не показывались вообще)
+- **Skip маркер** в конце строки: `skip buy: EMA bearish!` (восклицание в конце, чтобы обращать внимание)
+
+**Унифицированный формат логов** ([grid.ts](src/strategies/grid.ts), [exchange.ts](src/exchange.ts), [combo-manager.ts](src/strategies/combo-manager.ts)):
+
+```
+[grid]   SUI/USDT    buy  filled   6.09 @ 0.9581
+[grid]   SUI/USDT    sell filled   6.08 @ 1.0999
+[grid]   SOL/USDT    buy  placed   0.0673 @ 88.43    (counter-order)
+[grid]   AAVE/USDT   sell placed   0.0564 @ 105.29   (counter-order)
+[grid]   SUI/USDT    sell placed   6.08 @ 0.9921     (orphan-sell)
+[grid]   RENDER/USDT sell placed   3.01 @ 1.920      (sellgrid-ladder)
+[grid]   SUI/USDT    buy  placed   6.09 @ 0.9581     (grid-init)
+[grid]   SUI/USDT    buy  reduced  6.09 → 4.50       (73% of target, budget=$4.32)
+[grid]   DOT/USDT    sell trailed  1.400 → 1.365     (counter-sell, protected halving, goal=1.318)
+[grid]   DOT/USDT    sell trailed  1.329 → 1.324     (counter-sell, halving, goal=1.318)
+[grid]   DOT/USDT    sell trailed  1.329 → 1.318     (counter-sell, halving done)
+[grid]   DOT/USDT    sell trailed  1.329 → 1.318     (counter-sell, direct)
+[grid]   DOT/USDT    EMA crossover: bearish (buys blocked by filter)
+[dca]    AAVE/USDT   buy  market   0.0565
+[meta]   SUI/USDT    buy  market   5.0
+[meta]   SUI/USDT    sell market   6.08
+[risk]   SUI/USDT    sell market   6.08              (stop-loss)
+[risk]   SUI/USDT    sell market   6.08              (take-profit)
+[risk]   SUI/USDT    sell market   6.08              (trailing-stop-loss)
+[risk]   SUI/USDT    sell market   6.08              (portfolio take-profit)
+[manual] SUI/USDT    buy  market   10.0
+[manual] SUI/USDT    sell market   6.08              (sell-all)
+Grid skip SUI/USDT: buy: EMA bearish, max orders | sell: low SUI
+Grid orders resumed for SUI/USDT — all levels placed
+```
+
+**Дедупликация логов:**
+- `EMA crossover` — логируется **только при смене** состояния `bearish↔bullish↔neutral` (раньше спамил каждый тик)
+- `Grid skip` — логируется **каждый тик** (раньше был дедуп, но пользователь хотел видеть текущую причину всегда)
+
+**HALT_HINT во всех halt-событиях:**
+- Все лог-строки и Telegram-алерты о halt содержат подсказку `Для возобновления: /run или halted→false в bot-state.json`
+- Места: MAX DRAWDOWN, PORTFOLIO TAKE-PROFIT, per-pair halt (3× SL), cooldown=0 halt, `/stop`, `/sellall`, `/cancelorders`
+
+**Переименования:**
+- `market protection` → `BTC watchdog occured`
+- `pair USDT budget exhausted` → `low USDT (pair budget)`
+
 ## Важные замечания
 
 - Обязательно начинайте с `USE_TESTNET=true` и небольших сумм
