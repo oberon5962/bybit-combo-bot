@@ -1540,6 +1540,11 @@ export class ComboManager {
         const minLeft = Math.ceil((cooldownUntil - Date.now()) / 60000);
         tgPairParts.push(` COOLDOWN — ${minLeft} min`);
       }
+      // Skip reasons per side (same as log summary — buySkip/sellSkip from grid)
+      if (buySkip)  tgPairParts.push(` ⛔ no buy: ${buySkip}`);
+      if (sellSkip) tgPairParts.push(` ⛔ no sell: ${sellSkip}`);
+      // Pair state marker (only if non-default, to avoid noise)
+      if (pairStateStr !== 'active') tgPairParts.push(` state: ${pairStateStr}`);
       pairTgLines.push(tgPairParts.join('\n'));
     }
 
