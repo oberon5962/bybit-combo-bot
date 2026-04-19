@@ -365,12 +365,24 @@ export class GridStrategy {
       levels.sort((a, b) => a.price - b.price);
     }
     if (existingSells.length === 0) {
+      // No preserved sells — build full sell ladder above currentPrice
       for (let i = 1; i <= sellLevels; i++) {
         const price = this.roundPriceForMarket(currentPrice + sellSpacing * i, precision.pricePrecision);
         if (usedPrices.has(price)) continue;
         usedPrices.add(price);
         levels.push({ price, amount: 0, side: 'sell', filled: false });
       }
+    } else if (existingSells.length < sellLevels) {
+      // Partial preserved sells — fill gap with new levels ABOVE the highest existing sell
+      const maxExistingSellPrice = Math.max(...existingSells.map(l => l.price));
+      const missing = sellLevels - existingSells.length;
+      for (let i = 1; i <= missing; i++) {
+        const price = this.roundPriceForMarket(maxExistingSellPrice + sellSpacing * i, precision.pricePrecision);
+        if (usedPrices.has(price)) continue;
+        usedPrices.add(price);
+        levels.push({ price, amount: 0, side: 'sell', filled: false });
+      }
+      this.log.info(`Grid fill missing sell-levels for ${symbol}: ${existingSells.length} preserved + ${missing} new = ${sellLevels} total`);
     }
 
     levels.sort((a, b) => a.price - b.price);
