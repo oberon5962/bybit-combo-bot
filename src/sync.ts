@@ -13,6 +13,7 @@
 import { BotConfig, Logger, sanitizeError } from './types';
 import { BybitExchange } from './exchange';
 import { StateManager } from './state';
+import { POSITION_RECONCILE_TOLERANCE_PERCENT } from './constants';
 
 export interface PortfolioSnapshot {
   usdtFree: number;
@@ -122,7 +123,7 @@ export class ExchangeSync {
 
       const ref = Math.max(bybitTotal, stateAmt, 1e-8);
       const diffPct = Math.abs(bybitTotal - stateAmt) / ref * 100;
-      if (diffPct <= 5) continue; // within tolerance
+      if (diffPct <= POSITION_RECONCILE_TOLERANCE_PERCENT) continue; // within tolerance
 
       let newCost: number;
       if (statePos.avgEntryPrice > 0) {

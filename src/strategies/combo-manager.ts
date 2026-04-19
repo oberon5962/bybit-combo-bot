@@ -17,6 +17,7 @@ import { ExchangeSync } from '../sync';
 import { analyzeAllSymbols, round as volRound } from '../volatility';
 import type { CandleFetcher } from '../volatility';
 import { updatePairStateInConfig, updatePairSpacingInConfig, addPairToConfig, markPairDeletedInConfig, rewritePairAllocations } from '../config-writer';
+import { POSITION_RECONCILE_TOLERANCE_PERCENT } from '../constants';
 import { createHash } from 'crypto';
 import { readFileSync } from 'fs';
 import { resolve } from 'path';
@@ -370,7 +371,7 @@ export class ComboManager {
       if (bybitTotal < 1e-8 && stateAmt < 1e-8) continue;
       const ref = Math.max(bybitTotal, stateAmt, 1e-8);
       const diffPct = Math.abs(bybitTotal - stateAmt) / ref * 100;
-      if (diffPct <= 5) continue;
+      if (diffPct <= POSITION_RECONCILE_TOLERANCE_PERCENT) continue;
       // Only reconcile if we have an avgEntry baseline — fallback to sync.ts for fresh positions
       if (statePos.avgEntryPrice <= 0) continue;
       const newCost = bybitTotal * statePos.avgEntryPrice;
