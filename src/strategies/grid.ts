@@ -99,6 +99,13 @@ export class GridStrategy {
     }
   }
 
+  /** Принудительный ребаланс одной пары на следующем тике (сброс center → drift 100%) */
+  forceRebalance(symbol: string): void {
+    if (this.state.isGridInitialized(symbol)) {
+      this.state.setGridCenterPrice(symbol, 0);
+    }
+  }
+
   /** Get grid spacing for a symbol: auto-spacing → per-pair override → global fallback */
   private getSpacing(symbol: string): { buySpacingPct: number; sellSpacingPct: number } {
     // Auto-spacing приоритет (если включено и priority=auto и есть данные)

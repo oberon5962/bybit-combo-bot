@@ -219,21 +219,38 @@ export class ComboManager {
       }
       this.grid.setAutoSpacing(newMap);
 
-      // Auto-spacing priority=auto → синхронизировать новые значения в config.jsonc
-      if (this.config.grid.autoSpacingPriority === 'auto') {
+      // Определить какие пары реально изменили spacing (отличаются от config сейчас).
+      // Для них — пишем в config, force-rebalance. Для неизменных — пропускаем (экономия API + нет лишнего ребаланса).
+      const changedPairs: string[] = [];
+      for (const [sym, spacing] of newMap) {
+        const pair = this.config.pairs.find(p => p.symbol === sym);
+        const cfgBuy = pair?.gridSpacingPercent ?? this.config.grid.gridSpacingPercent;
+        const cfgSell = pair?.gridSpacingSellPercent ?? this.config.grid.gridSpacingSellPercent;
+        // Сравниваем через строки с toFixed(2) — точно такой же масштаб что в логе/config.jsonc
+        if (spacing.buy.toFixed(2) !== cfgBuy.toFixed(2) || spacing.sell.toFixed(2) !== cfgSell.toFixed(2)) {
+          changedPairs.push(sym);
+        }
+      }
+
+      // Auto-spacing priority=auto → синхронизировать только ИЗМЕНЁННЫЕ значения в config.jsonc
+      if (this.config.grid.autoSpacingPriority === 'auto' && changedPairs.length > 0) {
         const cfgPathAs = resolve(__dirname, '../../config.jsonc');
-        for (const [sym, spacing] of newMap) {
+        for (const sym of changedPairs) {
+          const spacing = newMap.get(sym);
+          if (!spacing) continue;
           try { updatePairSpacingInConfig(cfgPathAs, sym, spacing.buy, spacing.sell); }
           catch (e) { this.log.warn(`config-writer spacing ${sym}: ${sanitizeError(e)}`); }
         }
         this.lastConfigHash = createHash('md5').update(readFileSync(cfgPathAs, 'utf-8')).digest('hex');
-        this.log.info('Auto-spacing: values written back to config.jsonc');
+        this.log.info(`Auto-spacing: ${changedPairs.length} pair(s) with new values written to config.jsonc (${changedPairs.join(', ')})`);
+      } else if (this.config.grid.autoSpacingPriority === 'auto') {
+        this.log.info('Auto-spacing: no pairs changed — config.jsonc and grids untouched');
       }
 
-      // Первый расчёт после старта + priority=auto → принудительный ребаланс всех пар
-      if (!this.autoSpacingFirstDone && this.config.grid.autoSpacingPriority === 'auto') {
-        this.grid.forceRebalanceAll();
-        this.log.info('Auto-spacing: force-rebalancing all pairs with new values');
+      // Первый расчёт после старта + priority=auto → force-rebalance ТОЛЬКО изменённых пар
+      if (!this.autoSpacingFirstDone && this.config.grid.autoSpacingPriority === 'auto' && changedPairs.length > 0) {
+        for (const sym of changedPairs) this.grid.forceRebalance(sym);
+        this.log.info(`Auto-spacing: force-rebalancing ${changedPairs.length} pair(s) with new values`);
       }
       this.autoSpacingFirstDone = true;
 
