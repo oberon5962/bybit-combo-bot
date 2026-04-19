@@ -1411,7 +1411,7 @@ export class ComboManager {
 
       // Grid skip reason — visible marker so user knows WHY no orders placed this tick
       const skipReason = this.grid.getSkipReason(sym);
-      if (skipReason) extras.push(`skip: ${skipReason}!`);
+      if (skipReason) extras.push(`skip buy: ${skipReason}!`);
 
       const level = (isHalted || cooldownUntil > Date.now()) ? 'warn' : 'info';
       const symPad = sym.padEnd(11);
