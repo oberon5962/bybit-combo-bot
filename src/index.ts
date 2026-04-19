@@ -44,11 +44,21 @@ function releaseLock(): void {
 
 async function main(): Promise<void> {
   acquireLock();
-  const log = createLogger('info');
+  const logLevel = process.env.LOG_LEVEL ?? 'info';
+  const log = createLogger(logLevel);
 
   log.info('='.repeat(60));
   log.info('  Bybit Combo Bot — Grid + DCA + Indicators');
+  log.info(`  Log level: ${logLevel}`);
   log.info('='.repeat(60));
+
+  // Global error handlers — previously unhandled rejections could silently kill the process.
+  process.on('unhandledRejection', (reason, promise) => {
+    log.error(`UNHANDLED REJECTION: ${reason instanceof Error ? reason.stack ?? reason.message : String(reason)}`);
+  });
+  process.on('uncaughtException', (err) => {
+    log.error(`UNCAUGHT EXCEPTION: ${err.stack ?? err.message}`);
+  });
 
   // Load config
   const config = loadConfig();
