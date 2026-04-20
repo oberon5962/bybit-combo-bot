@@ -102,7 +102,6 @@ export interface GridConfig {
   // Auto-adaptive spacing (на основе волатильности)
   counterSellTrailStepHours: number;        // шаг midpoint-halving при split rebalance DOWN (часы). >0=halving, 0=snap без halving, <0=trailing off
   minSellProfitPercent: number;             // минимальная прибыль для безубыточного sell (% над avgEntry, покрывает комиссии + буфер)
-  maxSellLossPercent: number;               // максимальный убыток в midpoint-режиме (% ниже avgEntry, иначе skip)
   orphanSellMaxPerTick: number;             // максимум orphan-sell ордеров за один тик
   autoSpacingIntervalMin: number;          // как часто пересчитывать (минуты, напр. 360 = каждые 6ч)
   autoSpacingSafetyMarginPercent: number; // коэффициент недоверия — вычитать N% из расчётных значений

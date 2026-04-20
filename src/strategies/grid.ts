@@ -217,6 +217,16 @@ export class GridStrategy {
     return Math.round(price * factor) / factor;
   }
 
+  /**
+   * Округление цены ВВЕРХ к шагу биржи.
+   * Используется когда критически важно, чтобы результат был >= input (напр. raise-to-break-even):
+   * Math.round может округлить вниз и увести sell-ордер ниже безубыточной цены.
+   */
+  private roundPriceUpForMarket(price: number, pricePrecision: number): number {
+    const factor = Math.pow(10, pricePrecision);
+    return Math.ceil(price * factor) / factor;
+  }
+
   private roundAmountForMarket(amount: number, amountPrecision: number): number {
     const factor = Math.pow(10, amountPrecision);
     return Math.floor(amount * factor) / factor; // floor to not exceed balance
@@ -532,24 +542,25 @@ export class GridStrategy {
         pendingOrders.push({ level, side: 'buy', amount });
 
       } else if (level.side === 'sell' && level.price > currentPrice) {
+        // Grid Sell Guard: не продавать ниже безубыточной цены (avgEntry × (1 + minSellProfitPercent/100)).
+        // Если level.price ниже break-even — ПОДНИМАЕМ цену ордера до break-even, ордер всё равно ставим.
+        // originalPlannedSellPrice сохраняется с ПЕРВОНАЧАЛЬНОЙ цены (до подъёма) — halving использует её как старт сползания.
         const pos = this.state.getPosition(symbol);
         const breakEvenMult = 1 + (this.config.minSellProfitPercent / 100);
-        const lossMult = 1 - (this.config.maxSellLossPercent / 100);
         const minSellPrice = pos.avgEntryPrice * breakEvenMult;
+        const originalLevelPrice = level.price;
         if (pos.avgEntryPrice > 0 && level.price < minSellPrice) {
-          if (minSellPrice <= currentPrice) { addSkip('below entry', 'sell'); continue; }
-          const midpoint = (level.price + minSellPrice) / 2;
-          const lossThreshold = pos.avgEntryPrice * lossMult;
-          if (midpoint > lossThreshold) {
-            const midPrice = this.roundPriceForMarket(midpoint, precision.pricePrecision);
-            if (midPrice !== level.price) {
-              this.log.info(`Grid sell midpoint: ${level.price} → ${midPrice} (break-even=${minSellPrice.toFixed(6)}, avgEntry=${pos.avgEntryPrice.toFixed(6)})`, { symbol });
-              level.price = midPrice;
-            }
-          } else {
-            addSkip(`midpoint >${this.config.maxSellLossPercent}% loss`, 'sell');
-            continue;
+          // Округляем ВВЕРХ чтобы гарантировать price >= break-even (Math.round мог бы увести ниже).
+          const raised = this.roundPriceUpForMarket(minSellPrice, precision.pricePrecision);
+          if (raised !== level.price) {
+            this.log.info(`Grid sell raised to break-even: ${level.price} → ${raised} (avgEntry=${pos.avgEntryPrice.toFixed(6)}, break-even=${minSellPrice.toFixed(6)})`, { symbol });
+            level.price = raised;
           }
+        }
+        // Anchors для halving: сохраняем даже если уровень не counter-sell — halving будет работать единообразно.
+        if (pos.avgEntryPrice > 0 && !level.oldBreakEven) {
+          level.oldBreakEven = minSellPrice;
+          level.originalPlannedSellPrice = originalLevelPrice;
         }
         if (freeCrypto < amount) {
           const availableAmount = this.roundAmountForMarket(freeCrypto, precision.amountPrecision);
@@ -777,36 +788,21 @@ export class GridStrategy {
             continue;
           }
 
-          // Guard: counter-sell must not incur loss > maxSellLossPercent% vs avg entry.
-          // Strategy: midpoint between spacing-calc price and break-even if midpoint > avgEntry * (1-maxSellLossPercent/100),
-          // else skip placement (keep level retired for existing higher sells to handle).
+          // Counter-Sell Guard: не продавать ниже безубыточной цены.
+          // Если counterPrice ниже break-even — ПОДНИМАЕМ до break-even, ордер всё равно ставим (не skip).
+          // originalCounterPrice сохраняется с ПЕРВОНАЧАЛЬНОЙ (до подъёма) цены — будет записана в originalPlannedSellPrice
+          // для halving (осмысленный «старт сползания» от изначально запланированной spacing-цены).
+          const originalCounterPrice = counterPrice;
           if (counterSide === 'sell') {
             const pos = this.state.getPosition(symbol);
             const breakEvenMult = 1 + (this.config.minSellProfitPercent / 100);
-            const lossMult = 1 - (this.config.maxSellLossPercent / 100);
             const minSellPrice = pos.avgEntryPrice * breakEvenMult;
             if (pos.avgEntryPrice > 0 && counterPrice < minSellPrice) {
-              const midpoint = (counterPrice + minSellPrice) / 2;
-              const lossThreshold = pos.avgEntryPrice * lossMult;
-              if (midpoint > lossThreshold) {
-                const oldCounter = counterPrice;
-                counterPrice = this.roundPriceForMarket(midpoint, precision.pricePrecision);
-                this.log.info(`Counter-sell midpoint: ${oldCounter} → ${counterPrice} (spacing=${oldCounter}, break-even=${minSellPrice.toFixed(6)}, avgEntry=${pos.avgEntryPrice.toFixed(6)})`, { symbol });
-              } else {
-                // Midpoint would cause > maxSellLossPercent% loss — skip placement, retire level
-                // If sellgrid active: keep level as 'sell' (ladder mode), orphan-sell will cover
-                // If normal mode: retire to 'buy' side so next cycle places a buy
-                this.log.info(`Counter-sell skipped: midpoint ${midpoint.toFixed(6)} <= avgEntry*${lossMult} (${lossThreshold.toFixed(6)}). Relying on orphan-sell / existing higher sells.`, { symbol });
-                const baseForSkip = symbol.split('/')[0];
-                level.side = this.state.isSellGridActive(baseForSkip) ? 'sell' : 'buy';
-                level.orderId = undefined;
-                level.filled = false;
-                level.oldBreakEven = undefined;
-                level.originalPlannedSellPrice = undefined;
-                level.virtualNewSellPrice = undefined;
-                level.nextStepAt = undefined;
-                levelsChanged = true;
-                continue;
+              // Округляем ВВЕРХ чтобы гарантировать counterPrice >= break-even.
+              const raised = this.roundPriceUpForMarket(minSellPrice, precision.pricePrecision);
+              if (raised !== counterPrice) {
+                this.log.info(`Counter-sell raised to break-even: ${counterPrice} → ${raised} (spacing-price=${counterPrice}, avgEntry=${pos.avgEntryPrice.toFixed(6)}, break-even=${minSellPrice.toFixed(6)})`, { symbol });
+                counterPrice = raised;
               }
             }
           }
@@ -894,11 +890,12 @@ export class GridStrategy {
             level.side = counterSide;
             level.price = counterPrice;
             level.placedAt = Date.now();
-            // Counter-sell trailing metadata: fixed at creation, used by split rebalance DOWN.
-            // oldBreakEven = цена конкретной покупки, породившей этот counter-sell, + minSellProfitPercent
+            // Counter-sell trailing anchors (used by halving at split rebalance DOWN):
+            //   oldBreakEven              — цена конкретной покупки + minSellProfitPercent (нижняя граница halving)
+            //   originalPlannedSellPrice  — ПЕРВОНАЧАЛЬНО рассчитанная (до подъёма до break-even) цена — верхняя точка отсчёта для halving
             if (counterSide === 'sell') {
               level.oldBreakEven = actualPrice * (1 + this.config.minSellProfitPercent / 100);
-              level.originalPlannedSellPrice = counterPrice;
+              level.originalPlannedSellPrice = originalCounterPrice;
               level.virtualNewSellPrice = undefined;
               level.nextStepAt = undefined;
             } else {
@@ -923,7 +920,7 @@ export class GridStrategy {
             level.filled = false;
             if (counterSide === 'sell') {
               level.oldBreakEven = actualPrice * (1 + this.config.minSellProfitPercent / 100);
-              level.originalPlannedSellPrice = counterPrice;
+              level.originalPlannedSellPrice = originalCounterPrice;
               level.virtualNewSellPrice = undefined;
               level.nextStepAt = undefined;
             } else {
@@ -1003,20 +1000,23 @@ export class GridStrategy {
 
           while (remaining > 0 && orphanPlaced < orphanOrderBudget) {
             const { sellSpacingPct: orphanSellPct } = this.getSpacing(symbol);
-            // Floor: гарантировать что orphan-sell поставлен не ниже break-even (покрывает round-trip комиссии + запас).
-            // Без floor — при маленьком sellSpacingPct (например от auto-spacing при низкой волатильности с margin=0)
-            // orphan-sell мог оказаться в убыток после комиссий. Floor срабатывает только когда orphanSellPct × priceStep < minSellProfitPercent.
-            const rawEffectivePct = orphanSellPct * priceStep;
-            const effectivePct = Math.max(rawEffectivePct, this.config.minSellProfitPercent);
-            if (effectivePct > rawEffectivePct) {
-              this.log.info(`[grid] ${symbol}  orphan-sell floor activated: sellSpacingPct=${orphanSellPct}% × priceStep=${priceStep} = ${rawEffectivePct.toFixed(2)}% < minSellProfitPercent=${this.config.minSellProfitPercent}% → using ${effectivePct}%`);
+            // Orphan-sell формула — floor по абсолютной ЦЕНЕ (безубытка), а не по проценту:
+            //   targetMarkupPct — целевая наценка от текущей цены (spacing × priceStep)
+            //   pricePrediction — что получилось бы по чистому spacing-расчёту от ticker.last
+            //   breakEvenPrice  — минимальная безубыточная цена (avgEntry × (1 + minSellProfitPercent/100))
+            //   sellPrice = max(pricePrediction, breakEvenPrice) — floor защищает от убытка
+            const targetMarkupPct = orphanSellPct * priceStep;
+            const pricePrediction = ticker.last * (1 + targetMarkupPct / 100);
+            const breakEvenPrice = position.avgEntryPrice * (1 + this.config.minSellProfitPercent / 100);
+            const rawSellPrice = Math.max(pricePrediction, breakEvenPrice);
+            // Всегда округляем ВВЕРХ: гарантирует sellPrice >= rawSellPrice >= breakEvenPrice.
+            // Math.round (round-nearest) мог бы увести цену ниже breakEvenPrice из-за floating-point
+            // даже когда pricePrediction выиграл max — edge-case когда pricePrediction чуть выше breakEvenPrice.
+            const sellPrice = this.roundPriceUpForMarket(rawSellPrice, precision.pricePrecision);
+            const floorActivated = breakEvenPrice >= pricePrediction;
+            if (floorActivated) {
+              this.log.info(`[grid] ${symbol}  orphan-sell floor activated: pricePrediction=${pricePrediction.toFixed(6)} <= breakEvenPrice=${breakEvenPrice.toFixed(6)} (avgEntry=${position.avgEntryPrice.toFixed(6)}, minSellProfitPercent=${this.config.minSellProfitPercent}%) → using ${sellPrice}`);
             }
-            const entryBased = position.avgEntryPrice * (1 + effectivePct / 100);
-            const priceBased = ticker.last * (1 + effectivePct / 100);
-            const sellPrice = this.roundPriceForMarket(
-              Math.max(entryBased, priceBased),
-              precision.pricePrecision,
-            );
 
             // Check if this price level already has a sell level (with or without orderId)
             // Without this, cancelled sell orders leave orphan levels that keep spawning duplicates
@@ -1037,7 +1037,18 @@ export class GridStrategy {
               () => this.exchange.createLimitSell(symbol, sellAmount, sellPrice, 'grid'),
               `Grid orphan-sell ${symbol} @ ${sellPrice}`,
             );
-            levels.push({ price: sellPrice, amount: sellAmount, side: 'sell', orderId: order.id, filled: false, placedAt: Date.now() });
+            // Anchors для halving: сохраняем break-even и изначально запланированную (pricePrediction) цену.
+            // Halving при последующем split rebalance DOWN сможет двигать этот orphan-sell единообразно с counter-sell.
+            levels.push({
+              price: sellPrice,
+              amount: sellAmount,
+              side: 'sell',
+              orderId: order.id,
+              filled: false,
+              placedAt: Date.now(),
+              oldBreakEven: breakEvenPrice,
+              originalPlannedSellPrice: pricePrediction,
+            });
             this.exchange.deductCachedBalance(base, sellAmount);
             orphanPlaced++;
             this.log.info(`[grid] ${symbol}  sell  placed   ${sellAmount} @ ${sellPrice}  (orphan-sell)`);
@@ -1059,9 +1070,10 @@ export class GridStrategy {
     // EMA crossover is one-tick event — spams on whipsaw when emaFast≈emaSlow.
     // Current trend is in BOT SUMMARY (EMA col: bull/bear/flat) and in skip buy marker, so no separate log needed.
 
-    // Counter-sell midpoint-halving trailing (после split rebalance DOWN).
-    // Шаг 4 из спецификации: каждый nextStepAt-таймер делим пополам расстояние до virtualNewSellPrice.
-    // Защита oldBreakEven только на первом шаге (уже применена при ребалансе в step 2).
+    // ⏳ HALVING (шаги 3+) — midpoint-halving trailing counter-sell после split rebalance DOWN.
+    // Тикает каждый тик для sell-уровней с обоими runtime-полями (virtualNewSellPrice + nextStepAt).
+    // На каждом истёкшем nextStepAt делим пополам расстояние между текущей ценой ордера и virtualNewSellPrice.
+    // Защита oldBreakEven: halving не уводит цену ниже сохранённой безубыточной (см. max(oldBreakEven, midpoint)).
     if (this.config.counterSellTrailStepHours === 0) {
       // Отключено: для каждого level с незавершённым halving — прыгаем сразу на virtualNewSellPrice.
       const flushLevels = this.state.getGridLevels(symbol);
@@ -1231,9 +1243,14 @@ export class GridStrategy {
   }
 
   /**
-   * Midpoint-halving trailing после split rebalance DOWN.
-   * Для каждого counter-sell (с oldBreakEven/originalPlannedSellPrice) фиксируем новую целевую цену
-   * virtualNewSellPrice = currentPrice × (1 + sellSpacing/100) и выполняем шаг 2 спецификации.
+   * ⏳ HALVING (шаг 1-2 инициализации) — midpoint-halving trailing counter-sell после split rebalance DOWN.
+   *
+   * Запускается только из split rebalance DOWN (auto-rebalance DOWN в initGrid).
+   * Заполняет runtime-поля halving для каждого counter-sell с anchors (oldBreakEven + originalPlannedSellPrice):
+   *   • virtualNewSellPrice = currentPrice × (1 + sellSpacing/100) — новая целевая (низкая) цель halving
+   *   • nextStepAt          = Date.now() + counterSellTrailStepHours × 3600000 — таймер следующего шага
+   * Сразу же выполняет шаг 1 halving (новая цена = max(oldBreakEven, midpoint(originalPlannedSellPrice, virtualNewSellPrice))).
+   * Дальнейшие шаги halving тикают на каждом тике в `placeGridOrders` (см. «HALVING (шаги 3+)» ниже).
    */
   private async initCounterSellTrailing(symbol: string, currentPrice: number): Promise<void> {
     if (this.config.counterSellTrailStepHours < 0) return;
@@ -1257,9 +1274,11 @@ export class GridStrategy {
       level.virtualNewSellPrice = virtualNewSellPrice;
 
       if (!halvingDisabled && virtualNewSellPrice < level.oldBreakEven) {
-        // Шаг 2: новая цена = max(oldBreakEven, midpoint(originalPlanned, virtualNew))
+        // Шаг 2 halving (первый шаг сползания): новая цена = max(oldBreakEven, midpoint(originalPlanned, virtualNew)).
+        // Здесь oldBreakEven — жёсткий floor (только для Step 2), округляем ВВЕРХ чтобы rounding не увёл на 1 тик ниже.
+        // На последующих шагах (Step 3+) floor oldBreakEven отсутствует по дизайну — halving может сползать ниже безубытка.
         const midpoint = (level.originalPlannedSellPrice + virtualNewSellPrice) / 2;
-        const newPrice = this.roundPriceForMarket(
+        const newPrice = this.roundPriceUpForMarket(
           Math.max(level.oldBreakEven, midpoint),
           precision.pricePrecision,
         );

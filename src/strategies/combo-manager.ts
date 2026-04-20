@@ -544,7 +544,7 @@ export class ComboManager {
     // Log summary every N ticks (configurable, default 10)
     const logInterval = this.config.logSummaryIntervalTicks || 10;
     if (this.state.totalTicks % logInterval === 0) {
-      this.logSummary(totalPortfolioUSDT);
+      this.logSummary(totalPortfolioUSDT, currentBalance.free);
     }
   }
 
@@ -1392,7 +1392,7 @@ export class ComboManager {
   // Summary log
   // ----------------------------------------------------------
 
-  private logSummary(currentCapital: number): void {
+  private logSummary(currentCapital: number, freeCapital: number): void {
     const trades = this.state.getRecentTrades();
     const buys = trades.filter((t) => t.side === 'buy');
     const sells = trades.filter((t) => t.side === 'sell');
@@ -1410,6 +1410,7 @@ export class ComboManager {
     this.log.info('=== BOT SUMMARY ===', {
       totalTicks: this.state.totalTicks,
       currentCapital: currentCapital.toFixed(2),
+      freeCapital: freeCapital.toFixed(2),
       startingCapital: this.state.startingCapital.toFixed(2),
       peakCapital: this.state.peakCapital.toFixed(2),
       PnL: `${pnl >= 0 ? '+' : ''}${pnl.toFixed(2)} (${pnl >= 0 ? '+' : ''}${pnlPct.toFixed(1)}%)`,
@@ -1567,14 +1568,20 @@ export class ComboManager {
       }
       // Skip reasons per side (same as log summary — buySkip/sellSkip from grid).
       // В Telegram скрываем чисто-"low USDT"/"low <BASE>" причины (ожидаемая ситуация, не требует внимания).
-      // Составные причины (напр. "low AAVE, midpoint >1% loss") — показываем оставшуюся НЕ-low часть.
+      // Составные причины (напр. "low AAVE, max orders") — показываем оставшуюся НЕ-low часть.
       const LOW_SKIP_RE = /^low\s+\S+(?:\s+\(pair budget\))?$/;
       const filterLowSkip = (reason: string): string =>
         reason.split(', ').filter(part => !LOW_SKIP_RE.test(part)).join(', ');
       const buySkipTg  = buySkip  ? filterLowSkip(buySkip)  : '';
       const sellSkipTg = sellSkip ? filterLowSkip(sellSkip) : '';
-      if (buySkipTg)  tgPairParts.push(` ⛔ buy:${buySkipTg}`);
-      if (sellSkipTg) tgPairParts.push(` ⛔ sell:${sellSkipTg}`);
+      // 🧊 — buy frozen (пара в sellgrid/freezebuy состоянии, покупки временно выключены).
+      // ⛔ — реальные блокировки (BTC watchdog, max orders, budget too small и т.п.).
+      const pickSkipIcon = (reason: string) => {
+        if (reason.includes('buy frozen')) return '🧊';
+        return '⛔';
+      };
+      if (buySkipTg)  tgPairParts.push(` ${pickSkipIcon(buySkipTg)} buy:${buySkipTg}`);
+      if (sellSkipTg) tgPairParts.push(` ${pickSkipIcon(sellSkipTg)} sell:${sellSkipTg}`);
       // Pair state marker (only if non-default, to avoid noise)
       if (pairStateStr !== 'unfreeze') tgPairParts.push(` state: ${pairStateStr}`);
       pairTgLines.push(tgPairParts.join('\n'));
@@ -1591,7 +1598,7 @@ export class ComboManager {
     const tgText = [
       `${trendIcon} <b>BOT SUMMARY</b> (tick ${this.state.totalTicks})`,
       '',
-      `${currentCapital.toFixed(2)} USDT | PnL ${sign}${pnl.toFixed(2)} (${sign}${pnlPct.toFixed(1)}%) | DD ${drawdown.toFixed(1)}% | peak ${this.state.peakCapital.toFixed(2)} | Trades: ${trades.length} (${buys.length}B/${sells.length}S)`,
+      `${currentCapital.toFixed(2)} USDT | free ${freeCapital.toFixed(2)} | PnL ${sign}${pnl.toFixed(2)} (${sign}${pnlPct.toFixed(1)}%) | DD ${drawdown.toFixed(1)}% | peak ${this.state.peakCapital.toFixed(2)} | Trades: ${trades.length} (${buys.length}B/${sells.length}S)`,
       `Panic: ${panicStr} | BTC: ${btcStr}`,
       '',
       pairTgBlock,
