@@ -1389,6 +1389,29 @@ export class ComboManager {
   }
 
   // ----------------------------------------------------------
+  // Sort helper: группа (0=активные, 1=замороженные, 2=deleted), внутри — PnL desc.
+  // Используется в BOT SUMMARY, /status, /stats для единообразной сортировки.
+  // ----------------------------------------------------------
+
+  private getPairSortGroup(sym: string): number {
+    const pair = this.config.pairs.find(p => p.symbol === sym);
+    const base = sym.split('/')[0];
+    // Deleted — в конце.
+    if (pair?.state === 'deleted' || this.state.isPairDeleted(sym)) return 2;
+    // Любое "замороженное" состояние (через config.state или runtime).
+    if (pair?.state === 'freeze' || pair?.state === 'freezebuy' || pair?.state === 'sellgrid') return 1;
+    if (this.state.isBuyBlocked(base) || this.state.isSellGridActive(base)) return 1;
+    return 0;
+  }
+
+  private comparePairsForDisplay = (a: string, b: string): number => {
+    const ga = this.getPairSortGroup(a);
+    const gb = this.getPairSortGroup(b);
+    if (ga !== gb) return ga - gb;
+    return this.state.getPairStats(b).pnl - this.state.getPairStats(a).pnl;
+  };
+
+  // ----------------------------------------------------------
   // Summary log
   // ----------------------------------------------------------
 
@@ -1425,11 +1448,11 @@ export class ComboManager {
       btcWatchdog: this.btcPaused ? 'PAUSED — BTC drop detected' : 'ok',
     });
 
-    // Per-pair summary line (sorted by PnL descending)
+    // Per-pair summary line. Сортировка: группа (0=активные, 1=замороженные, 2=deleted), внутри группы — PnL desc.
     const pairLogLines: string[] = [];
     const pairTgLines: string[] = [];
     const sortedPairs = [...this.config.pairs].sort((a, b) =>
-      this.state.getPairStats(b.symbol).pnl - this.state.getPairStats(a.symbol).pnl,
+      this.comparePairsForDisplay(a.symbol, b.symbol),
     );
 
     // Pre-pass: собрать raw skip-reason строки для всех пар, чтобы padEnd выровнял колонку
@@ -1536,7 +1559,17 @@ export class ComboManager {
       const summaryBase = sym.split('/')[0];
       const summaryFrozen = this.state.isBuyBlocked(summaryBase);
       const summarySellgrid = this.state.isSellGridActive(summaryBase);
-      const summaryMarker = (summarySellgrid ? ' 🔻' : '') + (summaryFrozen ? ' 🧊' : '');
+      // 🦺 N — сколько активных sell-уровней подняты до break-even (защита сработала).
+      // Условие: originalPlannedSellPrice < oldBreakEven — изначальная spacing-цена была ниже безубытка.
+      const raisedToBreakEven = sellLevels.filter(l =>
+        !l.filled &&
+        l.orderId &&
+        l.oldBreakEven !== undefined &&
+        l.originalPlannedSellPrice !== undefined &&
+        l.originalPlannedSellPrice < l.oldBreakEven,
+      ).length;
+      const vestMarker = raisedToBreakEven > 0 ? ` 🦺${raisedToBreakEven}` : '';
+      const summaryMarker = (summarySellgrid ? ' 🔻' : '') + (summaryFrozen ? ' 🧊' : '') + vestMarker;
       tgPairParts.push(`<b>${sym}</b> (${pairBuys.length}B/${pairSells.length}S)${summaryMarker}`);
       if (st.buys > 0 || st.sells > 0) {
         const stPnlSign = st.pnl >= 0 ? '+' : '';
@@ -2469,7 +2502,11 @@ export class ComboManager {
 
     const pairLines: string[] = [];
     const countedBases = new Set<string>(); // avoid double-counting base currencies
-    for (const pair of this.config.pairs) {
+    // Сортировка: группа (0=активные, 1=замороженные, 2=deleted), внутри — PnL desc.
+    const statusSortedPairs = [...this.config.pairs].sort((a, b) =>
+      this.comparePairsForDisplay(a.symbol, b.symbol),
+    );
+    for (const pair of statusSortedPairs) {
       const sym = pair.symbol;
       const base = sym.split('/')[0];
       const held = allBalances[base];
@@ -2811,12 +2848,10 @@ export class ComboManager {
       });
     }
 
-    // Sort pairs by PnL descending (highest profit first, biggest loss last)
-    const pairsSorted = [...this.config.pairs].sort((a, b) => {
-      const pnlA = this.state.getPairStats(a.symbol).pnl;
-      const pnlB = this.state.getPairStats(b.symbol).pnl;
-      return pnlB - pnlA;
-    });
+    // Сортировка: группа (0=активные, 1=замороженные, 2=deleted), внутри группы — PnL desc.
+    const pairsSorted = [...this.config.pairs].sort((a, b) =>
+      this.comparePairsForDisplay(a.symbol, b.symbol),
+    );
 
     for (const pair of pairsSorted) {
       const s = this.state.getPairStats(pair.symbol);
