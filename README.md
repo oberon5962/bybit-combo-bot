@@ -713,15 +713,26 @@ USE_TESTNET=true
 # Разработка
 npm run dev
 
-# Или напрямую
+# Или напрямую (foreground, stdout в консоль)
 npx ts-node src/index.ts
 
-# Фоновый запуск
-npx ts-node src/index.ts > /dev/null 2>&1 &
+# Фоновый запуск (правильный способ — stdout в /dev/null, логи ведёт Winston)
+(npx ts-node src/index.ts > /dev/null 2>&1 &)
 
-# Мониторинг
-tail -f bot.log
+# Мониторинг (использовать glob — после ротации активный файл не всегда bot.log)
+tail -f bot*.log
 ```
+
+⚠️ **НЕ** запускать с `>> bot.log 2>&1` — shell-redirect дублирует всё в `bot.log` в обход Winston'овской ротации, `bot.log` растёт бесконечно, и появляются дубли логов между `bot.log` и `bot1.log`. Winston сам управляет файлами через File transport — stdout надо отправлять в `/dev/null`.
+
+### Остановка
+
+```bash
+taskkill //F //IM node.exe   # Windows (через git bash)
+rm -f bot.lock
+```
+
+Ордера на Bybit при остановке **не отменяются** — продолжают стоять. Бот подхватит их на следующем запуске через sync.ts.
 
 ### 4. Продакшен
 
@@ -757,11 +768,23 @@ npm start
 
 ## Логи
 
-- **bot.log** — полный лог (ротация 10MB x 5 файлов)
-- **errors.log** — только ошибки (5MB x 3 файла)
-- **console** — всё в реальном времени
+- **bot.log** — полный лог (ротация Winston'ом: 10MB × maxFiles=5)
+- **errors.log** — только ошибки (5MB × maxFiles=3)
+- **console** — всё в реальном времени (не редиректить в файл — сломает ротацию)
 
 Summary каждые 10 тиков: капитал, PnL, drawdown, trades, positions, market panic/BTC watchdog.
+
+### Ротация логов
+
+Winston автоматически ротирует файлы при превышении `maxsize`:
+1. `bot.log` достигает 10MB → **замораживается** как архив (не пишется дальше)
+2. Новые записи идут в `bot1.log` (создаётся автоматически)
+3. Когда `bot1.log` достигает 10MB → замораживается, новые в `bot2.log`, и так далее
+4. После `maxFiles=5` файлов самый старый (`bot5.log` или близкий) **удаляется** — на диске не больше 5 файлов.
+
+**Важно для мониторинга:**
+- Не диагностировать «hang» по свежести `bot.log` — может быть просто заморожен после ротации. Правильная проверка живости: `mtime bot-state.json` (обновляется каждый тик) **или** `grep "BOT SUMMARY ===" bot*.log | tail -1` (через glob, захватывает все файлы).
+- Не запускать бот с shell-redirect `>> bot.log` — сломает ротацию Winston (будут дубликаты + bot.log расти бесконечно). Правильный запуск: `(npx ts-node src/index.ts > /dev/null 2>&1 &)` — Winston сам ведёт файлы.
 
 ## Changelog
 

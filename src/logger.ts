@@ -6,6 +6,21 @@ import winston from 'winston';
 import { Logger as BotLogger } from './types';
 
 export function createLogger(level: string = 'info'): BotLogger {
+  // Выделяем File-транспорты в отдельные переменные — чтобы повесить listener
+  // на событие 'rotate' (Winston эмитит его при переполнении maxsize и переходе
+  // к следующему файлу bot1.log / bot2.log / ...). См. README «Ротация логов».
+  const botFileTransport = new winston.transports.File({
+    filename: 'bot.log',
+    maxsize: 10 * 1024 * 1024, // 10MB
+    maxFiles: 5,
+  });
+  const errorsFileTransport = new winston.transports.File({
+    filename: 'errors.log',
+    level: 'error',
+    maxsize: 5 * 1024 * 1024,
+    maxFiles: 3,
+  });
+
   const logger = winston.createLogger({
     level,
     format: winston.format.combine(
@@ -19,18 +34,19 @@ export function createLogger(level: string = 'info'): BotLogger {
     ),
     transports: [
       new winston.transports.Console(),
-      new winston.transports.File({
-        filename: 'bot.log',
-        maxsize: 10 * 1024 * 1024, // 10MB
-        maxFiles: 5,
-      }),
-      new winston.transports.File({
-        filename: 'errors.log',
-        level: 'error',
-        maxsize: 5 * 1024 * 1024,
-        maxFiles: 3,
-      }),
+      botFileTransport,
+      errorsFileTransport,
     ],
+  });
+
+  // Уведомление о ротации — срабатывает когда Winston переполнил текущий файл
+  // и перешёл на следующий (bot.log → bot1.log → bot2.log → ...). Запись пойдёт
+  // уже в НОВЫЙ файл (transport уже переключился). Редкое событие (~раз в 10 MB).
+  botFileTransport.on('rotate', (oldFilename: string, newFilename: string) => {
+    logger.info(`📋 LOG ROTATED: ${oldFilename} заморожен, новые записи в ${newFilename}`);
+  });
+  errorsFileTransport.on('rotate', (oldFilename: string, newFilename: string) => {
+    logger.info(`📋 ERRORS LOG ROTATED: ${oldFilename} → ${newFilename}`);
   });
 
   return {
