@@ -318,11 +318,13 @@ export class ExchangeSync {
                   level.originalPlannedSellPrice = counterPrice;
                   level.virtualNewSellPrice = undefined;
                   level.nextStepAt = undefined;
+                  level.sellSource = 'counter';
                 } else {
                   level.oldBreakEven = undefined;
                   level.originalPlannedSellPrice = undefined;
                   level.virtualNewSellPrice = undefined;
                   level.nextStepAt = undefined;
+                  level.sellSource = undefined;
                 }
               } else {
                 this.log.info(`[sync] ${symbol}: order ${level.orderId} at ${level.price} (${level.side}) was ${orderInfo.status} — removing from state`);

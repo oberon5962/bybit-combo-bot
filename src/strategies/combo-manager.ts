@@ -1559,14 +1559,12 @@ export class ComboManager {
       const summaryBase = sym.split('/')[0];
       const summaryFrozen = this.state.isBuyBlocked(summaryBase);
       const summarySellgrid = this.state.isSellGridActive(summaryBase);
-      // 🦺 N — сколько активных sell-уровней подняты до break-even (защита сработала).
-      // Условие: originalPlannedSellPrice < oldBreakEven — изначальная spacing-цена была ниже безубытка.
+      // 🦺 N — количество активных counter-sells (защита конкретных покупок break-even'ом).
+      // Condition: sellSource='counter' — реальные counter-sells, не ladder и не orphan.
       const raisedToBreakEven = sellLevels.filter(l =>
         !l.filled &&
         l.orderId &&
-        l.oldBreakEven !== undefined &&
-        l.originalPlannedSellPrice !== undefined &&
-        l.originalPlannedSellPrice < l.oldBreakEven,
+        l.sellSource === 'counter',
       ).length;
       const vestMarker = raisedToBreakEven > 0 ? ` 🦺${raisedToBreakEven}` : '';
       const summaryMarker = (summarySellgrid ? ' 🔻' : '') + (summaryFrozen ? ' 🧊' : '') + vestMarker;

@@ -303,8 +303,8 @@ export default {
 | Тип | Когда срабатывает | Что отменяется | Что пересоздаётся | Halving-meta |
 |-----|-------------------|----------------|-------------------|--------------|
 | **Auto-rebalance DOWN** (split) | drift >2% И цена упала, cooldown 5 мин прошёл | `cancelBuySide()` — **только buy-ордера** | **только buy-сторона** | Runtime halving **активируется** через `initCounterSellTrailing(currentPrice)` на всех counter-sells с anchors. Sell-ордера остаются висеть на высоких ценах |
-| **Auto-rebalance UP** | drift >2% И цена выросла, cooldown 5 мин прошёл | `cancelAllPreserveCounterSellMeta()` — **все** ордера | **обе стороны** с нуля вокруг новой цены | Anchors (`oldBreakEven`, `originalPlannedSellPrice`) сохраняются; runtime halving (`virtualNewSellPrice`, `nextStepAt`) сбрасывается |
-| **Force-rebalance** (`setGridCenterPrice(sym, 0)`) | см. «Триггеры» ниже | `cancelAllPreserveCounterSellMeta()` — **все** ордера | **обе стороны** от currentPrice как нового центра | Anchors сохраняются; runtime halving сбрасывается; halving **НЕ активируется** автоматически — стартует заново только при следующем split rebalance DOWN |
+| **Auto-rebalance UP** | drift >2% И цена выросла, cooldown 5 мин прошёл | `cancelAllPreserveCounterSellMeta()` — **все** ордера, preserve **только** counter-sells (sellSource='counter') | **обе стороны** с нуля вокруг новой цены. Ladder строится от `currentPrice + sellSpacing × i` | Counter-sell anchors сохраняются; runtime halving (`virtualNewSellPrice`, `nextStepAt`) сбрасывается |
+| **Force-rebalance** (`setGridCenterPrice(sym, 0)`) | см. «Триггеры» ниже | `cancelAllPreserveCounterSellMeta()` — **все** ордера, preserve **только** counter-sells | **обе стороны** от currentPrice. Preserved counter-sells сосуществуют с новым ladder'ом через fuzzy-проверку (слот пропускается, если в пределах 0.5×sellSpacing от preserved) | Halving **НЕ активируется** автоматически — стартует при следующем split rebalance DOWN |
 
 **Ключевые различия:**
 - **Auto-rebalance DOWN** — единственный механизм, который **активирует halving**. Только он трогает buy-сторону изолированно.
@@ -320,6 +320,22 @@ export default {
 6. **Telegram `/regrid`** — явная команда "построй grid заново"
 
 Механика force-rebalance: `setGridCenterPrice(sym, 0)` → на следующем тике `initGrid` видит `gridCenter <= 0` → пишет лог `Grid force-rebalance for X: center was reset` → `cancelAllPreserveCounterSellMeta()` → реинициализация сетки с `gridCenter = currentPrice`.
+
+### Типы sell-ордеров и их preserve-семантика
+
+Каждый sell-уровень в `GridLevelState` имеет поле `sellSource` — маркер источника, определяющий поведение при force-rebalance:
+
+| `sellSource` | Источник | `oldBreakEven` | Preserve? | Halving? |
+|--------------|----------|----------------|-----------|----------|
+| `'counter'` | Flip buy→sell при fill (конкретная покупка) | `actualPrice × (1 + minSellProfitPercent/100)` — break-even этой конкретной покупки | ✅ да | ✅ да (при split rebalance DOWN) |
+| `'orphan'` | Orphan-sell от free-balance SUI (не привязан к конкретному buy) | `avgEntryPrice × (1 + minSellProfitPercent/100)` — position-level | ❌ нет (ladder пересобирается) | ❌ нет |
+| `'initial'` | Initial-grid-sell (первичная сетка) | Position-level | ❌ нет | ❌ нет |
+| `undefined` | Legacy (pre-feature) | Детектируется эвристикой | Если `oldBreakEven` отличается от position-level на > 0.05% → `counter`; иначе `initial` | По классификации |
+
+**Зачем разделение:**
+Раньше все sells с `oldBreakEven` preserve'ились при force-rebalance — включая «синтетические» anchors от initial-grid-sell (все с одинаковым `oldBreakEven = avgEntry × 1.005`). Это приводило к **stuck ladder**: преэкзистинг sells на высоких ценах (с прошлых high-price дней) удерживали верх ладдера, новый ладдер строился выше них, а между currentPrice и старыми sells оставался большой gap.
+
+**После разделения:** preserve только настоящие counter-sells (от конкретных buy-fills). Ladder всегда строится от `currentPrice`, покрывая диапазон `currentPrice → currentPrice + sellSpacing × 20`. Старые synthetic-anchors не мешают.
 
 ### Auto-adaptive spacing
 

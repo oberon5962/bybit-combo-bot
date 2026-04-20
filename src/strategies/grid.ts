@@ -375,25 +375,25 @@ export class GridStrategy {
       levels.splice(0, excess);
       levels.sort((a, b) => a.price - b.price);
     }
-    if (existingSells.length === 0) {
-      // No preserved sells — build full sell ladder above currentPrice
-      for (let i = 1; i <= sellLevels; i++) {
-        const price = this.roundPriceForMarket(currentPrice + sellSpacing * i, precision.pricePrecision);
-        if (usedPrices.has(price)) continue;
-        usedPrices.add(price);
-        levels.push({ price, amount: 0, side: 'sell', filled: false });
-      }
-    } else if (existingSells.length < sellLevels) {
-      // Partial preserved sells — fill gap with new levels ABOVE the highest existing sell
-      const maxExistingSellPrice = Math.max(...existingSells.map(l => l.price));
-      const missing = sellLevels - existingSells.length;
-      for (let i = 1; i <= missing; i++) {
-        const price = this.roundPriceForMarket(maxExistingSellPrice + sellSpacing * i, precision.pricePrecision);
-        if (usedPrices.has(price)) continue;
-        usedPrices.add(price);
-        levels.push({ price, amount: 0, side: 'sell', filled: false });
-      }
-      this.log.info(`Grid fill missing sell-levels for ${symbol}: ${existingSells.length} preserved + ${missing} new = ${sellLevels} total`);
+    // Ladder ВСЕГДА строится от currentPrice (не от maxExistingSellPrice).
+    // Это исправляет «stuck ladder»: раньше при preserved sells на высоких ценах новый ладдер
+    // строился ВЫШЕ max preserved, игнорируя currentPrice → сетка застревала на старых ценах.
+    // Теперь preserved counter-sells естественно сосуществуют с ladder'ом через fuzzy-проверку
+    // (если preserved в пределах 0.5×sellSpacing от ladder-слота — слот считается занятым).
+    const fuzzyEpsilon = sellSpacing * 0.5;
+    let laddersPlaced = 0;
+    for (let i = 1; i <= sellLevels; i++) {
+      if (existingSells.length + laddersPlaced >= sellLevels) break;
+      const price = this.roundPriceForMarket(currentPrice + sellSpacing * i, precision.pricePrecision);
+      if (usedPrices.has(price)) continue;
+      // Fuzzy: не дублируем слот, если preserved уже рядом
+      if (existingSells.some(l => Math.abs(l.price - price) < fuzzyEpsilon)) continue;
+      usedPrices.add(price);
+      levels.push({ price, amount: 0, side: 'sell', filled: false, sellSource: 'initial' });
+      laddersPlaced++;
+    }
+    if (existingSells.length > 0) {
+      this.log.info(`Grid ladder from currentPrice for ${symbol}: ${existingSells.length} preserved counter-sells + ${laddersPlaced} new ladder = ${existingSells.length + laddersPlaced} total`);
     }
 
     levels.sort((a, b) => a.price - b.price);
@@ -557,10 +557,12 @@ export class GridStrategy {
             level.price = raised;
           }
         }
-        // Anchors для halving: сохраняем даже если уровень не counter-sell — halving будет работать единообразно.
+        // Anchors и маркер источника. sellSource='initial' означает position-level break-even anchor
+        // (не привязан к конкретной покупке). Preserve при force-rebalance игнорирует такие уровни.
         if (pos.avgEntryPrice > 0 && !level.oldBreakEven) {
           level.oldBreakEven = minSellPrice;
           level.originalPlannedSellPrice = originalLevelPrice;
+          if (!level.sellSource) level.sellSource = 'initial';
         }
         if (freeCrypto < amount) {
           const availableAmount = this.roundAmountForMarket(freeCrypto, precision.amountPrecision);
@@ -893,16 +895,19 @@ export class GridStrategy {
             // Counter-sell trailing anchors (used by halving at split rebalance DOWN):
             //   oldBreakEven              — цена конкретной покупки + minSellProfitPercent (нижняя граница halving)
             //   originalPlannedSellPrice  — ПЕРВОНАЧАЛЬНО рассчитанная (до подъёма до break-even) цена — верхняя точка отсчёта для halving
+            //   sellSource='counter'      — маркер: это counter-sell от конкретной покупки, preserve при force-rebalance
             if (counterSide === 'sell') {
               level.oldBreakEven = actualPrice * (1 + this.config.minSellProfitPercent / 100);
               level.originalPlannedSellPrice = originalCounterPrice;
               level.virtualNewSellPrice = undefined;
               level.nextStepAt = undefined;
+              level.sellSource = 'counter';
             } else {
               level.oldBreakEven = undefined;
               level.originalPlannedSellPrice = undefined;
               level.virtualNewSellPrice = undefined;
               level.nextStepAt = undefined;
+              level.sellSource = undefined;
             }
 
             decisions.push({
@@ -923,11 +928,13 @@ export class GridStrategy {
               level.originalPlannedSellPrice = originalCounterPrice;
               level.virtualNewSellPrice = undefined;
               level.nextStepAt = undefined;
+              level.sellSource = 'counter';
             } else {
               level.oldBreakEven = undefined;
               level.originalPlannedSellPrice = undefined;
               level.virtualNewSellPrice = undefined;
               level.nextStepAt = undefined;
+              level.sellSource = undefined;
             }
           }
 
@@ -940,11 +947,12 @@ export class GridStrategy {
               side: filledSide,
               orderId: undefined,
               filled: false,
-              // Наследуем counter-sell metadata для продолжения trailing
+              // Наследуем counter-sell metadata для продолжения trailing + sellSource для preserve-логики
               oldBreakEven: filledSide === 'sell' ? level.oldBreakEven : undefined,
               originalPlannedSellPrice: filledSide === 'sell' ? level.originalPlannedSellPrice : undefined,
               virtualNewSellPrice: filledSide === 'sell' ? level.virtualNewSellPrice : undefined,
               nextStepAt: filledSide === 'sell' ? level.nextStepAt : undefined,
+              sellSource: filledSide === 'sell' ? level.sellSource : undefined,
             };
             levels.push(remainingLevel);
             this.log.info(`Grid partial fill: added retry level for remaining ${orderInfo.remaining} ${filledSide} @ ${filledPrice}`, { symbol });
@@ -1037,8 +1045,8 @@ export class GridStrategy {
               () => this.exchange.createLimitSell(symbol, sellAmount, sellPrice, 'grid'),
               `Grid orphan-sell ${symbol} @ ${sellPrice}`,
             );
-            // Anchors для halving: сохраняем break-even и изначально запланированную (pricePrediction) цену.
-            // Halving при последующем split rebalance DOWN сможет двигать этот orphan-sell единообразно с counter-sell.
+            // Anchors для диагностики (halving не активируется на orphan-sells — sellSource !== 'counter').
+            // sellSource='orphan' — маркер: position-level break-even, НЕ preserve при force-rebalance.
             levels.push({
               price: sellPrice,
               amount: sellAmount,
@@ -1048,6 +1056,7 @@ export class GridStrategy {
               placedAt: Date.now(),
               oldBreakEven: breakEvenPrice,
               originalPlannedSellPrice: pricePrediction,
+              sellSource: 'orphan',
             });
             this.exchange.deductCachedBalance(base, sellAmount);
             orphanPlaced++;
@@ -1202,27 +1211,45 @@ export class GridStrategy {
   }
 
   /**
-   * Cancel all orders on exchange, but preserve sell-levels with counter-sell metadata
-   * (oldBreakEven, originalPlannedSellPrice) so trailing halving continues after rebuild.
-   * Used for force-rebalance and full-rebalance UP where we don't want to lose the
-   * protection window on counter-sells that haven't completed their descent yet.
+   * Cancel all orders on exchange, but preserve ТОЛЬКО counter-sells (sellSource='counter').
+   * Initial-grid-sells и orphan-sells НЕ preserve — они пересобираются от текущей цены.
+   * Это решает проблему «stuck ladder»: когда старые ladder-sells на высоких ценах
+   * застревают в state после падения цены и тянут новый ладдер вверх.
+   *
+   * Legacy-детект: для sells без sellSource (созданных до этой правки) считаем counter-sell,
+   * если oldBreakEven заметно отличается от position break-even (avgEntry × 1.005) —
+   * значит это не синтетический position-level anchor, а реальный от конкретной покупки.
    */
   private async cancelAllPreserveCounterSellMeta(symbol: string): Promise<void> {
     const levels = this.state.getGridLevels(symbol);
+    const pos = this.state.getPosition(symbol);
+    const positionBreakEven = pos.avgEntryPrice > 0
+      ? pos.avgEntryPrice * (1 + this.config.minSellProfitPercent / 100)
+      : 0;
+    const isRealCounterSell = (l: GridLevelState): boolean => {
+      if (l.side !== 'sell') return false;
+      if (l.sellSource === 'counter') return true;
+      if (l.sellSource === 'initial' || l.sellSource === 'orphan') return false;
+      // Legacy: без sellSource. Реальный counter-sell имеет oldBreakEven, отличающийся от position-level.
+      if (!l.oldBreakEven || positionBreakEven === 0) return false;
+      const epsilon = positionBreakEven * 0.0005; // 0.05% tolerance
+      return Math.abs(l.oldBreakEven - positionBreakEven) > epsilon;
+    };
     const preserved: GridLevelState[] = levels
-      .filter(l => l.side === 'sell' && l.oldBreakEven)
+      .filter(isRealCounterSell)
       .map(l => ({
         ...l,
         orderId: undefined,
         filled: false,
         virtualNewSellPrice: undefined,
         nextStepAt: undefined,
+        sellSource: 'counter' as const, // проставляем явный маркер для legacy
       }));
     await this.exchange.cancelAllOrders(symbol);
     this.state.setGridLevels(symbol, preserved);
     this.state.setGridInitialized(symbol, false);
     if (preserved.length > 0) {
-      this.log.info(`[grid] ${symbol}  preserved ${preserved.length} sell level(s) with counter-sell metadata across rebalance`);
+      this.log.info(`[grid] ${symbol}  preserved ${preserved.length} counter-sell level(s) across rebalance (ladder will rebuild from currentPrice)`);
     }
   }
 

@@ -24,6 +24,12 @@ export interface GridLevelState {
   orderId?: string;
   filled: boolean;
   placedAt?: number;     // timestamp когда ордер выставлен
+  // Источник sell-уровня (для правильного preserve при force-rebalance):
+  //   'counter' — counter-sell от конкретного buy-fill (oldBreakEven = actualPrice×1.005) — сохраняется halving
+  //   'orphan'  — orphan-sell от uncovered балансa (position-level break-even)
+  //   'initial' — initial-grid-sell из первичной сетки (position-level break-even)
+  //   undefined — legacy pre-sellSource-feature, детектируется через оригинальность oldBreakEven
+  sellSource?: 'counter' | 'orphan' | 'initial';
   // Counter-sell trailing (rebalance DOWN):
   oldBreakEven?: number;              // нижняя граница trailing (только для шага 2)
   originalPlannedSellPrice?: number;  // стартовая цена sell при создании counter-sell
