@@ -799,7 +799,7 @@ export class GridStrategy {
 
           // Counter-Sell Guard: не продавать ниже безубыточной цены.
           // Если counterPrice ниже break-even — ПОДНИМАЕМ до break-even, ордер всё равно ставим (не skip).
-          // originalCounterPrice сохраняется с ПЕРВОНАЧАЛЬНОЙ (до подъёма) цены — будет записана в originalPlannedSellPrice
+          // originalCounterPrice сохраняется с ПЕРВОНАЧАЛЬНОЙ (до подъёма/сдвига) цены — будет записана в originalPlannedSellPrice
           // для halving (осмысленный «старт сползания» от изначально запланированной spacing-цены).
           const originalCounterPrice = counterPrice;
           if (counterSide === 'sell') {
@@ -813,6 +813,67 @@ export class GridStrategy {
                 this.log.info(`Counter-sell raised to break-even: ${counterPrice} → ${raised} (spacing-price=${counterPrice}, avgEntry=${pos.avgEntryPrice.toFixed(6)}, break-even=${minSellPrice.toFixed(6)})`, { symbol });
                 counterPrice = raised;
               }
+            }
+          }
+
+          // Slot-collision avoidance — ПОСЛЕ Counter-Sell Guard (ловит и коллизии raise-to-break-even).
+          // Защищает от накопления дубликатов counter-ордеров на одной цене (3 buy @ 0.2477 кейс).
+          // Использует in-memory levels — без доп. запросов к Bybit (они уже свежие в этом тике).
+          {
+            const activeOrderCount = levels.filter(l => l.orderId && !l.filled).length;
+            const sideLimit = counterSide === 'sell' ? GRID_SELL_LEVELS : this.config.gridLevels;
+            const sideActive = levels.filter(l => l.side === counterSide && l.orderId && !l.filled).length;
+            // 1. Hard cap — если вся пара уже на лимите ордеров, не ставим (retire).
+            if (activeOrderCount >= this.maxOpenOrdersPerPair) {
+              this.log.warn(`Counter-${counterSide} skipped for ${symbol}: maxOpenOrdersPerPair=${this.maxOpenOrdersPerPair} reached (${activeOrderCount})`, { symbol });
+              level.side = counterSide;
+              level.orderId = undefined;
+              level.filled = false;
+              levelsChanged = true;
+              continue;
+            }
+            // 2. Side cap — если сторона counter-ордера переполнена, retire.
+            if (sideActive >= sideLimit) {
+              this.log.warn(`Counter-${counterSide} skipped for ${symbol}: ${counterSide}-side full (${sideActive}/${sideLimit})`, { symbol });
+              level.side = counterSide;
+              level.orderId = undefined;
+              level.filled = false;
+              levelsChanged = true;
+              continue;
+            }
+            // 3. Shift loop — fuzzy collision detection (0.5×spacing), сдвигаем в сторону spacing.
+            const priceBeforeShift = counterPrice;
+            const shiftDirection = counterSide === 'sell' ? 1 : -1;
+            const shiftMagnitude = Math.abs(filledPrice * (counterSide === 'sell' ? counterSellPct : counterBuyPct) / 100);
+            const fuzzyEpsilon = shiftMagnitude * 0.5;
+            const collidesWithActive = (p: number): boolean =>
+              levels.some(l =>
+                l !== level &&
+                l.side === counterSide &&
+                l.orderId &&
+                !l.filled &&
+                Math.abs(l.price - p) < fuzzyEpsilon,
+              );
+            let shifts = 0;
+            const MAX_SHIFTS = sideLimit;
+            while (collidesWithActive(counterPrice) && shifts < MAX_SHIFTS) {
+              counterPrice = this.roundPriceForMarket(
+                counterPrice + shiftDirection * shiftMagnitude,
+                precision.pricePrecision,
+              );
+              shifts++;
+            }
+            if (shifts > 0 && !collidesWithActive(counterPrice)) {
+              this.log.info(`Counter-${counterSide} shifted to free slot for ${symbol}: ${priceBeforeShift} → ${counterPrice} (shifts=${shifts}, original slot occupied)`, { symbol });
+            }
+            if (collidesWithActive(counterPrice)) {
+              // 4. Все слоты в пределах MAX_SHIFTS заняты — retire level, ждём освобождения
+              this.log.warn(`Counter-${counterSide} skipped for ${symbol}: no free slot within ${MAX_SHIFTS} spacings — ladder saturated near ${priceBeforeShift}`, { symbol });
+              level.side = counterSide;
+              level.orderId = undefined;
+              level.filled = false;
+              levelsChanged = true;
+              continue;
             }
           }
 
