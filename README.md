@@ -350,13 +350,38 @@ export default {
 **Pipeline при `priority: "auto"`** (одна транзакция внутри `runAutoSpacing()`):
 1. Загрузить свечи (72 API вызова Bybit, ~40 сек)
 2. Посчитать ATR%, перцентили, weighted spacing с `safetyMargin`
-3. Положить `newMap` в `autoSpacingMap` (память grid) → [combo-manager.ts:219](src/strategies/combo-manager.ts#L219)
-4. Определить `changedPairs` через `spacing.toFixed(2) !== cfgSpacing.toFixed(2)` [combo-manager.ts:229](src/strategies/combo-manager.ts#L229)
-5. Для каждой `changedPair`: записать новые значения в `config.jsonc` (функция `updatePairSpacingInConfig`) [combo-manager.ts:240](src/strategies/combo-manager.ts#L240)
-6. Обновить `lastConfigHash` (чтобы hot-reload не сработал повторно от собственной записи)
-7. Для каждой `changedPair`: вызвать `grid.forceRebalance(sym)` [combo-manager.ts:252](src/strategies/combo-manager.ts#L252)
-8. На следующем тике сетки этих пар пересобираются с новым spacing (см. таблицу «Force-rebalance» выше)
-9. Отправить итоговый отчёт в Telegram
+3. **Hybrid floor** (защита от низких значений при плоском рынке) [combo-manager.ts:185-211](src/strategies/combo-manager.ts#L185-L211):
+   - `buy = max(rawBuy, minSellProfitPercent / 2)` — мягкий floor (0.25% при дефолте). Защищает от слишком плотного buy-ladder (5 buy в 0.5% диапазоне).
+   - `sell = max(rawSell, minSellProfitPercent)` — жёсткий floor (0.5%). Гарантирует counter-sell markup минимум 0.5% = +0.3% net после fees.
+   - При срабатывании floor в лог добавляется аннотация `(too low X)` с raw-значением.
+4. Положить `newMap` в `autoSpacingMap` (память grid) → [combo-manager.ts:219](src/strategies/combo-manager.ts#L219)
+5. Определить `changedPairs` через `spacing.toFixed(2) !== cfgSpacing.toFixed(2)` [combo-manager.ts:229](src/strategies/combo-manager.ts#L229)
+6. Для каждой `changedPair`: записать новые значения в `config.jsonc` (функция `updatePairSpacingInConfig`) [combo-manager.ts:240](src/strategies/combo-manager.ts#L240)
+7. Обновить `lastConfigHash` (чтобы hot-reload не сработал повторно от собственной записи)
+8. Для каждой `changedPair`: вызвать `grid.forceRebalance(sym)` [combo-manager.ts:252](src/strategies/combo-manager.ts#L252)
+9. На следующем тике сетки этих пар пересобираются с новым spacing (см. таблицу «Force-rebalance» выше)
+10. Отправить итоговый отчёт в Telegram
+
+### Примеры лога auto-spacing с hybrid floor
+
+```
+# Штатный случай (все raw значения выше floor):
+  DOT/USDT:    auto=1.16%/1.66% cfg=1.16%/1.66% regime=norm [AUTO]
+  SOL/USDT:    auto=0.84%/1.34% cfg=0.84%/1.34% regime=norm [AUTO]
+
+# Sell floor сработал (raw sell был ниже 0.5%):
+  DOT/USDT:    auto=1.16%/0.50% (too low 0.10) cfg=1.16%/1.66% regime=norm [AUTO]
+
+# Оба floor сработали (raw buy < 0.25 и raw sell < 0.5):
+  SOL/USDT:    auto=0.25%/0.50% (too low buy=0.10 sell=0.10) cfg=0.84%/1.34% regime=norm [AUTO]
+
+# Только buy floor сработал (редкий случай — raw sell уже был выше 0.5):
+  ADA/USDT:    auto=0.25%/0.80% (too low buy=0.10) cfg=1.07%/1.57% regime=norm [AUTO]
+```
+
+**Математика profit на защищённых значениях** (buy=0.25, sell=0.5):
+- Counter-sell (buy@X×0.9975 → sell@X×0.9975×1.005 = X×1.00249): markup 0.5% → net **+0.3%** после fees
+- Full cycle (sell@X×1.005 → buy@X×0.9975 → back): distance 0.75% → net **+0.55%** после fees
 
 **Таймер и рестарт:**
 - Сравнение: `Date.now() - this.lastAutoSpacingRun >= autoSpacingIntervalMin * 60_000` [combo-manager.ts:347-348](src/strategies/combo-manager.ts#L347-L348)

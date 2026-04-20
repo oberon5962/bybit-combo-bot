@@ -5,14 +5,14 @@
   // gridSpacingPercent / gridSpacingSellPercent — опционально для каждой пары (иначе берётся из grid.gridSpacingPercent)
   // state — опционально: "freeze" | "freezebuy" | "sellgrid" | "unfreeze" (default). Синхронизируется с Telegram-командами и hot-reload.
   "pairs": [
-    { "symbol": "DOT/USDT",    "allocationPercent": 14, "gridSpacingPercent": 1.16, "gridSpacingSellPercent": 1.66, "state": "unfreeze" },
-    { "symbol": "NEAR/USDT",   "allocationPercent": 14, "gridSpacingPercent": 1.2, "gridSpacingSellPercent": 1.7, "state": "sellgrid" },
-    { "symbol": "ADA/USDT",    "allocationPercent": 14, "gridSpacingPercent": 1.07, "gridSpacingSellPercent": 1.57, "state": "unfreeze" },
-    { "symbol": "SUI/USDT",    "allocationPercent": 14, "gridSpacingPercent": 1.13,  "gridSpacingSellPercent": 1.63,  "state": "unfreeze" },
-    { "symbol": "SOL/USDT",    "allocationPercent": 14, "gridSpacingPercent": 0.84, "gridSpacingSellPercent": 1.34, "state": "unfreeze" },
-    { "symbol": "XRP/USDT",    "allocationPercent": 0, "gridSpacingPercent": 0.85,  "gridSpacingSellPercent": 1.35,  "state": "deleted" },
-    { "symbol": "AAVE/USDT",   "allocationPercent": 14, "gridSpacingPercent": 2.06, "gridSpacingSellPercent": 2.6, "state": "unfreeze" },
-    { "symbol": "RENDER/USDT", "allocationPercent": 14, "gridSpacingPercent": 1.22, "gridSpacingSellPercent": 1.72, "state": "sellgrid" }
+    { "symbol": "DOT/USDT",    "allocationPercent": 14, "gridSpacingPercent": 1.07, "gridSpacingSellPercent": 1.57, "state": "unfreeze" },
+    { "symbol": "NEAR/USDT",   "allocationPercent": 14, "gridSpacingPercent": 1.13, "gridSpacingSellPercent": 1.63, "state": "sellgrid" },
+    { "symbol": "ADA/USDT",    "allocationPercent": 14, "gridSpacingPercent": 1.04, "gridSpacingSellPercent": 1.54, "state": "unfreeze" },
+    { "symbol": "SUI/USDT",    "allocationPercent": 14, "gridSpacingPercent": 1.08,  "gridSpacingSellPercent": 1.58,  "state": "unfreeze" },
+    { "symbol": "SOL/USDT",    "allocationPercent": 14, "gridSpacingPercent": 0.82, "gridSpacingSellPercent": 1.32, "state": "unfreeze" },
+    { "symbol": "XRP/USDT",    "allocationPercent": 0, "gridSpacingPercent": 0.81,  "gridSpacingSellPercent": 1.31,  "state": "deleted" },
+    { "symbol": "AAVE/USDT",   "allocationPercent": 14, "gridSpacingPercent": 2.14, "gridSpacingSellPercent": 2.69, "state": "unfreeze" },
+    { "symbol": "RENDER/USDT", "allocationPercent": 14, "gridSpacingPercent": 1.17, "gridSpacingSellPercent": 1.67, "state": "sellgrid" }
   ],
 
   // ============================================================
@@ -136,8 +136,8 @@
     "sendSummary": true,                // Отправлять summary в Telegram
     "sendFills": true,                  // Уведомления о сделках
     "sendAlerts": true,                 // Алерты: SL/TP/halt/panic
-    "summaryIntervalTicks": 180,         // Summary в Telegram раз в summaryIntervalTicks тиков (~20 мин)
-    "logSummaryIntervalTicks": 15,      // Summary в bot.log раз в logSummaryIntervalTicks тиков (~2.5 мин)
+    "summaryIntervalTicks": 180,         // Summary в Telegram раз в summaryIntervalTicks тиков (~30 мин)
+    "logSummaryIntervalTicks": 60,      // Summary в bot.log раз в logSummaryIntervalTicks тиков (~10 мин)
     "commandPollIntervalTicks": 1,      // Проверять Telegram-команды каждый тик (~10с) — для плавного /buy wizard
     "confirmationTimeoutSec": 120        // Таймаут подтверждения команды в секундах (0 = без таймаута)
   },

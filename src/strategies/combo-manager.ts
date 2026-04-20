@@ -183,12 +183,17 @@ export class ComboManager {
       const regimeShort: Record<string, string> = { low: 'low ', normal: 'norm', high: 'high' };
 
       for (const r of results) {
-        let buy = volRound(r.buySpacing * safetyMultiplier, 2);
-        let sell = volRound(r.sellSpacing * safetyMultiplier, 2);
+        const rawBuy = volRound(r.buySpacing * safetyMultiplier, 2);
+        const rawSell = volRound(r.sellSpacing * safetyMultiplier, 2);
 
-        // Floor: never below minSellProfitPercent (covers fees + buffer)
-        buy = Math.max(buy, minSellProfitPct);
-        sell = volRound(Math.max(sell, buy + minSellProfitPct), 2);
+        // Hybrid floor (защита от низких значений auto-spacing при плоском рынке):
+        //   buy  >= minSellProfitPct / 2   (мягкий floor — не даёт плотного buy-ladder'а)
+        //   sell >= minSellProfitPct        (жёсткий floor — counter-sell markup >= 0.5% = +0.3% net после fees)
+        // Полный цикл profit (sell→buy→back) = buySpacing + sellSpacing >= 0.75% markup.
+        const buyFloor = minSellProfitPct / 2;
+        const sellFloor = minSellProfitPct;
+        const buy = Math.max(rawBuy, buyFloor);
+        const sell = volRound(Math.max(rawSell, sellFloor), 2);
 
         newMap.set(r.symbol, { buy, sell });
 
@@ -202,12 +207,20 @@ export class ComboManager {
         const cfgBuyStr = cfgBuy.toFixed(2);
         const cfgSellStr = cfgSell.toFixed(2);
 
+        // Аннотация если hybrid-floor сработал. Показываем raw значения которые были «too low».
+        const buyFloored = buy > rawBuy;
+        const sellFloored = sell > rawSell;
+        let floorNote = '';
+        if (buyFloored && sellFloored) floorNote = ` (too low buy=${rawBuy.toFixed(2)} sell=${rawSell.toFixed(2)})`;
+        else if (sellFloored) floorNote = ` (too low ${rawSell.toFixed(2)})`;
+        else if (buyFloored) floorNote = ` (too low buy=${rawBuy.toFixed(2)})`;
+
         const symPaddedLog = (r.symbol + ':').padEnd(maxSymLen + 2);
         const regLog = regimeShort[r.regime] ?? r.regime;
-        logLines.push(`  ${symPaddedLog}auto=${buyStr}%/${sellStr}% cfg=${cfgBuyStr}%/${cfgSellStr}% regime=${regLog} [${active}]`);
+        logLines.push(`  ${symPaddedLog}auto=${buyStr}%/${sellStr}%${floorNote} cfg=${cfgBuyStr}%/${cfgSellStr}% regime=${regLog} [${active}]`);
         const symPadded = (r.symbol + ':').padEnd(maxSymLen + 2);
         const reg = regimeShort[r.regime] ?? r.regime;
-        tgLines.push(`${symPadded}${buyStr}%/${sellStr}% (${reg})`);
+        tgLines.push(`${symPadded}${buyStr}%/${sellStr}%${floorNote} (${reg})`);
       }
 
       this.autoSpacingMap = newMap;
