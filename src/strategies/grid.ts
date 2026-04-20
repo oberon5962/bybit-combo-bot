@@ -375,16 +375,23 @@ export class GridStrategy {
       levels.splice(0, excess);
       levels.sort((a, b) => a.price - b.price);
     }
-    // Ladder ВСЕГДА строится от currentPrice (не от maxExistingSellPrice).
-    // Это исправляет «stuck ladder»: раньше при preserved sells на высоких ценах новый ладдер
-    // строился ВЫШЕ max preserved, игнорируя currentPrice → сетка застревала на старых ценах.
-    // Теперь preserved counter-sells естественно сосуществуют с ladder'ом через fuzzy-проверку
-    // (если preserved в пределах 0.5×sellSpacing от ladder-слота — слот считается занятым).
+    // Ladder строится от max(currentPrice, break-even), НЕ от maxExistingSellPrice.
+    // Две цели:
+    //   1. Исправить «stuck ladder»: раньше ладдер строился выше max preserved, застревая на старых ценах.
+    //   2. Не создавать слоты ниже break-even: raise-to-break-even (placeGridOrders) слепил бы их все
+    //      в одну цену, создавая 2-3 дубликата на break-even уровне (баг при currentPrice << avgEntry).
+    // Preserved counter-sells сосуществуют через fuzzy-проверку (если preserved в пределах 0.5×sellSpacing
+    // от ladder-слота — слот считается занятым).
+    const pos = this.state.getPosition(symbol);
+    const minSellPrice = pos.avgEntryPrice > 0
+      ? pos.avgEntryPrice * (1 + this.config.minSellProfitPercent / 100)
+      : 0;
+    const ladderStart = Math.max(currentPrice, minSellPrice);
     const fuzzyEpsilon = sellSpacing * 0.5;
     let laddersPlaced = 0;
     for (let i = 1; i <= sellLevels; i++) {
       if (existingSells.length + laddersPlaced >= sellLevels) break;
-      const price = this.roundPriceForMarket(currentPrice + sellSpacing * i, precision.pricePrecision);
+      const price = this.roundPriceForMarket(ladderStart + sellSpacing * i, precision.pricePrecision);
       if (usedPrices.has(price)) continue;
       // Fuzzy: не дублируем слот, если preserved уже рядом
       if (existingSells.some(l => Math.abs(l.price - price) < fuzzyEpsilon)) continue;
@@ -392,8 +399,8 @@ export class GridStrategy {
       levels.push({ price, amount: 0, side: 'sell', filled: false, sellSource: 'initial' });
       laddersPlaced++;
     }
-    if (existingSells.length > 0) {
-      this.log.info(`Grid ladder from currentPrice for ${symbol}: ${existingSells.length} preserved counter-sells + ${laddersPlaced} new ladder = ${existingSells.length + laddersPlaced} total`);
+    if (existingSells.length > 0 || minSellPrice > currentPrice) {
+      this.log.info(`Grid ladder for ${symbol}: start=${ladderStart.toFixed(6)} (max(currentPrice=${currentPrice.toFixed(6)}, break-even=${minSellPrice.toFixed(6)})) — ${existingSells.length} preserved counter-sells + ${laddersPlaced} new ladder = ${existingSells.length + laddersPlaced} total`);
     }
 
     levels.sort((a, b) => a.price - b.price);
