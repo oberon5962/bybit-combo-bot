@@ -210,7 +210,7 @@ function validateConfig(config: BotConfig): void {
     if (config.grid.rebalancePercent <= 0 || config.grid.rebalancePercent > 50) errors.push('grid.rebalancePercent must be between 0 and 50');
     if (config.grid.minSellProfitPercent <= 0 || config.grid.minSellProfitPercent > 5) errors.push('grid.minSellProfitPercent must be between 0 and 5 (typical 0.3)');
     if (config.grid.orphanSellMaxPerTick < 1 || config.grid.orphanSellMaxPerTick > 100) errors.push('grid.orphanSellMaxPerTick must be between 1 and 100');
-    if (config.grid.counterSellTrailStepHours > 72) errors.push('grid.counterSellTrailStepHours must be ≤ 72 (typical 4; 0 = no halving, just snap; <0 = trailing fully off)');
+    if (config.grid.counterSellTrailStepHours > 8760) errors.push('grid.counterSellTrailStepHours must be ≤ 8760 (typical 4; 0 = no halving, just snap; <0 = trailing fully off)');
     if (config.grid.rsiOverboughtThreshold < 50 || config.grid.rsiOverboughtThreshold > 100) {
       errors.push('grid.rsiOverboughtThreshold must be between 50 and 100');
     }
