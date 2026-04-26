@@ -38,6 +38,7 @@
 
 import ccxt from 'ccxt';
 import fs from 'fs';
+import path from 'path';
 import {
   type CandleFetcher,
   FEE_ROUND_TRIP_PCT,
@@ -49,6 +50,20 @@ import {
 // ── Config ──────────────────────────────────────────────────
 
 const SYMBOLS = ['DOT/USDT', 'NEAR/USDT', 'ADA/USDT', 'SUI/USDT', 'SOL/USDT', 'XRP/USDT'];
+
+// Читаем minSellProfitPercent из config.jsonc — для синхронизации с боевым ботом.
+// Если config недоступен или поле отсутствует — fallback на FEE_ROUND_TRIP_PCT (default 0.5).
+function loadMinSellProfitPercent(): number {
+  try {
+    const cfgPath = path.resolve(__dirname, 'config.jsonc');
+    const raw = fs.readFileSync(cfgPath, 'utf-8');
+    const stripped = raw.replace(/\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    const cfg = JSON.parse(stripped);
+    const v = cfg?.grid?.minSellProfitPercent;
+    if (typeof v === 'number' && v > 0) return v;
+  } catch { /* fall through */ }
+  return FEE_ROUND_TRIP_PCT;
+}
 
 // ── Main ────────────────────────────────────────────────────
 
@@ -73,13 +88,14 @@ async function main() {
   }
 
   const exchange = new ccxt.bybit({ options: { defaultType: 'spot' } });
+  const feeRoundTripPct = loadMinSellProfitPercent();
 
   console.log('Volatility Analyzer — grid spacing optimizer');
   console.log('='.repeat(60));
   console.log(`Пары: ${SYMBOLS.join(', ')}`);
   console.log(`Периоды: ${PERIODS.map(p => p.name).join(', ')}`);
   console.log(`Таймфреймы: ${TIMEFRAMES.map(t => t.tf).join(', ')}`);
-  console.log(`Комиссия round-trip: ${FEE_ROUND_TRIP_PCT}%`);
+  console.log(`Min gap buy↔sell (= config.grid.minSellProfitPercent): ${feeRoundTripPct}%`);
   console.log('');
 
   // CandleFetcher callback — адаптер ccxt → общий модуль
@@ -89,7 +105,7 @@ async function main() {
 
   const results = await analyzeAllSymbols(fetcher, SYMBOLS, (sym, done, total) => {
     if (done % 3 === 0) console.log(`  ${sym}... (${done}/${total})`);
-  });
+  }, feeRoundTripPct);
 
   // ── JSON output ──
   if (jsonMode) {
@@ -165,11 +181,11 @@ async function main() {
   console.log(`│ Пара         │ Цена      │ buySpacing │ sellSpacing │ Режим  │ Волат.ранг │ Маржа/цикл │`);
   console.log(`│──────────────│───────────│────────────│────────────│────────│────────────│────────────│`);
   for (const r of results) {
-    const margin = (r.sellSpacing - FEE_ROUND_TRIP_PCT).toFixed(2);
+    const margin = (r.sellSpacing - feeRoundTripPct).toFixed(2);
     console.log(`│ ${r.symbol.padEnd(12)} │ ${r.currentPrice.toFixed(4).padStart(9)} │    ${r.buySpacing.toFixed(2)}%    │    ${r.sellSpacing.toFixed(2)}%    │ ${r.regime.padEnd(6)} │     #${r.volatilityRank}      │   ~${margin}%     │`);
   }
   console.log('');
-  console.log(`Маржа/цикл = sellSpacing - комиссия (${FEE_ROUND_TRIP_PCT}%). Чистая прибыль с каждого buy→sell цикла.`);
+  console.log(`Маржа/цикл = sellSpacing - minSellProfitPercent (${feeRoundTripPct}%). Чистая прибыль с каждого buy→sell цикла.`);
   console.log('');
 
   // 5. Готовый JSON для config.jsonc

@@ -46,7 +46,14 @@
 //
 // Шаг 4. Safety margin и floor (в combo-manager.ts)
 //   buySpacing  × (1 − autoSpacingSafetyMarginPercent/100)
-//   floor: buy >= 0.3%, sell >= buy + 0.3%
+//   sellSpacing × (1 − autoSpacingSafetyMarginPercent/100)
+//   hybrid floor (применяется НЕЗАВИСИМО к buy и sell, после safety margin):
+//     buy  >= minSellProfitPercent / 2   (мягкий floor, например 0.375% при minSellProfit=0.75)
+//     sell >= minSellProfitPercent        (жёсткий floor, гарантирует counter-sell markup)
+//   ВНИМАНИЕ: инвариант recSellSpacing >= recBuySpacing + FEE_ROUND_TRIP_PCT гарантируется
+//   только per-набор внутри analyzeSymbol() и сохраняется через weighted average. После
+//   safetyMultiplier и hybrid floor он НЕ enforce'ится явно — теоретически разница
+//   sell-buy может стать меньше FEE_ROUND_TRIP_PCT при экстремально низкой волатильности.
 //
 // Шаг 5. Запись в config.jsonc (config-writer.ts)
 //   Атомарное обновление gridSpacingPercent/gridSpacingSellPercent для каждой пары.
@@ -57,7 +64,20 @@
 
 // ── Constants ──────────────────────────────────────────────
 
-export const FEE_ROUND_TRIP_PCT = 0.3; // Bybit spot round-trip: 0.1% buy + 0.1% sell + 0.1 запас
+// FEE_ROUND_TRIP_PCT — минимальный gap между recBuySpacing и recSellSpacing (в %).
+// Используется в analyzeSymbol(): recSellSpacing = max(P70, recBuy + feeRoundTripPct).
+// Семантика: чтобы один buy→counter-sell оборот покрыл fees round-trip + дал нужную прибыль.
+//
+// СВЯЗЬ С config.grid.minSellProfitPercent (формула 1:1):
+//   В рантайме combo-manager.runAutoSpacing() передаёт config.grid.minSellProfitPercent
+//   как feeRoundTripPct → minSellProfitPercent одновременно становится:
+//     - floor для sell в hybrid-floor ([combo-manager.ts:194])
+//     - минимальный gap recSell - recBuy в auto-spacing ([volatility.ts:237])
+//   Это гарантирует что counter-sell markup >= minSellProfitPercent (round-trip net = markup - 0.2% fees).
+//
+// Default 0.5 ниже — fallback для standalone скриптов (analyze-volatility.ts), которые
+// читают config.jsonc и передают актуальное minSellProfitPercent явно.
+export const FEE_ROUND_TRIP_PCT = 0.5;
 
 export const PERIODS = [
   { name: '24h', hours: 24 },

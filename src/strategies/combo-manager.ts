@@ -188,12 +188,14 @@ export class ComboManager {
 
         // Hybrid floor (защита от низких значений auto-spacing при плоском рынке):
         //   buy  >= minSellProfitPct / 2   (мягкий floor — не даёт плотного buy-ladder'а)
-        //   sell >= minSellProfitPct        (жёсткий floor — counter-sell markup >= 0.5% = +0.3% net после fees)
-        // Полный цикл profit (sell→buy→back) = buySpacing + sellSpacing >= 0.75% markup.
+        //   sell >= minSellProfitPct        (жёсткий floor — counter-sell markup >= minSellProfitPct = net после fees)
+        // Закрытие инварианта: sell >= buy + minSellProfitPct, чтобы full-cycle profit
+        // (sell→buy→back) гарантированно покрывал минимальный break-even gap.
         const buyFloor = minSellProfitPct / 2;
         const sellFloor = minSellProfitPct;
         const buy = Math.max(rawBuy, buyFloor);
-        const sell = volRound(Math.max(rawSell, sellFloor), 2);
+        const sellAfterFloor = Math.max(rawSell, sellFloor);
+        const sell = volRound(Math.max(sellAfterFloor, buy + minSellProfitPct), 2);
 
         newMap.set(r.symbol, { buy, sell });
 
@@ -267,12 +269,13 @@ export class ComboManager {
       }
 
       const margin = this.config.grid.autoSpacingSafetyMarginPercent;
-      this.log.info(`Auto-spacing done (${results.length} pairs, margin=${margin}%):\n${logLines.join('\n')}`);
+      const sigmas = this.config.grid.qtySigmas;
+      this.log.info(`Auto-spacing done (${results.length} pairs, margin=${margin}%, ${sigmas}σ):\n${logLines.join('\n')}`);
 
       // Telegram
       const priority = this.config.grid.autoSpacingPriority.toUpperCase();
       this.tg.sendAlert(
-        `📊 <b>Auto-spacing</b> (margin=${margin}%)\n\n` +
+        `📊 <b>Auto-spacing</b> (margin=${margin}%, ${sigmas}σ)\n\n` +
         `<pre>${tgLines.join('\n')}</pre>\n` +
         `Priority: <b>${priority}</b>`,
       );

@@ -201,10 +201,17 @@ export class GridStrategy {
       return { allowed: false, reason: 'overbought' };
     }
 
-    // Skip buy if EMA is bearish (fast < slow = downtrend)
-    // Note: emaCrossover only fires on the crossing candle; we check persistent state instead
+    // Skip buy if EMA is bearish (fast < slow = downtrend) — но с послаблениями.
+    // На bearish тренде разрешаем buy ТОЛЬКО если есть хотя бы один сигнал отскока:
+    //   - RSI < 45 (заметное смещение в нижнюю половину RSI = ослабление давления продаж), ИЛИ
+    //   - цена ниже BB middle (нижняя половина диапазона = bounce-зона)
+    // Иначе блок: тренд продолжается без признаков разворота, не ловим ножи.
     if (this.config.useEmaFilter && ind.emaFast < ind.emaSlow) {
-      return { allowed: false, reason: 'EMA bearish' };
+      const oversoldRsi = ind.rsi < 45;
+      const belowMidBand = ind.pricePosition === 'below_middle' || ind.pricePosition === 'below_lower';
+      if (!oversoldRsi && !belowMidBand) {
+        return { allowed: false, reason: `EMA bearish + RSI ${ind.rsi.toFixed(1)} >= 45 + price >= BB middle` };
+      }
     }
 
     return { allowed: true, reason: 'ok' };
