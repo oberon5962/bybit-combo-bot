@@ -5,14 +5,14 @@
   // gridSpacingPercent / gridSpacingSellPercent — опционально для каждой пары (иначе берётся из grid.gridSpacingPercent)
   // state — опционально: "freeze" | "freezebuy" | "sellgrid" | "unfreeze" (default). Синхронизируется с Telegram-командами и hot-reload.
   "pairs": [
-    { "symbol": "DOT/USDT",    "allocationPercent": 18, "gridSpacingPercent": 0.85, "gridSpacingSellPercent": 1.6, "state": "unfreeze" },
-    { "symbol": "NEAR/USDT",   "allocationPercent": 12, "gridSpacingPercent": 0.78, "gridSpacingSellPercent": 1.53, "state": "sellgrid" },
-    { "symbol": "ADA/USDT",    "allocationPercent": 14, "gridSpacingPercent": 0.77, "gridSpacingSellPercent": 1.52, "state": "unfreeze" },
-    { "symbol": "SUI/USDT",    "allocationPercent": 16, "gridSpacingPercent": 0.79,  "gridSpacingSellPercent": 1.54,  "state": "unfreeze" },
-    { "symbol": "SOL/USDT",    "allocationPercent": 13, "gridSpacingPercent": 0.59, "gridSpacingSellPercent": 1.34, "state": "unfreeze" },
-    { "symbol": "XRP/USDT",    "allocationPercent": 0, "gridSpacingPercent": 0.5,  "gridSpacingSellPercent": 1.25,  "state": "deleted" },
-    { "symbol": "AAVE/USDT",   "allocationPercent": 10, "gridSpacingPercent": 1.22, "gridSpacingSellPercent": 1.97, "state": "sellgrid" },
-    { "symbol": "RENDER/USDT", "allocationPercent": 12, "gridSpacingPercent": 1, "gridSpacingSellPercent": 1.75, "state": "sellgrid" }
+    { "symbol": "DOT/USDT",    "allocationPercent": 18, "gridSpacingPercent": 0.79, "gridSpacingSellPercent": 1.54, "state": "sellgrid" },
+    { "symbol": "NEAR/USDT",   "allocationPercent": 12, "gridSpacingPercent": 0.75, "gridSpacingSellPercent": 1.5, "state": "sellgrid" },
+    { "symbol": "ADA/USDT",    "allocationPercent": 14, "gridSpacingPercent": 0.69, "gridSpacingSellPercent": 1.44, "state": "sellgrid" },
+    { "symbol": "SUI/USDT",    "allocationPercent": 16, "gridSpacingPercent": 0.72,  "gridSpacingSellPercent": 1.47,  "state": "sellgrid" },
+    { "symbol": "SOL/USDT",    "allocationPercent": 13, "gridSpacingPercent": 0.63, "gridSpacingSellPercent": 1.38, "state": "sellgrid" },
+    { "symbol": "XRP/USDT",    "allocationPercent": 0, "gridSpacingPercent": 0.57,  "gridSpacingSellPercent": 1.32,  "state": "deleted" },
+    { "symbol": "AAVE/USDT",   "allocationPercent": 10, "gridSpacingPercent": 1.01, "gridSpacingSellPercent": 1.77, "state": "sellgrid" },
+    { "symbol": "RENDER/USDT", "allocationPercent": 12, "gridSpacingPercent": 0.88, "gridSpacingSellPercent": 1.63, "state": "sellgrid" }
   ],
 
   // ============================================================
@@ -38,7 +38,7 @@
     "gridSpacingPercent": 1.0,          // DEFAULT расстояние между BUY-уровнями (% от текущей цены при построении сетки). Fallback если пара не задаёт свой
     "gridSpacingSellPercent": 1.4,      // DEFAULT расстояние между SELL-уровнями (% от текущей цены при построении сетки). Fallback если пара не задаёт свой
     "orderSizePercent": 15,             // Размер ордера (% от аллокации пары)
-    "rebalancePercent": 2,              // Перестроить сетку если цена ушла >2% от центра
+    "rebalancePercent": 3,              // Перестроить сетку если цена ушла >2% от центра
     "rsiOverboughtThreshold": 75,       // Пропускаем grid-buy при RSI > 75 (поднято с 70 — на отскоках RSI часто 70-75) (100 = отключить)
     "useEmaFilter": true,              // true = блокировать buy при bearish EMA crossover
     "useBollingerAdaptive": true,       // Адаптивный grid по Bollinger Bands
