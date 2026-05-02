@@ -180,6 +180,10 @@ bybit-combo-bot/
 | `/unsellgrid` | Отключить sellgrid + разморозить buy (→ `unfreeze`) |
 | `/freeze` | Полная заморозка пары: отменить все ордера (buy и sell), прекратить grid/DCA/meta. SL/TP/TSL продолжают работать. Маркер 🧊❄️ |
 | `/unfreeze` | Полная разморозка пары (grid/DCA/meta возобновляются) + force-rebalance |
+| `/freezeall` | Полная заморозка ВСЕХ пар сразу (кроме удалённых). Требует подтверждения (Yes/No) |
+| `/unfreezeall` | Полная разморозка ВСЕХ замороженных пар. Требует подтверждения (Yes/No) |
+| `/sellgridall` | Включить sellgrid для ВСЕХ пар (кроме замороженных, удалённых, уже в sellgrid). Требует подтверждения (Yes/No) |
+| `/unsellgridall` | Отключить sellgrid для ВСЕХ пар в sellgrid-режиме. Требует подтверждения (Yes/No) |
 | `/addtoken` | Добавить новую валюту в торговлю (wizard с вводом тикера и аллокации) |
 | `/removetoken` | Удалить валюту из торговли (переводит в `deleted`, при `auto` режиме пересчитывает аллокации) |
 
@@ -1247,6 +1251,29 @@ Per-pair state control, bidirectional config sync, RSI/EMA/BB в summary, фик
 **README:**
 - Добавлена секция «Состояния пар» с описанием всех состояний (`unfreeze`, `freezebuy`, `sellgrid`, `freeze`, `deleted`) и правилами авто-переходов
 - Расширена таблица Telegram-команд: добавлены `/addtoken`, `/removetoken`, уточнено поведение `/buy` и `/regrid`
+
+### v2.6.0 (2026-05-02)
+
+Массовые Telegram-команды, wizard-меню для freeze/unfreeze/removetoken.
+
+**Массовые команды `/freezeall` / `/unfreezeall` / `/sellgridall` / `/unsellgridall`:**
+- `/freezeall` — полная заморозка ВСЕХ активных пар (кроме удалённых). Отменяет все ордера, блокирует grid/DCA/meta
+- `/unfreezeall` — полная разморозка ВСЕХ замороженных пар + force-rebalance для каждой
+- `/sellgridall` — включает sellgrid для ВСЕХ пар (кроме замороженных, удалённых, уже в sellgrid). Buy замораживаются
+- `/unsellgridall` — отключает sellgrid для ВСЕХ пар в sellgrid-режиме. Покупки размораживаются, сетка пересобирается
+- Все массовые команды требуют подтверждения (inline-кнопки Yes/No) с показом списка затронутых пар
+- `needsConfirm` — единый массив команд с подтверждением (batch + single-pair + wizard)
+- Массовые команды атомарны: `applyPairState` с `writeConfig=false` для каждой пары, затем `updatePairStateInConfig` + `lastConfigHash` один раз
+- Безопасная итерация: копия массива через spread `[...this.state.getSellGridBases()]` для избежания мутации при `removeSellGridBase`
+
+**Wizard inline-меню:**
+- `/freeze` без аргументов — показывает inline-кнопки со всеми активными парами (не замороженными)
+- `/unfreeze` без аргументов — показывает inline-кнопки со всеми замороженными парами
+- `/removetoken` без аргументов — показывает inline-кнопки со всеми парами (кроме удалённых)
+- Callback-data: `freezefullmenu:BASE`, `unfreezefullmenu:BASE`, `removetokenmenu:BASE`
+
+**Фиксы:**
+- Default case (неизвестная команда): обновлённый список всех поддерживаемых команд в сообщении-подсказке
 - Новая подсекция «Поведение `/freeze` и `/buy` на замороженной паре»
 
 ### v2.5.0 (2026-04-19)

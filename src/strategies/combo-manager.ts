@@ -1675,7 +1675,7 @@ export class ComboManager {
       this.log.info(`Telegram command: /${cmd.command} ${cmd.args}${cmd.confirmed ? ' [confirmed]' : ''}`);
       try {
         // Commands requiring confirmation: stop, sellall, buy
-        const needsConfirm = ['stop', 'sellall', 'buy', 'cancelorders', 'regrid', 'freezebuy', 'unfreezebuy', 'sellgrid', 'unsellgrid', 'freeze', 'unfreeze', 'addtoken', 'removetoken'].includes(cmd.command);
+        const needsConfirm = ['stop', 'sellall', 'buy', 'cancelorders', 'regrid', 'freezebuy', 'unfreezebuy', 'sellgrid', 'unsellgrid', 'freeze', 'unfreeze', 'freezeall', 'unfreezeall', 'sellgridall', 'unsellgridall', 'addtoken', 'removetoken'].includes(cmd.command);
 
         // /freezebuy: empty args → wizard, unknown currency → reject
         if (cmd.command === 'freezebuy' && !cmd.confirmed) {
@@ -1728,6 +1728,93 @@ export class ComboManager {
             continue;
           }
         }
+        // /freezeall: show confirmation with list of pairs to freeze
+        if (cmd.command === 'freezeall' && !cmd.confirmed) {
+          const currencies = this.collectBuyMenuCurrencies();
+          if (currencies.length === 0) {
+            this.tg.sendReply('Нет активных пар для заморозки.');
+            continue;
+          }
+          const frozen = this.state.getFrozenPairs();
+          const toFreeze = currencies.filter(c => !frozen.includes(c));
+          if (toFreeze.length === 0) {
+            this.tg.sendReply('Все пары уже заморожены.');
+            continue;
+          }
+          this.tg.sendConfirmation(
+            `🧊 Заморозить ВСЕ пары (${toFreeze.length} шт: ${toFreeze.join(', ')})?\nВсе ордера (buy + sell) будут отменены.`,
+            `freezeall`
+          );
+          continue;
+        }
+        // /unfreezeall: show confirmation with list of frozen pairs
+        if (cmd.command === 'unfreezeall' && !cmd.confirmed) {
+          const frozen = this.state.getFrozenPairs();
+          if (frozen.length === 0) {
+            this.tg.sendReply('Нет замороженных пар.');
+            continue;
+          }
+          this.tg.sendConfirmation(
+            `✅ Разморозить ВСЕ пары (${frozen.length} шт: ${frozen.join(', ')})?`,
+            `unfreezeall`
+          );
+          continue;
+        }
+        // /sellgridall: show confirmation with list of pairs to enable sellgrid
+        if (cmd.command === 'sellgridall' && !cmd.confirmed) {
+          const currencies = this.collectBuyMenuCurrencies();
+          const frozen = this.state.getFrozenPairs();
+          const sellGrid = this.state.getSellGridBases();
+          const toSellGrid = currencies.filter(c => !frozen.includes(c) && !sellGrid.includes(c));
+          if (toSellGrid.length === 0) {
+            this.tg.sendReply('Нет пар для sellgrid (все заморожены, удалены или уже в sellgrid).');
+            continue;
+          }
+          this.tg.sendConfirmation(
+            `🔻 Включить sellgrid для ВСЕХ пар (${toSellGrid.length} шт: ${toSellGrid.join(', ')})?\nBuy заморозятся, активны только продажи.`,
+            `sellgridall`
+          );
+          continue;
+        }
+        // /unsellgridall: show confirmation with list of sellgrid pairs
+        if (cmd.command === 'unsellgridall' && !cmd.confirmed) {
+          const sellGrid = this.state.getSellGridBases();
+          if (sellGrid.length === 0) {
+            this.tg.sendReply('Нет пар в sellgrid-режиме.');
+            continue;
+          }
+          this.tg.sendConfirmation(
+            `✅ Отключить sellgrid для ВСЕХ пар (${sellGrid.length} шт: ${sellGrid.join(', ')})?\nПокупки разморожены, сетка пересоберётся.`,
+            `unsellgridall`
+          );
+          continue;
+        }
+        // /freeze: empty args → wizard with buttons
+        if (cmd.command === 'freeze' && !cmd.confirmed) {
+          const arg = cmd.args.trim().toUpperCase();
+          if (!arg) {
+            const currencies = this.collectBuyMenuCurrencies();
+            this.tg.sendFreezeFullMenu(currencies, this.state.getFrozenPairs());
+            continue;
+          }
+          if (!this.collectBuyMenuCurrencies().includes(arg)) {
+            this.log.warn(`/freeze rejected: unknown currency ${arg}`);
+            this.tg.sendReply(`❌ Валюта ${arg} не найдена в торгуемых парах. Доступны: ${this.collectBuyMenuCurrencies().join(', ')}`);
+            continue;
+          }
+        }
+        // /unfreeze: empty args → wizard with buttons (only frozen)
+        if (cmd.command === 'unfreeze' && !cmd.confirmed) {
+          const arg = cmd.args.trim().toUpperCase();
+          if (!arg) {
+            this.tg.sendUnfreezeFullMenu(this.state.getFrozenPairs());
+            continue;
+          }
+          if (!this.state.isPairFrozen(arg)) {
+            this.tg.sendReply(`Валюта ${arg} не заморожена полностью.`);
+            continue;
+          }
+        }
         // /addtoken: empty args → ask to type token name; with args → show state selection
         if (cmd.command === 'addtoken' && !cmd.confirmed) {
           const arg = cmd.args.trim().toUpperCase().replace('/USDT', '');
@@ -1743,12 +1830,13 @@ export class ComboManager {
           this.tg.sendAddTokenStateMenu(symbol);
           continue;
         }
-        // /removetoken: empty args → show list of active pairs; with args → confirmation
+        // /removetoken: empty args → wizard with buttons; with args → confirmation
         if (cmd.command === 'removetoken' && !cmd.confirmed) {
           const arg = cmd.args.trim().toUpperCase().replace('/USDT', '');
           if (!arg) {
-            const activePairs = this.config.pairs.filter(p => p.state !== 'deleted').map(p => p.symbol.split('/')[0]);
-            this.tg.sendReply(`🗑 Укажи токен для удаления:\n/removetoken SYMBOL\n\nАктивные пары: ${activePairs.join(', ')}`);
+            const allBases = this.config.pairs.map(p => p.symbol.split('/')[0]);
+            const deletedBases = this.config.pairs.filter(p => p.state === 'deleted' || this.state.isPairDeleted(p.symbol)).map(p => p.symbol.split('/')[0]);
+            this.tg.sendRemoveTokenMenu(allBases, deletedBases);
             continue;
           }
           const symbol = `${arg}/USDT`;
@@ -1920,12 +2008,122 @@ export class ComboManager {
             this.tg.sendConfirmation(`✅ Отключить sellgrid для ${base} и разморозить buy?`, `unsellgrid:${base}`);
             break;
           }
+          case '_removetokenmenu': {
+            const rtBase = cmd.args.toUpperCase();
+            const rtSymbol = `${rtBase}/USDT`;
+            const rtPair = this.config.pairs.find(p => p.symbol === rtSymbol);
+            if (!rtPair) {
+              this.tg.sendReply(`❌ Пара ${rtSymbol} не найдена.`);
+              break;
+            }
+            if (rtPair.state === 'deleted' || this.state.isPairDeleted(rtSymbol)) {
+              this.tg.sendReply(`${rtSymbol} уже помечена как deleted.`);
+              break;
+            }
+            this.tg.sendConfirmation(`🗑 Удалить пару ${rtSymbol}? Все ордера будут отменены. Торговля остановлена навсегда (state=deleted).`, `removetoken:${rtBase}`);
+            break;
+          }
+          case '_freezefullmenu': {
+            const fBase = cmd.args.toUpperCase();
+            if (this.state.isPairFrozen(fBase)) {
+              this.tg.sendReply(`${fBase} уже полностью заморожен. Используй /unfreeze ${fBase}.`);
+            } else {
+              this.tg.sendConfirmation(`🧊 Полностью заморозить ${fBase}? Все ордера (buy + sell) будут отменены.`, `freeze:${fBase}`);
+            }
+            break;
+          }
+          case '_unfreezefullmenu': {
+            const uBase = cmd.args.toUpperCase();
+            if (!this.state.isPairFrozen(uBase)) {
+              this.tg.sendReply(`${uBase} не заморожен полностью.`);
+            } else {
+              this.tg.sendConfirmation(`✅ Разморозить ${uBase}? Торговля возобновится в следующем тике.`, `unfreeze:${uBase}`);
+            }
+            break;
+          }
           case 'freeze':
             await this.cmdFreeze(cmd.args.trim().toUpperCase());
             break;
           case 'unfreeze':
             await this.cmdUnfreeze(cmd.args.trim().toUpperCase());
             break;
+          case 'freezeall': {
+            const currencies = this.collectBuyMenuCurrencies();
+            const frozenBases = this.state.getFrozenPairs();
+            const toFreeze = currencies.filter(c => !frozenBases.includes(c));
+            const configPath = resolve(__dirname, '../../config.jsonc');
+            let count = 0;
+            for (const base of toFreeze) {
+              await this.applyPairState(base, 'freeze', false);
+              const mainPair = this.config.pairs.find(p => p.symbol.split('/')[0] === base);
+              const mainSymbol = mainPair?.symbol ?? `${base}/USDT`;
+              try { updatePairStateInConfig(configPath, mainSymbol, 'freeze'); } catch (e) { this.log.warn(`freezeall config-writer ${mainSymbol}: ${sanitizeError(e)}`); }
+              count++;
+            }
+            if (count > 0) {
+              this.lastConfigHash = createHash('md5').update(readFileSync(configPath, 'utf-8')).digest('hex');
+            }
+            this.tg.sendReply(`🧊 Заморожено пар: ${count}`);
+            this.log.info(`/freezeall: frozen ${count} pairs`);
+            break;
+          }
+          case 'unfreezeall': {
+            const frozenAll = [...this.state.getFrozenPairs()];
+            const configPath = resolve(__dirname, '../../config.jsonc');
+            let count = 0;
+            for (const base of frozenAll) {
+              await this.applyPairState(base, 'unfreeze', false);
+              const mainPair = this.config.pairs.find(p => p.symbol.split('/')[0] === base);
+              const mainSymbol = mainPair?.symbol ?? `${base}/USDT`;
+              try { updatePairStateInConfig(configPath, mainSymbol, 'unfreeze'); } catch (e) { this.log.warn(`unfreezeall config-writer ${mainSymbol}: ${sanitizeError(e)}`); }
+              count++;
+            }
+            if (count > 0) {
+              this.lastConfigHash = createHash('md5').update(readFileSync(configPath, 'utf-8')).digest('hex');
+            }
+            this.tg.sendReply(`✅ Разморожено пар: ${count}`);
+            this.log.info(`/unfreezeall: unfrozen ${count} pairs`);
+            break;
+          }
+          case 'sellgridall': {
+            const currencies = this.collectBuyMenuCurrencies();
+            const frozenBases = this.state.getFrozenPairs();
+            const sellGridBases = this.state.getSellGridBases();
+            const toSellGrid = currencies.filter(c => !frozenBases.includes(c) && !sellGridBases.includes(c));
+            const configPath = resolve(__dirname, '../../config.jsonc');
+            let count = 0;
+            for (const base of toSellGrid) {
+              await this.applyPairState(base, 'sellgrid', false);
+              const mainPair = this.config.pairs.find(p => p.symbol.split('/')[0] === base);
+              const mainSymbol = mainPair?.symbol ?? `${base}/USDT`;
+              try { updatePairStateInConfig(configPath, mainSymbol, 'sellgrid'); } catch (e) { this.log.warn(`sellgridall config-writer ${mainSymbol}: ${sanitizeError(e)}`); }
+              count++;
+            }
+            if (count > 0) {
+              this.lastConfigHash = createHash('md5').update(readFileSync(configPath, 'utf-8')).digest('hex');
+            }
+            this.tg.sendReply(`🔻 Sellgrid включён для ${count} пар`);
+            this.log.info(`/sellgridall: sellgrid enabled for ${count} pairs`);
+            break;
+          }
+          case 'unsellgridall': {
+            const sellGridAll = [...this.state.getSellGridBases()];
+            const configPath = resolve(__dirname, '../../config.jsonc');
+            let count = 0;
+            for (const base of sellGridAll) {
+              await this.applyPairState(base, 'unfreeze', false);
+              const mainPair = this.config.pairs.find(p => p.symbol.split('/')[0] === base);
+              const mainSymbol = mainPair?.symbol ?? `${base}/USDT`;
+              try { updatePairStateInConfig(configPath, mainSymbol, 'unfreeze'); } catch (e) { this.log.warn(`unsellgridall config-writer ${mainSymbol}: ${sanitizeError(e)}`); }
+              count++;
+            }
+            if (count > 0) {
+              this.lastConfigHash = createHash('md5').update(readFileSync(configPath, 'utf-8')).digest('hex');
+            }
+            this.tg.sendReply(`✅ Sellgrid отключён для ${count} пар. Покупки разморожены, сетка пересоберётся.`);
+            this.log.info(`/unsellgridall: sellgrid disabled for ${count} pairs`);
+            break;
+          }
           case '_addtokenstate': {
             // args = "DOT/USDT:unfreeze" or "DOT/USDT:freeze"
             const lastColon = cmd.args.lastIndexOf(':');
@@ -1942,7 +2140,7 @@ export class ComboManager {
             await this.cmdRemoveToken(cmd.args.trim().toUpperCase().replace('/USDT', ''));
             break;
           default:
-            this.tg.sendReply(`Неизвестная команда /${cmd.command}\nДоступные: /start /status /stop /run /sellall /buy /orders /cancelorders /stats /regrid /freezebuy /unfreezebuy /sellgrid /unsellgrid /freeze /unfreeze /addtoken /removetoken`);
+            this.tg.sendReply(`Неизвестная команда /${cmd.command}\nДоступные: /start /status /stop /run /sellall /buy /orders /cancelorders /stats /regrid /freezebuy /unfreezebuy /sellgrid /unsellgrid /freeze /unfreeze /freezeall /unfreezeall /sellgridall /unsellgridall /addtoken /removetoken`);
         }
       } catch (err) {
         this.log.error(`Telegram command /${cmd.command} failed: ${sanitizeError(err)}`);
@@ -2477,12 +2675,16 @@ export class ComboManager {
       '<b>🧊 Заморозка:</b>',
       '/freezebuy — заморозить покупки по валюте',
       '/unfreezebuy — разморозить покупки',
-      '/freeze — заморозить всё (только SL/TP работают)',
-      '/unfreeze — полностью разморозить',
+      '/freeze — заморозить всё по валюте (только SL/TP работают)',
+      '/unfreeze — полностью разморозить по валюте',
+      '/freezeall — заморозить ВСЕ пары',
+      '/unfreezeall — разморозить ВСЕ пары',
       '',
       '<b>🔻 Распродажа по торговой сетке без покупки новой:</b>',
       '/sellgrid — продавать по торговой сетке + freezebuy',
       '/unsellgrid — отключить sellgrid + unfreezebuy',
+      '/sellgridall — включить sellgrid для ВСЕХ пар',
+      '/unsellgridall — отключить sellgrid для ВСЕХ пар',
       '',
       '<b>⚙️ Управление:</b>',
       '/stop — остановить торговлю',

@@ -200,6 +200,66 @@ export class TelegramNotifier {
     this.sendRaw(payload);
   }
 
+  /** Send /removetoken currency menu. deleted[] marks already-deleted bases with 🗑 icon. */
+  sendRemoveTokenMenu(currencies: string[], deleted: string[]): void {
+    if (!this.config.enabled) return;
+    const delSet = new Set(deleted.map(c => c.toUpperCase()));
+    const buttons: Array<Array<{ text: string; callback_data: string }>> = [];
+    for (let i = 0; i < currencies.length; i += 4) {
+      buttons.push(currencies.slice(i, i + 4).map(c => ({
+        text: delSet.has(c.toUpperCase()) ? `${c} 🗑` : c,
+        callback_data: `removetokenmenu:${c}`,
+      })));
+    }
+    buttons.push([{ text: '❌ Отмена', callback_data: 'cancel' }]);
+    const payload = JSON.stringify({
+      chat_id: this.config.chatId,
+      text: '🗑 Выбери валюту для удаления:',
+      reply_markup: { inline_keyboard: buttons },
+    });
+    this.sendRaw(payload);
+  }
+
+  /** Send /freeze currency menu. frozen[] marks already-frozen bases with 🧊 icon. */
+  sendFreezeFullMenu(currencies: string[], frozen: string[]): void {
+    if (!this.config.enabled) return;
+    const fzSet = new Set(frozen.map(c => c.toUpperCase()));
+    const buttons: Array<Array<{ text: string; callback_data: string }>> = [];
+    for (let i = 0; i < currencies.length; i += 4) {
+      buttons.push(currencies.slice(i, i + 4).map(c => ({
+        text: fzSet.has(c.toUpperCase()) ? `${c} 🧊` : c,
+        callback_data: `freezefullmenu:${c}`,
+      })));
+    }
+    buttons.push([{ text: '❌ Отмена', callback_data: 'cancel' }]);
+    const payload = JSON.stringify({
+      chat_id: this.config.chatId,
+      text: '🧊 Выбери валюту для полной заморозки (buy + sell):',
+      reply_markup: { inline_keyboard: buttons },
+    });
+    this.sendRaw(payload);
+  }
+
+  /** Send /unfreeze currency menu — only frozen currencies. */
+  sendUnfreezeFullMenu(frozen: string[]): void {
+    if (!this.config.enabled) return;
+    if (frozen.length === 0) {
+      this.sendReply('Нет полностью замороженных валют.');
+      return;
+    }
+    const buttons: Array<Array<{ text: string; callback_data: string }>> = [];
+    for (let i = 0; i < frozen.length; i += 4) {
+      buttons.push(frozen.slice(i, i + 4).map(c => ({ text: c, callback_data: `unfreezefullmenu:${c}` })));
+    }
+    buttons.push([{ text: '❌ Отмена', callback_data: 'cancel' }]);
+    const payload = JSON.stringify({
+      chat_id: this.config.chatId,
+      text: '✅ Выбери валюту для полной разморозки:',
+      reply_markup: { inline_keyboard: buttons },
+    });
+    this.sendRaw(payload);
+  }
+
   /** Send /addtoken state selection menu: start trading (unfreeze) or freeze */
   sendAddTokenStateMenu(symbol: string): void {
     if (!this.config.enabled) return;
@@ -338,6 +398,18 @@ export class TelegramNotifier {
             commands.push({ command: '_unsellgridmenu', args: data.substring('unsellgridmenu:'.length), chatId: cbChatId, messageId: cb.message?.message_id ?? 0, confirmed: true });
             continue;
           }
+          if (data.startsWith('removetokenmenu:')) {
+            commands.push({ command: '_removetokenmenu', args: data.substring('removetokenmenu:'.length), chatId: cbChatId, messageId: cb.message?.message_id ?? 0, confirmed: true });
+            continue;
+          }
+          if (data.startsWith('freezefullmenu:')) {
+            commands.push({ command: '_freezefullmenu', args: data.substring('freezefullmenu:'.length), chatId: cbChatId, messageId: cb.message?.message_id ?? 0, confirmed: true });
+            continue;
+          }
+          if (data.startsWith('unfreezefullmenu:')) {
+            commands.push({ command: '_unfreezefullmenu', args: data.substring('unfreezefullmenu:'.length), chatId: cbChatId, messageId: cb.message?.message_id ?? 0, confirmed: true });
+            continue;
+          }
           if (data.startsWith('addtokenstate:')) {
             // args = "SYMBOL:state" e.g. "DOT/USDT:unfreeze"
             commands.push({ command: '_addtokenstate', args: data.substring('addtokenstate:'.length), chatId: cbChatId, messageId: cb.message?.message_id ?? 0, confirmed: true });
@@ -428,6 +500,12 @@ export class TelegramNotifier {
       { command: 'cancelorders', description: 'Отменить все ордера + остановить бота' },
       { command: 'buy', description: 'Купить кол-во валюты за USDT: /buy SUI USDT 10' },
       { command: 'sellall', description: 'Продать всё + cancelorders' },
+      { command: 'freeze', description: 'Полная заморозка пары: /freeze DOT' },
+      { command: 'unfreeze', description: 'Полная разморозка пары: /unfreeze DOT' },
+      { command: 'freezeall', description: 'Заморозить ВСЕ пары' },
+      { command: 'unfreezeall', description: 'Разморозить ВСЕ пары' },
+      { command: 'sellgridall', description: 'Включить sellgrid для ВСЕХ пар' },
+      { command: 'unsellgridall', description: 'Отключить sellgrid для ВСЕХ пар' },
       { command: 'addtoken', description: 'Добавить торговую пару: /addtoken SOL' },
       { command: 'removetoken', description: 'Удалить торговую пару: /removetoken SOL' }
     ];
